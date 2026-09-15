@@ -4,7 +4,10 @@ import { ZodError } from "zod";
 import { ContextItemService, ContextSourceService, EvidenceSnapshotService } from "../../../packages/application/src/core/context-services.js";
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
 import { RuleService } from "../../../packages/application/src/core/rule-service.js";
+import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
+import { CodexAdapter } from "../../../packages/infrastructure/src/adapters/codex-adapter.js";
+import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
 import {
   SqliteDecisionRepository,
   SqliteReviewItemRepository,
@@ -16,9 +19,9 @@ import {
   SqliteContextSourceRepository,
   SqliteEvidenceSnapshotRepository
 } from "../../../packages/infrastructure/src/sqlite/context-repositories.js";
-import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
 import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteRuleRepository } from "../../../packages/infrastructure/src/sqlite/rule-repository.js";
+import { SqliteRuntimeRepository } from "../../../packages/infrastructure/src/sqlite/runtime-repository.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
@@ -26,6 +29,7 @@ import { registerContextResourceRoutes } from "./http/routes/context-resources.j
 import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
 import { registerRuleRoutes } from "./http/routes/rules.js";
+import { registerRuntimeRoutes } from "./http/routes/runtime.js";
 
 export type DaemonConfig = {
   host: string;
@@ -71,8 +75,12 @@ export async function createDaemonServer(
   const sqlite = SqliteClient.open({ databaseFile: config.databaseFile });
   runMigrations(sqlite);
   const schemaVersion = getSchemaVersion(sqlite);
+  const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
+  const codexAdapter = new CodexAdapter();
+  const continueSessionService = new ContinueSessionService(runtimeRepository, codexAdapter);
+
   const projectService = new ProjectService(new SqliteProjectRepository(sqlite.db));
-  const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db));
+  const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService);
   const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
   const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
   const reviewItemService = new ReviewItemService(new SqliteReviewItemRepository(sqlite.db));
@@ -80,6 +88,8 @@ export async function createDaemonServer(
   const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), new FileEvidenceStore(config.dataDir));
   const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
   const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db));
+  const settingsService = new SettingsService(runtimeRepository);
+  const agentAdapterService = new AgentAdapterService(codexAdapter);
 
   const server = Fastify({
     logger: false,
@@ -106,6 +116,10 @@ export async function createDaemonServer(
     contextItems: contextItemService
   });
   await registerRuleRoutes(server, ruleService);
+  await registerRuntimeRoutes(server, {
+    settings: settingsService,
+    agentAdapters: agentAdapterService
+  });
 
   server.setErrorHandler((error, request, reply) => {
     if (error instanceof ContextOsError) {
@@ -150,4 +164,3 @@ export async function createDaemonServer(
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
-

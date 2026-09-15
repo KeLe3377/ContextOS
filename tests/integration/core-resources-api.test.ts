@@ -124,3 +124,5 @@ describe("core resource APIs", () => {
     expect(resolved.json().resolutionReason).toBe("Evidence checked");
   });
 });
+
+

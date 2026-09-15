@@ -1,5 +1,6 @@
 import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus } from "../../../contracts/src/decisions.js";
 import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/review-items.js";
+import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
 import type { SessionDto, SessionInput, SessionPatch, SessionStatus } from "../../../contracts/src/sessions.js";
 import type { WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type {
@@ -10,8 +11,13 @@ import type {
 } from "../../../infrastructure/src/sqlite/core-repositories.js";
 import { nowMs } from "../../../shared/src/clock.js";
 
+export type SessionContinueResult = SessionDto & Partial<SessionContinueRuntime>;
+
 export class SessionService {
-  constructor(private readonly sessions: SqliteSessionRepository) {}
+  constructor(
+    private readonly sessions: SqliteSessionRepository,
+    private readonly continueSession?: ContinueSessionService
+  ) {}
 
   create(input: SessionInput): SessionDto {
     return this.sessions.create(input, nowMs());
@@ -29,9 +35,11 @@ export class SessionService {
     return this.sessions.patch(id, input, nowMs());
   }
 
-  transition(id: string, action: "continue" | "review" | "archive", expectedRevision: number): SessionDto {
+  transition(id: string, action: "continue" | "review" | "archive", expectedRevision: number): SessionContinueResult {
     const status: SessionStatus = action === "continue" ? "RUNNING" : action === "review" ? "PAUSED" : "ARCHIVED";
-    return this.sessions.updateStatus(id, status, expectedRevision, nowMs());
+    const session = this.sessions.updateStatus(id, status, expectedRevision, nowMs());
+    if (action !== "continue" || !this.continueSession) return session;
+    return { ...session, ...this.continueSession.continue(session) };
   }
 }
 
@@ -135,3 +143,5 @@ export class ReviewItemService {
     return this.reviewItems.updateStatus(id, "DISMISSED", expectedRevision, nowMs());
   }
 }
+
+

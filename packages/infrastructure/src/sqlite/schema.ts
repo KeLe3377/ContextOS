@@ -16,5 +16,11 @@ export const coreTableNames = [
   "context_item_versions",
   "context_packages",
   "rules",
-  "rule_versions"
+  "rule_versions",
+  "jobs",
+  "job_attempts",
+  "activity_events",
+  "audit_events",
+  "outbox_events",
+  "idempotency_keys"
 ] as const;
