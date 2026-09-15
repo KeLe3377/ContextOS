@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
+import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
+import {
+  SqliteDecisionRepository,
+  SqliteReviewItemRepository,
+  SqliteSessionRepository,
+  SqliteWorkItemRepository
+} from "../../../packages/infrastructure/src/sqlite/core-repositories.js";
 import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
+import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
 
 export type DaemonConfig = {
@@ -53,6 +61,10 @@ export async function createDaemonServer(
   runMigrations(sqlite);
   const schemaVersion = getSchemaVersion(sqlite);
   const projectService = new ProjectService(new SqliteProjectRepository(sqlite.db));
+  const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db));
+  const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
+  const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
+  const reviewItemService = new ReviewItemService(new SqliteReviewItemRepository(sqlite.db));
 
   const server = Fastify({
     logger: false,
@@ -67,6 +79,12 @@ export async function createDaemonServer(
   }));
 
   await registerProjectRoutes(server, projectService);
+  await registerCoreResourceRoutes(server, {
+    sessions: sessionService,
+    decisions: decisionService,
+    workItems: workItemService,
+    reviewItems: reviewItemService
+  });
 
   server.setErrorHandler((error, request, reply) => {
     if (error instanceof ContextOsError) {
