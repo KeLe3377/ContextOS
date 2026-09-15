@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.contextos/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
