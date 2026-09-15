@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
-import { ContextOsError } from "../../../packages/shared/src/errors.js";
+import { ZodError } from "zod";
+import { ProjectService } from "../../../packages/application/src/project/project-service.js";
+import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
+import { ContextOsError } from "../../../packages/shared/src/errors.js";
+import { registerProjectRoutes } from "./http/routes/projects.js";
 
 export type DaemonConfig = {
   host: string;
@@ -48,6 +52,7 @@ export async function createDaemonServer(
   const sqlite = SqliteClient.open({ databaseFile: config.databaseFile });
   runMigrations(sqlite);
   const schemaVersion = getSchemaVersion(sqlite);
+  const projectService = new ProjectService(new SqliteProjectRepository(sqlite.db));
 
   const server = Fastify({
     logger: false,
@@ -60,6 +65,41 @@ export async function createDaemonServer(
     processState: "ready",
     requestId: request.id
   }));
+
+  await registerProjectRoutes(server, projectService);
+
+  server.setErrorHandler((error, request, reply) => {
+    if (error instanceof ContextOsError) {
+      const statusCode = error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;
+      reply.status(statusCode).send({
+        error: {
+          code: error.code,
+          message: error.message,
+          requestId: request.id
+        }
+      });
+      return;
+    }
+
+    if (error instanceof ZodError) {
+      reply.status(400).send({
+        error: {
+          code: "INVALID_ARGUMENT",
+          message: "Invalid request",
+          requestId: request.id
+        }
+      });
+      return;
+    }
+
+    reply.status(500).send({
+      error: {
+        code: "INTERNAL",
+        message: "Internal error",
+        requestId: request.id
+      }
+    });
+  });
 
   server.addHook("onClose", async () => {
     sqlite.close();
