@@ -48,7 +48,7 @@ describe("daemon health endpoint", () => {
 
     const body = response.json();
     expect(body.version).toMatch(/\d+\.\d+\.\d+/);
-    expect(body.schemaVersion).toBe(3);
+    expect(body.schemaVersion).toBe(4);
     expect(body.processState).toBe("ready");
     expect(body.requestId).toBe("test-request-1");
     expect(JSON.stringify(body)).not.toContain(tempDir);
@@ -69,3 +69,4 @@ describe("daemon health endpoint", () => {
     });
   });
 });
+

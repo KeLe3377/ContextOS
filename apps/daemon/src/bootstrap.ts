@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
+import { ContextItemService, ContextSourceService, EvidenceSnapshotService } from "../../../packages/application/src/core/context-services.js";
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
 import {
@@ -9,10 +10,16 @@ import {
   SqliteSessionRepository,
   SqliteWorkItemRepository
 } from "../../../packages/infrastructure/src/sqlite/core-repositories.js";
+import {
+  SqliteContextItemRepository,
+  SqliteContextSourceRepository,
+  SqliteEvidenceSnapshotRepository
+} from "../../../packages/infrastructure/src/sqlite/context-repositories.js";
 import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
+import { registerContextResourceRoutes } from "./http/routes/context-resources.js";
 import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
 
@@ -65,6 +72,9 @@ export async function createDaemonServer(
   const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
   const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
   const reviewItemService = new ReviewItemService(new SqliteReviewItemRepository(sqlite.db));
+  const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
+  const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db));
+  const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
 
   const server = Fastify({
     logger: false,
@@ -84,6 +94,11 @@ export async function createDaemonServer(
     decisions: decisionService,
     workItems: workItemService,
     reviewItems: reviewItemService
+  });
+  await registerContextResourceRoutes(server, {
+    contextSources: contextSourceService,
+    evidenceSnapshots: evidenceSnapshotService,
+    contextItems: contextItemService
   });
 
   server.setErrorHandler((error, request, reply) => {

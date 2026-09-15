@@ -1,0 +1,290 @@
+import type { Database } from "better-sqlite3";
+import type {
+  ContextConfidence,
+  ContextItemDto,
+  ContextItemInput,
+  ContextItemPatch,
+  ContextItemStatus,
+  ContextItemType,
+  ContextSourceDto,
+  ContextSourceInput,
+  ContextSourcePatch,
+  ContextSourceStatus,
+  ContextSourceType,
+  EvidenceSnapshotDto,
+  EvidenceSnapshotInput,
+  EvidenceType
+} from "../../../contracts/src/context.js";
+import { ContextOsError } from "../../../shared/src/errors.js";
+import { newId } from "../../../shared/src/id.js";
+
+function iso(value: number | null): string | null {
+  return value === null ? null : new Date(value).toISOString();
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  return JSON.parse(value) as Record<string, unknown>;
+}
+
+function ensureChanged(changes: number, exists: unknown, type: string, id: string, expectedRevision: number): void {
+  if (changes > 0) return;
+  if (!exists) throw new ContextOsError("NOT_FOUND", `${type} not found`, { id });
+  throw new ContextOsError("CONFLICT", `${type} revision conflict`, { id, expectedRevision });
+}
+
+type ContextSourceRow = {
+  id: string;
+  project_id: string;
+  source_type: ContextSourceType;
+  name: string;
+  locator: string;
+  description: string | null;
+  status: ContextSourceStatus;
+  metadata_json: string;
+  last_snapshot_id: string | null;
+  last_checked_at: number | null;
+  created_at: number;
+  updated_at: number;
+  revision: number;
+  archived_at: number | null;
+};
+
+export class SqliteContextSourceRepository {
+  constructor(private readonly db: Database) {}
+
+  create(input: ContextSourceInput, now: number): ContextSourceDto {
+    const id = newId("src");
+    this.db.prepare("INSERT INTO context_sources (id, project_id, source_type, name, locator, description, status, metadata_json, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, 1)")
+      .run(id, input.projectId, input.sourceType, input.name, input.locator, input.description ?? null, JSON.stringify(input.metadata), now, now);
+    return this.getByIdOrThrow(id);
+  }
+
+  list(options: { projectId?: string; status?: string; q?: string; limit: number }): ContextSourceDto[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.projectId) { where.push("project_id = ?"); params.push(options.projectId); }
+    if (options.status) { where.push("status = ?"); params.push(options.status); }
+    if (options.q) { where.push("(name LIKE ? OR locator LIKE ?)"); params.push(`%${options.q}%`, `%${options.q}%`); }
+    params.push(options.limit);
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    return (this.db.prepare(`SELECT * FROM context_sources ${whereSql} ORDER BY updated_at DESC, id DESC LIMIT ?`).all(...params) as ContextSourceRow[]).map(mapContextSource);
+  }
+
+  getById(id: string): ContextSourceDto | null {
+    const row = this.db.prepare("SELECT * FROM context_sources WHERE id = ?").get(id) as ContextSourceRow | undefined;
+    return row ? mapContextSource(row) : null;
+  }
+
+  getByIdOrThrow(id: string): ContextSourceDto {
+    const item = this.getById(id);
+    if (!item) throw new ContextOsError("NOT_FOUND", "Context Source not found", { id });
+    return item;
+  }
+
+  patch(id: string, input: ContextSourcePatch, now: number): ContextSourceDto {
+    const current = this.getByIdOrThrow(id);
+    const result = this.db.prepare("UPDATE context_sources SET name = ?, description = ?, metadata_json = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+      .run(input.name ?? current.name, input.description ?? current.description, JSON.stringify(input.metadata ?? current.metadata), now, id, input.expectedRevision);
+    ensureChanged(result.changes, current, "Context Source", id, input.expectedRevision);
+    return this.getByIdOrThrow(id);
+  }
+
+  updateStatus(id: string, status: ContextSourceStatus, expectedRevision: number, now: number): ContextSourceDto {
+    const archivedAt = status === "ARCHIVED" ? now : null;
+    const result = this.db.prepare("UPDATE context_sources SET status = ?, archived_at = COALESCE(?, archived_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+      .run(status, archivedAt, now, id, expectedRevision);
+    ensureChanged(result.changes, this.getById(id), "Context Source", id, expectedRevision);
+    return this.getByIdOrThrow(id);
+  }
+}
+
+function mapContextSource(row: ContextSourceRow): ContextSourceDto {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceType: row.source_type,
+    name: row.name,
+    locator: row.locator,
+    description: row.description,
+    status: row.status,
+    metadata: parseJsonObject(row.metadata_json),
+    lastSnapshotId: row.last_snapshot_id,
+    lastCheckedAt: iso(row.last_checked_at),
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    revision: row.revision,
+    archivedAt: iso(row.archived_at)
+  };
+}
+
+type EvidenceSnapshotRow = {
+  id: string;
+  project_id: string;
+  source_id: string | null;
+  evidence_type: EvidenceType;
+  title: string;
+  uri: string | null;
+  content_text: string | null;
+  content_hash: string;
+  metadata_json: string;
+  captured_at: number;
+  created_at: number;
+};
+
+export class SqliteEvidenceSnapshotRepository {
+  constructor(private readonly db: Database) {}
+
+  create(input: EvidenceSnapshotInput, now: number): EvidenceSnapshotDto {
+    const id = newId("ev");
+    this.db.transaction(() => {
+      this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, metadata_json, captured_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(id, input.projectId, input.sourceId ?? null, input.evidenceType, input.title, input.uri ?? null, input.contentText ?? null, input.contentHash, JSON.stringify(input.metadata), now, now);
+      if (input.sourceId) {
+        this.db.prepare("UPDATE context_sources SET last_snapshot_id = ?, last_checked_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+          .run(id, now, now, input.sourceId);
+      }
+    })();
+    return this.getByIdOrThrow(id);
+  }
+
+  list(options: { projectId?: string; sourceId?: string; q?: string; limit: number }): EvidenceSnapshotDto[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.projectId) { where.push("project_id = ?"); params.push(options.projectId); }
+    if (options.sourceId) { where.push("source_id = ?"); params.push(options.sourceId); }
+    if (options.q) { where.push("(title LIKE ? OR COALESCE(uri, '') LIKE ?)"); params.push(`%${options.q}%`, `%${options.q}%`); }
+    params.push(options.limit);
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    return (this.db.prepare(`SELECT * FROM evidence_snapshots ${whereSql} ORDER BY created_at DESC, id DESC LIMIT ?`).all(...params) as EvidenceSnapshotRow[]).map(mapEvidenceSnapshot);
+  }
+
+  getById(id: string): EvidenceSnapshotDto | null {
+    const row = this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(id) as EvidenceSnapshotRow | undefined;
+    return row ? mapEvidenceSnapshot(row) : null;
+  }
+
+  getByIdOrThrow(id: string): EvidenceSnapshotDto {
+    const item = this.getById(id);
+    if (!item) throw new ContextOsError("NOT_FOUND", "Evidence Snapshot not found", { id });
+    return item;
+  }
+}
+
+function mapEvidenceSnapshot(row: EvidenceSnapshotRow): EvidenceSnapshotDto {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceId: row.source_id,
+    evidenceType: row.evidence_type,
+    title: row.title,
+    uri: row.uri,
+    contentText: row.content_text,
+    contentHash: row.content_hash,
+    metadata: parseJsonObject(row.metadata_json),
+    capturedAt: new Date(row.captured_at).toISOString(),
+    createdAt: new Date(row.created_at).toISOString()
+  };
+}
+
+type ContextItemRow = {
+  id: string;
+  project_id: string;
+  source_snapshot_id: string | null;
+  item_type: ContextItemType;
+  status: ContextItemStatus;
+  title: string;
+  summary: string;
+  body: string | null;
+  confidence: ContextConfidence;
+  metadata_json: string;
+  created_at: number;
+  updated_at: number;
+  revision: number;
+  archived_at: number | null;
+};
+
+export class SqliteContextItemRepository {
+  constructor(private readonly db: Database) {}
+
+  create(input: ContextItemInput, now: number): ContextItemDto {
+    const id = newId("ctx");
+    const versionId = newId("ctxv");
+    this.db.transaction(() => {
+      this.db.prepare("INSERT INTO context_items (id, project_id, source_snapshot_id, item_type, status, title, summary, body, confidence, metadata_json, created_at, updated_at, revision) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, 1)")
+        .run(id, input.projectId, input.sourceSnapshotId ?? null, input.itemType, input.title, input.summary, input.body ?? null, input.confidence, JSON.stringify(input.metadata), now, now);
+      this.db.prepare("INSERT INTO context_item_versions (id, context_item_id, version_number, title, summary, body, confidence, metadata_json, created_by_type, created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'USER', ?)")
+        .run(versionId, id, input.title, input.summary, input.body ?? null, input.confidence, JSON.stringify(input.metadata), now);
+    })();
+    return this.getByIdOrThrow(id);
+  }
+
+  list(options: { projectId?: string; status?: string; q?: string; limit: number }): ContextItemDto[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.projectId) { where.push("project_id = ?"); params.push(options.projectId); }
+    if (options.status) { where.push("status = ?"); params.push(options.status); }
+    if (options.q) { where.push("(title LIKE ? OR summary LIKE ?)"); params.push(`%${options.q}%`, `%${options.q}%`); }
+    params.push(options.limit);
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    return (this.db.prepare(`SELECT * FROM context_items ${whereSql} ORDER BY updated_at DESC, id DESC LIMIT ?`).all(...params) as ContextItemRow[]).map(mapContextItem);
+  }
+
+  getById(id: string): ContextItemDto | null {
+    const row = this.db.prepare("SELECT * FROM context_items WHERE id = ?").get(id) as ContextItemRow | undefined;
+    return row ? mapContextItem(row) : null;
+  }
+
+  getByIdOrThrow(id: string): ContextItemDto {
+    const item = this.getById(id);
+    if (!item) throw new ContextOsError("NOT_FOUND", "Context Item not found", { id });
+    return item;
+  }
+
+  patch(id: string, input: ContextItemPatch, now: number): ContextItemDto {
+    const current = this.getByIdOrThrow(id);
+    const next = {
+      title: input.title ?? current.title,
+      summary: input.summary ?? current.summary,
+      body: input.body ?? current.body,
+      confidence: input.confidence ?? current.confidence,
+      metadata: input.metadata ?? current.metadata
+    };
+    const versionNumber = current.revision + 1;
+    const versionId = newId("ctxv");
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE context_items SET title = ?, summary = ?, body = ?, confidence = ?, metadata_json = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(next.title, next.summary, next.body, next.confidence, JSON.stringify(next.metadata), now, id, input.expectedRevision);
+      ensureChanged(result.changes, current, "Context Item", id, input.expectedRevision);
+      this.db.prepare("INSERT INTO context_item_versions (id, context_item_id, version_number, title, summary, body, confidence, metadata_json, created_by_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'USER', ?)")
+        .run(versionId, id, versionNumber, next.title, next.summary, next.body, next.confidence, JSON.stringify(next.metadata), now);
+    })();
+    return this.getByIdOrThrow(id);
+  }
+
+  updateStatus(id: string, status: ContextItemStatus, expectedRevision: number, now: number): ContextItemDto {
+    const archivedAt = status === "ARCHIVED" ? now : null;
+    const result = this.db.prepare("UPDATE context_items SET status = ?, archived_at = COALESCE(?, archived_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+      .run(status, archivedAt, now, id, expectedRevision);
+    ensureChanged(result.changes, this.getById(id), "Context Item", id, expectedRevision);
+    return this.getByIdOrThrow(id);
+  }
+}
+
+function mapContextItem(row: ContextItemRow): ContextItemDto {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceSnapshotId: row.source_snapshot_id,
+    itemType: row.item_type,
+    status: row.status,
+    title: row.title,
+    summary: row.summary,
+    body: row.body,
+    confidence: row.confidence,
+    metadata: parseJsonObject(row.metadata_json),
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    revision: row.revision,
+    archivedAt: iso(row.archived_at)
+  };
+}

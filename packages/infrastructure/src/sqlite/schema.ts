@@ -9,5 +9,10 @@ export const coreTableNames = [
   "decision_versions",
   "work_items",
   "work_item_dependencies",
-  "work_item_attempts"
+  "work_item_attempts",
+  "context_sources",
+  "evidence_snapshots",
+  "context_items",
+  "context_item_versions",
+  "context_packages"
 ] as const;
