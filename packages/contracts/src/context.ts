@@ -41,7 +41,7 @@ export const evidenceSnapshotInputSchema = z.object({
   title: z.string().trim().min(1),
   uri: z.string().trim().optional(),
   contentText: z.string().optional(),
-  contentHash: z.string().trim().min(1),
+  contentHash: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).default({})
 });
 
@@ -54,6 +54,8 @@ export const evidenceSnapshotDtoSchema = z.object({
   uri: z.string().nullable(),
   contentText: z.string().nullable(),
   contentHash: z.string(),
+  storageRef: z.string().nullable(),
+  sizeBytes: z.number().int().nullable(),
   metadata: z.record(z.unknown()),
   capturedAt: z.string(),
   createdAt: z.string()
@@ -111,3 +113,5 @@ export type ContextConfidence = z.infer<typeof contextConfidenceSchema>;
 export type ContextItemInput = z.infer<typeof contextItemInputSchema>;
 export type ContextItemPatch = z.infer<typeof contextItemPatchSchema>;
 export type ContextItemDto = z.infer<typeof contextItemDtoSchema>;
+
+

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -70,6 +70,9 @@ describe("context resource APIs", () => {
     expect(snapshotResponse.statusCode).toBe(201);
     const snapshot = snapshotResponse.json();
     expect(snapshot.sourceId).toBe(source.id);
+    expect(snapshot.storageRef).toMatch(/^evidence\//);
+    expect(snapshot.sizeBytes).toBe(Buffer.byteLength("Evidence store comes before agent adapters.", "utf8"));
+    await expect(readFile(join(tempDir!, snapshot.storageRef), "utf8")).resolves.toBe("Evidence store comes before agent adapters.");
 
     const refreshedSource = await server!.inject({ method: "GET", url: `/api/context-sources/${source.id}` });
     expect(refreshedSource.json().lastSnapshotId).toBe(snapshot.id);
@@ -99,3 +102,5 @@ describe("context resource APIs", () => {
     expect(activated.json().status).toBe("ACTIVE");
   });
 });
+
+

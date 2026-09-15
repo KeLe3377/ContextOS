@@ -1,4 +1,5 @@
 import type { Database } from "better-sqlite3";
+import type { StoredEvidence } from "../evidence/evidence-store.js";
 import type {
   ContextConfidence,
   ContextItemDto,
@@ -126,6 +127,8 @@ type EvidenceSnapshotRow = {
   uri: string | null;
   content_text: string | null;
   content_hash: string;
+  storage_ref: string | null;
+  size_bytes: number | null;
   metadata_json: string;
   captured_at: number;
   created_at: number;
@@ -134,11 +137,13 @@ type EvidenceSnapshotRow = {
 export class SqliteEvidenceSnapshotRepository {
   constructor(private readonly db: Database) {}
 
-  create(input: EvidenceSnapshotInput, now: number): EvidenceSnapshotDto {
+  create(input: EvidenceSnapshotInput, now: number, stored?: StoredEvidence): EvidenceSnapshotDto {
     const id = newId("ev");
+    const contentHash = stored?.contentHash ?? input.contentHash;
+    if (!contentHash) throw new ContextOsError("INVALID_ARGUMENT", "Evidence Snapshot requires contentHash or contentText");
     this.db.transaction(() => {
-      this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, metadata_json, captured_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(id, input.projectId, input.sourceId ?? null, input.evidenceType, input.title, input.uri ?? null, input.contentText ?? null, input.contentHash, JSON.stringify(input.metadata), now, now);
+      this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, storage_ref, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(id, input.projectId, input.sourceId ?? null, input.evidenceType, input.title, input.uri ?? null, input.contentText ?? null, contentHash, stored?.storageRef ?? null, stored?.sizeBytes ?? null, JSON.stringify(input.metadata), now, now);
       if (input.sourceId) {
         this.db.prepare("UPDATE context_sources SET last_snapshot_id = ?, last_checked_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
           .run(id, now, now, input.sourceId);
@@ -180,12 +185,13 @@ function mapEvidenceSnapshot(row: EvidenceSnapshotRow): EvidenceSnapshotDto {
     uri: row.uri,
     contentText: row.content_text,
     contentHash: row.content_hash,
+    storageRef: row.storage_ref,
+    sizeBytes: row.size_bytes,
     metadata: parseJsonObject(row.metadata_json),
     capturedAt: new Date(row.captured_at).toISOString(),
     createdAt: new Date(row.created_at).toISOString()
   };
 }
-
 type ContextItemRow = {
   id: string;
   project_id: string;
@@ -288,3 +294,7 @@ function mapContextItem(row: ContextItemRow): ContextItemDto {
     archivedAt: iso(row.archived_at)
   };
 }
+
+
+
+

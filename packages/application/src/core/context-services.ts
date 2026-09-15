@@ -10,12 +10,14 @@ import type {
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
 } from "../../../contracts/src/context.js";
+import type { FileEvidenceStore, StoredEvidence } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type {
   SqliteContextItemRepository,
   SqliteContextSourceRepository,
   SqliteEvidenceSnapshotRepository
 } from "../../../infrastructure/src/sqlite/context-repositories.js";
 import { nowMs } from "../../../shared/src/clock.js";
+import { newId } from "../../../shared/src/id.js";
 
 export class ContextSourceService {
   constructor(private readonly sources: SqliteContextSourceRepository) {}
@@ -43,10 +45,16 @@ export class ContextSourceService {
 }
 
 export class EvidenceSnapshotService {
-  constructor(private readonly snapshots: SqliteEvidenceSnapshotRepository) {}
+  constructor(
+    private readonly snapshots: SqliteEvidenceSnapshotRepository,
+    private readonly evidenceStore?: FileEvidenceStore
+  ) {}
 
   create(input: EvidenceSnapshotInput): EvidenceSnapshotDto {
-    return this.snapshots.create(input, nowMs());
+    const stored: StoredEvidence | undefined = input.contentText && this.evidenceStore
+      ? this.evidenceStore.writeText({ snapshotId: newId("evblob"), contentText: input.contentText, contentHash: input.contentHash })
+      : undefined;
+    return this.snapshots.create(input, nowMs(), stored);
   }
 
   list(input: { projectId?: string; sourceId?: string; q?: string; limit: number }): EvidenceSnapshotDto[] {

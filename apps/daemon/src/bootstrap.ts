@@ -16,6 +16,7 @@ import {
   SqliteContextSourceRepository,
   SqliteEvidenceSnapshotRepository
 } from "../../../packages/infrastructure/src/sqlite/context-repositories.js";
+import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
 import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteRuleRepository } from "../../../packages/infrastructure/src/sqlite/rule-repository.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
@@ -76,7 +77,7 @@ export async function createDaemonServer(
   const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
   const reviewItemService = new ReviewItemService(new SqliteReviewItemRepository(sqlite.db));
   const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
-  const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db));
+  const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), new FileEvidenceStore(config.dataDir));
   const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
   const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db));
 
@@ -149,3 +150,4 @@ export async function createDaemonServer(
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
+
