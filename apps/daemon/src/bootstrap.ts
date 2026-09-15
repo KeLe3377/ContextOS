@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import { ContextItemService, ContextSourceService, EvidenceSnapshotService } from "../../../packages/application/src/core/context-services.js";
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
+import { RuleService } from "../../../packages/application/src/core/rule-service.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
 import {
   SqliteDecisionRepository,
@@ -16,12 +17,14 @@ import {
   SqliteEvidenceSnapshotRepository
 } from "../../../packages/infrastructure/src/sqlite/context-repositories.js";
 import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
+import { SqliteRuleRepository } from "../../../packages/infrastructure/src/sqlite/rule-repository.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
 import { registerContextResourceRoutes } from "./http/routes/context-resources.js";
 import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
+import { registerRuleRoutes } from "./http/routes/rules.js";
 
 export type DaemonConfig = {
   host: string;
@@ -75,6 +78,7 @@ export async function createDaemonServer(
   const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
   const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db));
   const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
+  const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db));
 
   const server = Fastify({
     logger: false,
@@ -100,6 +104,7 @@ export async function createDaemonServer(
     evidenceSnapshots: evidenceSnapshotService,
     contextItems: contextItemService
   });
+  await registerRuleRoutes(server, ruleService);
 
   server.setErrorHandler((error, request, reply) => {
     if (error instanceof ContextOsError) {

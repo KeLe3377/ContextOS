@@ -25,7 +25,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(4);
+    expect(getSchemaVersion(client)).toBe(5);
     const tables = client.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
       .all()
@@ -48,4 +48,5 @@ describe("SQLite migrations", () => {
     ).toThrow();
   });
 });
+
 

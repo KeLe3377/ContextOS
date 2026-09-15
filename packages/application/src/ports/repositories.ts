@@ -12,3 +12,4 @@ export type ReviewItemRepository = unknown;
 export type ContextSourceRepository = unknown;
 export type EvidenceSnapshotRepository = unknown;
 export type ContextItemRepository = unknown;
+export type RuleRepository = unknown;

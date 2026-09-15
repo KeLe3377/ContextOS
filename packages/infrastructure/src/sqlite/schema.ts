@@ -14,5 +14,7 @@ export const coreTableNames = [
   "evidence_snapshots",
   "context_items",
   "context_item_versions",
-  "context_packages"
+  "context_packages",
+  "rules",
+  "rule_versions"
 ] as const;
