@@ -8,6 +8,7 @@ import { AgentAdapterService, ContinueSessionService, SettingsService } from "..
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
 import { CodexAdapter } from "../../../packages/infrastructure/src/adapters/codex-adapter.js";
 import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
+import { ProcessSupervisor } from "../../../packages/infrastructure/src/process-supervisor.js";
 import {
   SqliteDecisionRepository,
   SqliteReviewItemRepository,
@@ -77,7 +78,7 @@ export async function createDaemonServer(
   const schemaVersion = getSchemaVersion(sqlite);
   const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
   const codexAdapter = new CodexAdapter();
-  const continueSessionService = new ContinueSessionService(runtimeRepository, codexAdapter);
+  const continueSessionService = new ContinueSessionService(runtimeRepository, codexAdapter, new ProcessSupervisor());
 
   const projectService = new ProjectService(new SqliteProjectRepository(sqlite.db));
   const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService);
@@ -164,3 +165,4 @@ export async function createDaemonServer(
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
+

@@ -98,6 +98,31 @@ export class SqliteRuntimeRepository {
     return { job: this.getJob(jobId), run: this.getSessionRun(runId) };
   }
 
+
+  markContinueRunning(input: { jobId: string; runId: string; pid: number }, now: number): { job: RuntimeJobDto; run: SessionRunDto } {
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, updated_at = ?, revision = revision + 1 WHERE id = ?")
+        .run(now, now, input.jobId);
+      this.db.prepare("UPDATE session_runs SET status = 'RUNNING', pid = ?, started_at = COALESCE(started_at, ?), updated_at = ?, revision = revision + 1 WHERE id = ?")
+        .run(input.pid, now, now, input.runId);
+      this.db.prepare("INSERT INTO job_attempts (id, job_id, status, started_at) VALUES (?, ?, 'STARTED', ?)")
+        .run(newId("jattempt"), input.jobId, now);
+    })();
+    return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
+  }
+
+  markContinueFailed(input: { jobId: string; runId: string; failureCode: string; failureMessage: string }, now: number): { job: RuntimeJobDto; run: SessionRunDto } {
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE jobs SET status = 'FAILED', ended_at = ?, failure_code = ?, failure_message = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+        .run(now, input.failureCode, input.failureMessage, now, input.jobId);
+      this.db.prepare("UPDATE session_runs SET status = 'FAILED', ended_at = ?, failure_code = ?, failure_message = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+        .run(now, input.failureCode, input.failureMessage, now, input.runId);
+      this.db.prepare("INSERT INTO job_attempts (id, job_id, status, started_at, ended_at, failure_code, failure_message) VALUES (?, ?, 'FAILED', ?, ?, ?, ?)")
+        .run(newId("jattempt"), input.jobId, now, now, input.failureCode, input.failureMessage);
+    })();
+    return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
+  }
+
   getProjectRoot(projectId: string): string {
     const row = this.db.prepare("SELECT root_path FROM projects WHERE id = ?").get(projectId) as { root_path: string } | undefined;
     if (!row) throw new ContextOsError("NOT_FOUND", "Project not found", { id: projectId });
@@ -169,3 +194,4 @@ function mapSessionRun(row: SessionRunRow): SessionRunDto {
     revision: row.revision
   };
 }
+
