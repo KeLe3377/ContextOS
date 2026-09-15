@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import { ContextItemService, ContextSourceService, EvidenceSnapshotService } from "../../../packages/application/src/core/context-services.js";
@@ -97,6 +98,21 @@ export async function createDaemonServer(
     genReqId: (request) => request.headers["x-request-id"]?.toString() ?? randomUUID()
   });
 
+  await server.register(cors, {
+    origin: (origin, callback) => {
+      if (!origin || origin === "null") {
+        callback(null, true);
+        return;
+      }
+      try {
+        const url = new URL(origin);
+        callback(null, ["localhost", "127.0.0.1", "::1"].includes(url.hostname));
+      } catch {
+        callback(null, false);
+      }
+    },
+    methods: ["GET", "POST", "PATCH", "OPTIONS"]
+  });
   server.get("/api/health", async (request) => ({
     version: packageVersion,
     schemaVersion,
@@ -165,4 +181,5 @@ export async function createDaemonServer(
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
+
 
