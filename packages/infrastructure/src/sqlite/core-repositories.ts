@@ -289,6 +289,29 @@ export class SqliteReviewItemRepository {
     return this.getByIdOrThrow(id);
   }
 
+  findOrCreateOpenEvidenceIssue(input: ReviewItemInput, now: number): ReviewItemDto {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare(`
+        SELECT * FROM review_items
+        WHERE source_type = ? AND source_id = ? AND trigger_type = ?
+          AND status IN ('OPEN', 'IN_PROGRESS')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+      `).get(input.sourceType, input.sourceId, input.triggerType) as ReviewItemRow | undefined;
+      if (existing) return mapReviewItem(existing);
+
+      const id = newId("rev");
+      this.db.prepare("INSERT INTO review_items (id, project_id, source_type, source_id, trigger_type, status, priority, summary, proposed_resolution, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, 1)")
+        .run(id, input.projectId, input.sourceType, input.sourceId, input.triggerType, input.priority, input.summary, input.proposedResolution ?? null, now, now);
+      const created = this.getByIdOrThrow(id);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'EVIDENCE_SNAPSHOT', ?, ?, ?, ?, ?)")
+        .run(newId("act"), input.projectId, input.sourceId, input.triggerType, input.summary, JSON.stringify({ reviewItemId: id }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'REVIEW_ITEM', ?, 'CREATE', ?, ?)")
+        .run(newId("audit"), input.projectId, id, JSON.stringify(created), now);
+      return created;
+    })();
+  }
+
   list(options: { projectId?: string; status?: string; q?: string; limit: number }): ReviewItemDto[] {
     const where: string[] = [];
     const params: unknown[] = [];

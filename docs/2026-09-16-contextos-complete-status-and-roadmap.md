@@ -98,6 +98,8 @@ first pass 已完成，仍有深层硬化空间。
 - verify 可重新计算 hash/size。
 - 新 evidence 路径采用 `evidence/<projectId>/<snapshotId>.txt`。
 - 旧 `evidence/<snapshotId>.txt` 仍可 verify。
+- verify 发现文件缺失或内容不匹配时自动创建 Review Item。
+- 重复 verify 复用活动中的同类 Review Item；关闭后故障复发会新建。
 
 仍待后续：
 
@@ -289,7 +291,6 @@ frontend/styles.css
 - Snapshot compare。
 - Context Item version history。
 - Context Source sync first pass。
-- Evidence missing/hash mismatch 的 review item。
 
 ### 6.3 Runtime / Jobs 深化
 
@@ -317,10 +318,10 @@ frontend/styles.css
 
 如果继续后端：
 
-1. Evidence missing/hash mismatch 生成 Review Item。
-2. Snapshot compare。
-3. Context Item version history 查询。
-4. Context Source sync first pass。
+1. Snapshot compare。
+2. Context Item version history 查询。
+3. Context Source sync first pass。
+4. Evidence DB/file 跨崩溃 recovery。
 
 如果转前端：
 

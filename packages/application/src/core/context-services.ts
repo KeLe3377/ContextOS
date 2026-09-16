@@ -10,7 +10,9 @@ import type {
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
 } from "../../../contracts/src/context.js";
+import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/review-items.js";
 import type { EvidenceVerification, FileEvidenceStore, StoredEvidence } from "../../../infrastructure/src/evidence/evidence-store.js";
+import type { SqliteReviewItemRepository } from "../../../infrastructure/src/sqlite/core-repositories.js";
 import type {
   SqliteContextItemRepository,
   SqliteContextSourceRepository,
@@ -47,7 +49,8 @@ export class ContextSourceService {
 export class EvidenceSnapshotService {
   constructor(
     private readonly snapshots: SqliteEvidenceSnapshotRepository,
-    private readonly evidenceStore?: FileEvidenceStore
+    private readonly evidenceStore?: FileEvidenceStore,
+    private readonly reviewItems?: SqliteReviewItemRepository
   ) {}
 
   create(input: EvidenceSnapshotInput): EvidenceSnapshotDto {
@@ -65,7 +68,7 @@ export class EvidenceSnapshotService {
     return this.snapshots.getByIdOrThrow(id);
   }
 
-  verify(id: string): EvidenceVerification {
+  verify(id: string): EvidenceVerification & { reviewItem: ReviewItemDto | null } {
     const snapshot = this.snapshots.getByIdOrThrow(id);
     if (!this.evidenceStore) {
       return {
@@ -77,15 +80,47 @@ export class EvidenceSnapshotService {
         expectedSizeBytes: snapshot.sizeBytes,
         actualSizeBytes: null,
         failureCode: "EVIDENCE_STORE_UNAVAILABLE",
-        failureMessage: "Evidence store is not configured"
+        failureMessage: "Evidence store is not configured",
+        reviewItem: null
       };
     }
-    return this.evidenceStore.verify({
+    const verification = this.evidenceStore.verify({
       storageRef: snapshot.storageRef,
       expectedHash: snapshot.contentHash,
       expectedSizeBytes: snapshot.sizeBytes
     });
+    const reviewInput = evidenceReviewInput(snapshot, verification.failureCode);
+    const reviewItem = reviewInput && this.reviewItems
+      ? this.reviewItems.findOrCreateOpenEvidenceIssue(reviewInput, nowMs())
+      : null;
+    return { ...verification, reviewItem };
   }
+}
+
+function evidenceReviewInput(snapshot: EvidenceSnapshotDto, failureCode: string | null): ReviewItemInput | null {
+  if (failureCode === "FILE_MISSING") {
+    return {
+      projectId: snapshot.projectId,
+      sourceType: "EVIDENCE_SNAPSHOT",
+      sourceId: snapshot.id,
+      triggerType: "EVIDENCE_FILE_MISSING",
+      priority: "HIGH",
+      summary: `Evidence file is missing: ${snapshot.title}`,
+      proposedResolution: "Restore the original immutable file or recapture the content as a new Evidence Snapshot."
+    };
+  }
+  if (failureCode === "CONTENT_MISMATCH") {
+    return {
+      projectId: snapshot.projectId,
+      sourceType: "EVIDENCE_SNAPSHOT",
+      sourceId: snapshot.id,
+      triggerType: "EVIDENCE_CONTENT_MISMATCH",
+      priority: "URGENT",
+      summary: `Evidence integrity mismatch: ${snapshot.title}`,
+      proposedResolution: "Preserve the suspect file for investigation and recapture trusted content as a new Evidence Snapshot."
+    };
+  }
+  return null;
 }
 
 export class ContextItemService {
