@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ContextOsError } from "../../../shared/src/errors.js";
 
 export type StoredEvidence = {
@@ -99,6 +99,16 @@ export class FileEvidenceStore {
         failureMessage: error instanceof Error ? error.message : "Evidence file is missing"
       };
     }
+  }
+
+  remove(storageRef: string): void {
+    const evidenceRoot = resolve(this.rootDir, "evidence");
+    const target = resolve(this.rootDir, storageRef);
+    const relativeTarget = relative(evidenceRoot, target);
+    if (!relativeTarget || relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
+      throw new ContextOsError("INVALID_ARGUMENT", "Evidence storageRef is outside the evidence root");
+    }
+    rmSync(target, { force: true });
   }
 }
 

@@ -10,7 +10,7 @@ Add a deterministic first-pass API for manually importing transcript text into a
 
 The first pass accepts transcript text supplied directly by the caller. It does not discover Codex transcript files, parse message roles, summarize with an LLM, import live output, or add frontend UI.
 
-Imports are allowed for Sessions in every lifecycle state, including `COMPLETED`, `FAILED`, and `CANCELED`, because this operation records historical evidence rather than resuming execution.
+Imports are allowed for Sessions in every lifecycle state, including `COMPLETED`, `FAILED`, and `ARCHIVED`, because this operation records historical evidence rather than resuming execution.
 
 ## API Contract
 

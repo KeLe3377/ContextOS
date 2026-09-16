@@ -20,7 +20,7 @@ Project
 
 如果按“本地优先 Codex workspace loop”定义，当前版本已经可运行、可测试、可展示。
 
-如果按最初完整设计定义，ContextOS 还没有完成多 Agent、transcript import、正式前端、完整 scheduler/outbox dispatcher、深层 provenance/versioning 等产品能力。
+如果按最初完整设计定义，ContextOS 还没有完成多 Agent、Codex transcript 自动发现/实时采集、正式前端、完整 scheduler/outbox dispatcher、深层 provenance/versioning 等产品能力。
 
 ## 2. 当前代码状态
 
@@ -245,7 +245,7 @@ frontend/styles.css
 
 遗留：
 
-- Codex transcript import。
+- Codex transcript 文件自动发现与导入（手动 text payload API 已完成）。
 - Codex inspectStatus。
 - Codex interrupt。
 - Codex resume 的深层语义。
@@ -255,7 +255,7 @@ frontend/styles.css
 
 建议后续 Adapter 顺序：
 
-1. 先做 Codex transcript import。
+1. 先做 Codex transcript 文件位置调查和 adapter importTranscript 接入。
 2. 再做 Codex inspectStatus / interrupt。
 3. 再抽 shared adapter contract tests。
 4. 最后才加 Claude Code / Cursor。
@@ -264,22 +264,24 @@ frontend/styles.css
 
 ### 6.1 Transcript Import
 
-这是下一个最能提升产品价值的后端能力。
+手动 text payload first pass 已完成。
 
-目标：
+已完成：
 
-- 支持手动导入 Codex CLI transcript。
-- 生成 Evidence Snapshot。
-- 生成或更新 Context Item / Resume Capsule。
-- 保留 provenance。
-
-建议 first pass：
-
-- `POST /api/sessions/:id/import-transcript`
-- 请求体先支持 text payload。
+- `POST /api/sessions/:id/import-transcript`。
+- 请求体支持 text payload、可选 title/summary。
 - 写 `EvidenceSnapshot`：`evidenceType = AGENT_OUTPUT`。
-- metadata 标记 `stream = imported-transcript`。
-- 更新 Resume Capsule summary。
+- metadata 标记 `stream = imported-transcript`、sessionId、importedAt。
+- 更新 Resume Capsule summary，并保留已有 evidence 与 lastRunId。
+- project 分区文件、Activity/Audit、幂等回放和已结束 Session 导入均有集成测试。
+
+仍待后续：
+
+- Codex transcript 文件位置自动发现。
+- adapter `importTranscript` 接入。
+- 实时 transcript bridge。
+- message role/turn 解析。
+- 前端 import UI。
 
 ### 6.2 Evidence / Context 深化
 
@@ -315,10 +317,10 @@ frontend/styles.css
 
 如果继续后端：
 
-1. 提交当前未提交的 daemon lock + evidence partition。
-2. 做 `POST /api/sessions/:id/import-transcript`。
-3. transcript import 生成 Evidence + Resume Capsule update。
-4. 补测试。
+1. Evidence missing/hash mismatch 生成 Review Item。
+2. Snapshot compare。
+3. Context Item version history 查询。
+4. Context Source sync first pass。
 
 如果转前端：
 
@@ -331,4 +333,3 @@ frontend/styles.css
 1. Codex transcript 文件位置调查。
 2. Codex importTranscript first pass。
 3. inspectStatus / interrupt。
-

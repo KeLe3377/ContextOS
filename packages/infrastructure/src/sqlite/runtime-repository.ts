@@ -1,7 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
-import type { ResumeCapsuleDto, SessionStatus } from "../../../contracts/src/sessions.js";
+import type { ResumeCapsuleDto, SessionStatus, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
 
@@ -108,6 +108,14 @@ type ResumeSessionRow = {
   status: SessionStatus;
   runtime_state: string;
   updated_at: number;
+};
+
+type ResumeCapsuleState = {
+  summary?: string;
+  nextAction?: string | null;
+  lastRunId?: string | null;
+  evidenceSnapshotIds?: string[];
+  updatedAt?: string;
 };
 
 export class SqliteRuntimeRepository {
@@ -253,6 +261,47 @@ export class SqliteRuntimeRepository {
     return mapEvidenceSnapshot(this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(input.id) as EvidenceSnapshotRow);
   }
 
+  importSessionTranscript(input: { id: string; projectId: string; sessionId: string; title: string; summary: string; contentHash: string; storageRef: string; sizeBytes: number }, now: number): TranscriptImportResult {
+    return this.db.transaction(() => {
+      const row = this.getResumeSessionRow(input.sessionId);
+      const state = JSON.parse(row.runtime_state) as { resumeCapsule?: ResumeCapsuleState };
+      const current = mapResumeCapsule(row, state.resumeCapsule);
+      const evidenceSnapshotIds = [...new Set([...current.evidenceSnapshotIds, input.id])];
+      const importedAt = new Date(now).toISOString();
+      const metadata = { sessionId: input.sessionId, stream: "imported-transcript", importedAt };
+
+      this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, storage_ref, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, NULL, 'AGENT_OUTPUT', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)")
+        .run(input.id, input.projectId, input.title, input.contentHash, input.storageRef, input.sizeBytes, JSON.stringify(metadata), now, now);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'TRANSCRIPT_IMPORTED', 'Imported transcript evidence', ?, ?)")
+        .run(newId("act"), input.projectId, input.sessionId, JSON.stringify({ evidenceSnapshotId: input.id }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'USER', 'SESSION', ?, 'TRANSCRIPT_IMPORTED', ?, ?)")
+        .run(newId("audit"), input.projectId, input.sessionId, JSON.stringify({ evidenceSnapshotId: input.id, storageRef: input.storageRef, contentHash: input.contentHash, sizeBytes: input.sizeBytes }), now);
+
+      const next: ResumeCapsuleDto = {
+        sessionId: input.sessionId,
+        status: row.status,
+        intent: row.intent,
+        summary: input.summary,
+        nextAction: current.nextAction,
+        lastRunId: current.lastRunId,
+        evidenceSnapshotIds,
+        updatedAt: importedAt
+      };
+      state.resumeCapsule = {
+        summary: next.summary,
+        nextAction: next.nextAction,
+        lastRunId: next.lastRunId,
+        evidenceSnapshotIds: next.evidenceSnapshotIds,
+        updatedAt: next.updatedAt
+      };
+      this.db.prepare("UPDATE sessions SET runtime_state = ?, resume_capsule_id = ?, last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+        .run(JSON.stringify(state), evidenceSnapshotIds[0] ?? null, now, now, input.sessionId);
+
+      const evidence = this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(input.id) as EvidenceSnapshotRow;
+      return { evidence: mapEvidenceSnapshot(evidence), resumeCapsule: next };
+    })();
+  }
+
   listSessionEvidence(sessionId: string): EvidenceSnapshotDto[] {
     const session = this.db.prepare("SELECT project_id FROM sessions WHERE id = ?").get(sessionId) as { project_id: string } | undefined;
     if (!session) throw new ContextOsError("NOT_FOUND", "Session not found", { id: sessionId });
@@ -281,30 +330,8 @@ export class SqliteRuntimeRepository {
 
   getResumeCapsule(sessionId: string): ResumeCapsuleDto {
     const row = this.getResumeSessionRow(sessionId);
-    const state = JSON.parse(row.runtime_state) as { resumeCapsule?: { summary?: string; nextAction?: string | null; lastRunId?: string | null; evidenceSnapshotIds?: string[]; updatedAt?: string } };
-    const capsule = state.resumeCapsule;
-    if (!capsule) {
-      return {
-        sessionId,
-        status: row.status,
-        intent: row.intent,
-        summary: row.intent ? `Session is ready to continue: ${row.intent}` : "Session is ready to continue.",
-        nextAction: "Continue in Agent",
-        lastRunId: null,
-        evidenceSnapshotIds: [],
-        updatedAt: new Date(row.updated_at).toISOString()
-      };
-    }
-    return {
-      sessionId,
-      status: row.status,
-      intent: row.intent,
-      summary: capsule.summary ?? "Session has a resume capsule.",
-      nextAction: capsule.nextAction ?? null,
-      lastRunId: capsule.lastRunId ?? null,
-      evidenceSnapshotIds: capsule.evidenceSnapshotIds ?? [],
-      updatedAt: capsule.updatedAt ?? new Date(row.updated_at).toISOString()
-    };
+    const state = JSON.parse(row.runtime_state) as { resumeCapsule?: ResumeCapsuleState };
+    return mapResumeCapsule(row, state.resumeCapsule);
   }
 
   recoverOrphanRunningContinues(now: number): number {
@@ -416,6 +443,31 @@ function mapEvidenceSnapshot(row: EvidenceSnapshotRow): EvidenceSnapshotDto {
     metadata: JSON.parse(row.metadata_json) as Record<string, unknown>,
     capturedAt: new Date(row.captured_at).toISOString(),
     createdAt: new Date(row.created_at).toISOString()
+  };
+}
+
+function mapResumeCapsule(row: ResumeSessionRow, capsule?: ResumeCapsuleState): ResumeCapsuleDto {
+  if (!capsule) {
+    return {
+      sessionId: row.id,
+      status: row.status,
+      intent: row.intent,
+      summary: row.intent ? `Session is ready to continue: ${row.intent}` : "Session is ready to continue.",
+      nextAction: "Continue in Agent",
+      lastRunId: null,
+      evidenceSnapshotIds: [],
+      updatedAt: new Date(row.updated_at).toISOString()
+    };
+  }
+  return {
+    sessionId: row.id,
+    status: row.status,
+    intent: row.intent,
+    summary: capsule.summary ?? "Session has a resume capsule.",
+    nextAction: capsule.nextAction ?? null,
+    lastRunId: capsule.lastRunId ?? null,
+    evidenceSnapshotIds: capsule.evidenceSnapshotIds ?? [],
+    updatedAt: capsule.updatedAt ?? new Date(row.updated_at).toISOString()
   };
 }
 

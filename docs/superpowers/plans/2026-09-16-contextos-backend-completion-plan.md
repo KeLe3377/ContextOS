@@ -94,7 +94,7 @@ Remaining gaps:
 - Evidence Snapshot immutability is not enforced at every layer.
 - Context Item versions and provenance are simplified.
 - Context Package manifest is missing.
-- Transcript import is missing.
+- Manual text transcript import is complete; Codex file discovery and live capture are still missing.
 - Snapshot compare/verify is minimal or missing.
 
 Action: prioritize Context Package and evidence integrity because they are needed for meaningful `Continue in Agent`.

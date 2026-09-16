@@ -4,7 +4,7 @@ import { DecisionService, ReviewItemService, SessionService, WorkItemService } f
 import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages/contracts/src/common.js";
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
 import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
-import { sessionInputSchema, sessionPatchSchema } from "../../../../../packages/contracts/src/sessions.js";
+import { sessionInputSchema, sessionPatchSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
 import { workItemInputSchema, workItemPatchSchema } from "../../../../../packages/contracts/src/work-items.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
@@ -32,6 +32,12 @@ export async function registerCoreResourceRoutes(
   server.get("/api/sessions/:id/context-pack", async (request) => services.sessions.getContextPackage(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/sessions/:id/evidence", async (request) => ({ items: services.sessions.listEvidence(paramsWithIdSchema.parse(request.params).id), page: { nextCursor: null, hasMore: false } }));
   server.get("/api/sessions/:id/resume-capsule", async (request) => services.sessions.getResumeCapsule(paramsWithIdSchema.parse(request.params).id));
+  server.post("/api/sessions/:id/import-transcript", async (request, reply) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const result = services.sessions.importTranscript(id, transcriptImportInputSchema.parse(request.body));
+    reply.code(201);
+    return result;
+  });
   server.patch("/api/sessions/:id", async (request) => services.sessions.patch(paramsWithIdSchema.parse(request.params).id, sessionPatchSchema.parse(request.body)));
   for (const action of ["continue", "review", "archive"] as const) {
     server.post(`/api/sessions/:id/${action}`, async (request) => {

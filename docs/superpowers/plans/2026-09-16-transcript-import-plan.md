@@ -27,7 +27,7 @@
 - Modify: `packages/contracts/src/sessions.ts`
 - Modify: `apps/daemon/src/http/routes/core-resources.ts`
 
-- [ ] **Step 1: Add contract types**
+- [x] **Step 1: Add contract types**
 
 Add a type-only `EvidenceSnapshotDto` import and these definitions:
 
@@ -45,7 +45,7 @@ export type TranscriptImportResult = {
 };
 ```
 
-- [ ] **Step 2: Register the route**
+- [x] **Step 2: Register the route**
 
 Import the schema and add:
 
@@ -67,7 +67,7 @@ The global POST idempotency hook remains the only replay mechanism.
 - Modify: `packages/application/src/core/core-services.ts`
 - Modify: `packages/application/src/core/runtime-services.ts`
 
-- [ ] **Step 1: Add constrained Evidence removal**
+- [x] **Step 1: Add constrained Evidence removal**
 
 Import `resolve`, `relative`, and `isAbsolute`. Add:
 
@@ -85,7 +85,7 @@ remove(storageRef: string): void {
 
 Never recursively delete and never remove directories.
 
-- [ ] **Step 2: Add Session delegation**
+- [x] **Step 2: Add Session delegation**
 
 Import the transcript types and add:
 
@@ -98,7 +98,7 @@ importTranscript(id: string, input: TranscriptImportInput): TranscriptImportResu
 
 Do not reject ended Sessions or archived Projects.
 
-- [ ] **Step 3: Add runtime orchestration**
+- [x] **Step 3: Add runtime orchestration**
 
 Add a method that requires the Evidence Store, generates `ev_*`, writes exact `contentText` using `projectId`, and calls:
 
@@ -107,7 +107,6 @@ this.runtime.importSessionTranscript({
   id: evidenceId,
   projectId: session.projectId,
   sessionId: session.id,
-  sessionStatus: session.status,
   title: input.title ?? "Imported Codex transcript",
   summary: input.summary ?? "Imported transcript captured.",
   contentHash: stored.contentHash,
@@ -116,21 +115,21 @@ this.runtime.importSessionTranscript({
 }, nowMs());
 ```
 
-Wrap only the repository call in `try/catch`; on failure call `evidenceStore.remove(stored.storageRef)` and rethrow the original error.
+Wrap only the repository call in `try/catch`; on failure attempt `evidenceStore.remove(stored.storageRef)` and rethrow the original database error even if cleanup itself fails.
 
 ### Task 3: Transactional Persistence
 
 **Files:**
 - Modify: `packages/infrastructure/src/sqlite/runtime-repository.ts`
 
-- [ ] **Step 1: Add `importSessionTranscript`**
+- [x] **Step 1: Add `importSessionTranscript`**
 
 Use one `this.db.transaction` to:
 
 1. Read the current Session row and Capsule.
 2. Insert `evidence_snapshots` as `AGENT_OUTPUT` with metadata `{ sessionId, stream: "imported-transcript", importedAt }`.
 3. Insert Session Activity and Audit records named `TRANSCRIPT_IMPORTED`, referencing the Evidence ID.
-4. Update only `runtime_state`, `last_activity_at`, and `updated_at`; never mutate Session status or revision.
+4. Update `runtime_state`, `last_activity_at`, and `updated_at`, incrementing revision without mutating Session status.
 
 The next Capsule is:
 
@@ -149,7 +148,7 @@ const next: ResumeCapsuleDto = {
 
 Return `{ evidence, resumeCapsule: next }`. Reuse `mapEvidenceSnapshot` through a focused private lookup.
 
-- [ ] **Step 2: Share Capsule parsing**
+- [x] **Step 2: Share Capsule parsing**
 
 Extract existing `runtime_state` parsing into a private nullable helper used by both `getResumeCapsule` and import. Preserve the existing default Capsule behavior when no prior Capsule exists; do not add a migration.
 
@@ -158,15 +157,15 @@ Extract existing `runtime_state` parsing into a private nullable helper used by 
 **Files:**
 - Create: `tests/integration/transcript-import-api.test.ts`
 
-- [ ] **Step 1: Test successful historical import**
+- [x] **Step 1: Test successful historical import**
 
 Create a Project and Session, complete a short run, capture the prior Capsule, then import explicit text/title/summary. Assert HTTP 201, exact file contents, verifiable Evidence, `AGENT_OUTPUT`, project-partitioned path, `imported-transcript` metadata, `COMPLETED` status preservation, prior `lastRunId`, and appended Evidence IDs. Query SQLite readonly for one Activity and one Audit event.
 
-- [ ] **Step 2: Test defaults, validation, and idempotency**
+- [x] **Step 2: Test defaults, validation, and idempotency**
 
 Assert omitted title/summary use `Imported Codex transcript` and `Imported transcript captured.`. Assert whitespace-only `contentText`, `summary`, and `title` each return 400. Repeat a request with `Idempotency-Key: transcript-import-0001`; assert HTTP 201, `x-idempotent-replay: true`, the same Evidence ID, and one imported Evidence row.
 
-- [ ] **Step 3: Run focused tests**
+- [x] **Step 3: Run focused tests**
 
 ```powershell
 npm test -- --run tests/integration/transcript-import-api.test.ts tests/integration/runtime-api.test.ts tests/integration/evidence-store.test.ts
@@ -180,11 +179,11 @@ Expected: all selected files pass with zero failures.
 - Modify: `docs/2026-09-16-contextos-complete-status-and-roadmap.md`
 - Modify: `docs/superpowers/plans/2026-09-16-contextos-backend-completion-plan.md`
 
-- [ ] **Step 1: Synchronize status docs**
+- [x] **Step 1: Synchronize status docs**
 
 Mark manual text transcript import as first-pass complete. Keep Codex file discovery, live bridging, role parsing, and frontend import UI explicitly pending.
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 ```powershell
 npm run build
@@ -195,6 +194,6 @@ git diff --check
 
 Expected: every command exits 0 and Vitest reports zero failures.
 
-- [ ] **Step 3: Review the final diff**
+- [x] **Step 3: Review the final diff**
 
 Run `git status --short`, `git diff --stat`, and a scoped `git diff` over the files above. Confirm transcript import changes coexist with the pre-existing daemon lock and Evidence partition work. Do not create an implementation commit unless the user asks.

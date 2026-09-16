@@ -1,6 +1,6 @@
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
-import type { ResumeCapsuleDto, SessionDto, SessionStatus } from "../../../contracts/src/sessions.js";
+import type { ResumeCapsuleDto, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
@@ -114,6 +114,35 @@ export class ContinueSessionService {
 
   getResumeCapsule(sessionId: string): ResumeCapsuleDto {
     return this.runtime.getResumeCapsule(sessionId);
+  }
+
+  importTranscript(session: SessionDto, input: TranscriptImportInput): TranscriptImportResult {
+    if (!this.evidenceStore) throw new Error("Evidence store is not configured");
+    const evidenceId = newId("ev");
+    const stored = this.evidenceStore.writeText({
+      snapshotId: evidenceId,
+      projectId: session.projectId,
+      contentText: input.contentText
+    });
+    try {
+      return this.runtime.importSessionTranscript({
+        id: evidenceId,
+        projectId: session.projectId,
+        sessionId: session.id,
+        title: input.title ?? "Imported Codex transcript",
+        summary: input.summary ?? "Imported transcript captured.",
+        contentHash: stored.contentHash,
+        storageRef: stored.storageRef,
+        sizeBytes: stored.sizeBytes
+      }, nowMs());
+    } catch (error) {
+      try {
+        this.evidenceStore.remove(stored.storageRef);
+      } catch {
+        // Preserve the database failure; cleanup can be reconciled from the unreferenced file.
+      }
+      throw error;
+    }
   }
 
   private markProcessExit(input: { session: SessionDto; jobId: string; runId: string; exit: ProcessExitInfo }): void {
