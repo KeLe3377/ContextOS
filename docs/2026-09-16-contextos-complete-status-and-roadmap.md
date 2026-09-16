@@ -175,7 +175,7 @@ first pass 已完成，仍有深层硬化空间。
 - 新增 `AgentAdapter` contract。
 - 新增 Codex-only registry。
 - Continue 通过 `session.agentAdapterId` 查 registry。
-- Codex capability 位预留：
+- Codex capability contract：
   - `discover`
   - `launch`
   - `resume`
@@ -187,7 +187,7 @@ first pass 已完成，仍有深层硬化空间。
 
 - Claude Code adapter 未实现。
 - Cursor adapter 未实现。
-- `inspectStatus` / `interrupt` / `importTranscript` 只是 capability 预留，尚无完整行为。
+- `inspectStatus` / `interrupt` / `importTranscript` 已有 Codex first pass 行为；`resume` 尚无完整行为。
 
 ### Phase K: Packaging / Docs / Verification
 
@@ -247,12 +247,12 @@ frontend/styles.css
 - launch Codex CLI。
 - non-interactive output capture。
 - 通过 registry 查询 adapter。
+- inspect 受当前 daemon 管理的 Codex 进程。
+- interrupt 受管进程树，并将 Session / Job / Run / attempt 原子记录为 `PAUSED` / `CANCELED`。
+- Codex transcript 文件自动发现与 adapter `importTranscript` first pass。
 
 遗留：
 
-- Codex transcript 文件自动发现与 adapter `importTranscript` first pass 已完成。
-- Codex inspectStatus。
-- Codex interrupt。
 - Codex resume 的深层语义。
 - Claude Code adapter。
 - Cursor adapter。
@@ -260,8 +260,8 @@ frontend/styles.css
 
 建议后续 Adapter 顺序：
 
-1. 做 Codex inspectStatus / interrupt。
-2. 再抽 shared adapter contract tests。
+1. 抽 shared adapter contract tests。
+2. 定义 Codex resume 深层语义。
 3. 最后才加 Claude Code / Cursor。
 
 ## 6. 后端遗留路线
@@ -335,5 +335,5 @@ frontend/styles.css
 
 如果转 Adapter：
 
-1. Codex inspectStatus / interrupt。
-2. shared adapter contract tests。
+1. shared adapter contract tests。
+2. Codex resume 深层语义。

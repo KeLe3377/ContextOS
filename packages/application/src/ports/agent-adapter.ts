@@ -1,5 +1,5 @@
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
-import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
+import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../../../infrastructure/src/process-supervisor.js";
 
 export type AgentCapability =
   | "discover"
@@ -35,5 +35,7 @@ export interface AgentAdapter {
   discover(): AgentAdapterStatusDto;
   buildLaunchInfo(input: { cwd: string }): AgentLaunchInfoDto;
   launch(input: AgentLaunchInput): AgentLaunchResult;
+  inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus;
+  interrupt(input: { pid: number; supervisor: ProcessSupervisor }): boolean;
   importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult;
 }

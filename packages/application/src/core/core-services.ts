@@ -2,6 +2,7 @@ import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/
 import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus } from "../../../contracts/src/decisions.js";
 import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/review-items.js";
 import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
+import type { SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, SessionDto, SessionInput, SessionPatch, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type {
@@ -16,6 +17,7 @@ import { nowMs } from "../../../shared/src/clock.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 
 export type SessionContinueResult = SessionDto & Partial<SessionContinueRuntime>;
+export type SessionInterruptResult = SessionDto & SessionInterruptRuntimeDto;
 
 export class SessionService {
   constructor(
@@ -68,6 +70,22 @@ export class SessionService {
   importAdapterTranscript(id: string, input: AdapterTranscriptImportInput): AdapterTranscriptImportResult {
     if (!this.continueSession) throw new Error("Continue session runtime is not configured");
     return this.continueSession.importAdapterTranscript(this.sessions.getByIdOrThrow(id), input);
+  }
+
+  runtimeStatus(id: string): SessionRuntimeStatusDto {
+    if (!this.continueSession) throw new Error("Continue session runtime is not configured");
+    return this.continueSession.inspectStatus(this.sessions.getByIdOrThrow(id));
+  }
+
+  interrupt(id: string, expectedRevision: number): SessionInterruptResult {
+    if (!this.continueSession) throw new Error("Continue session runtime is not configured");
+    const current = this.sessions.getByIdOrThrow(id);
+    if (current.revision !== expectedRevision) {
+      throw new ContextOsError("CONFLICT", "Session revision conflict", { id, expectedRevision, currentRevision: current.revision });
+    }
+    assertTransition("Session", current.status, "interrupt", ["RUNNING"]);
+    const runtime = this.continueSession.interrupt(current, expectedRevision);
+    return { ...this.sessions.getByIdOrThrow(id), ...runtime };
   }
 
   transition(id: string, action: "continue" | "review" | "archive", expectedRevision: number): SessionContinueResult {

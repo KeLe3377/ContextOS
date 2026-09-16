@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentAdapter, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
-import type { ProcessExitInfo, ProcessSupervisor } from "../process-supervisor.js";
+import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex";
@@ -62,6 +62,14 @@ export class CodexAdapter implements AgentAdapter {
     const processCommand = resolveProcessCommand(launch.command, launch.args, this.platform);
     const process = input.supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, onExit: input.onExit });
     return { pid: process.pid, launch };
+  }
+
+  inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus {
+    return input.supervisor.inspect(input.pid);
+  }
+
+  interrupt(input: { pid: number; supervisor: ProcessSupervisor }): boolean {
+    return input.supervisor.interrupt(input.pid, this.platform);
   }
 
   importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult {

@@ -94,6 +94,75 @@ describe("runtime APIs", () => {
     expect(failed.completedAt).toBeTruthy();
   });
 
+  test("inspects and interrupts a managed continue run without exit callback rollback", async () => {
+    const { server, tempDir } = await createTestServer(["-e", "setInterval(() => {}, 1000)"]);
+    const session = await createSession(server);
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json().status).toBe("RUNNING");
+
+    const status = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/runtime-status` });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      sessionId: session.id,
+      adapterId: "codex",
+      run: { status: "RUNNING" },
+      process: { managed: true, running: true }
+    });
+
+    const interrupted = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/interrupt`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(interrupted.statusCode).toBe(200);
+    expect(interrupted.json()).toMatchObject({
+      status: "PAUSED",
+      job: { status: "CANCELED" },
+      run: { status: "CANCELED", failureCode: "INTERRUPTED" },
+      process: { managed: true, running: false }
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const afterExit = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(afterExit.json().status).toBe("PAUSED");
+    const stopped = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/runtime-status` });
+    expect(stopped.json()).toMatchObject({
+      run: { status: "CANCELED", failureCode: "INTERRUPTED" },
+      process: { running: false }
+    });
+
+    const repeated = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/interrupt`,
+      payload: { expectedRevision: afterExit.json().revision }
+    });
+    expect(repeated.statusCode).toBe(409);
+
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const attempt = db.prepare("SELECT status, failure_code AS failureCode FROM job_attempts WHERE job_id = ? ORDER BY started_at DESC LIMIT 1")
+        .get(interrupted.json().job.id);
+      const activity = db.prepare("SELECT COUNT(*) AS count FROM activity_events WHERE resource_id = ? AND event_type = 'CONTINUE_INTERRUPTED'")
+        .get(session.id) as { count: number };
+      const audit = db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE resource_id = ? AND action = 'CONTINUE_INTERRUPTED'")
+        .get(session.id) as { count: number };
+      expect(attempt).toEqual({ status: "CANCELED", failureCode: "INTERRUPTED" });
+      expect(activity.count).toBe(1);
+      expect(audit.count).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
   test("creates a context package when continuing a session", async () => {
     const { server, tempDir } = await createTestServer(["-e", ""]);
     const projectResponse = await server.inject({

@@ -32,6 +32,7 @@ export async function registerCoreResourceRoutes(
   server.get("/api/sessions/:id/context-pack", async (request) => services.sessions.getContextPackage(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/sessions/:id/evidence", async (request) => ({ items: services.sessions.listEvidence(paramsWithIdSchema.parse(request.params).id), page: { nextCursor: null, hasMore: false } }));
   server.get("/api/sessions/:id/resume-capsule", async (request) => services.sessions.getResumeCapsule(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/sessions/:id/runtime-status", async (request) => services.sessions.runtimeStatus(paramsWithIdSchema.parse(request.params).id));
   server.post("/api/sessions/:id/import-transcript", async (request, reply) => {
     const { id } = paramsWithIdSchema.parse(request.params);
     const result = services.sessions.importTranscript(id, transcriptImportInputSchema.parse(request.body));
@@ -45,6 +46,11 @@ export async function registerCoreResourceRoutes(
     return result;
   });
   server.patch("/api/sessions/:id", async (request) => services.sessions.patch(paramsWithIdSchema.parse(request.params).id, sessionPatchSchema.parse(request.body)));
+  server.post("/api/sessions/:id/interrupt", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const { expectedRevision } = expectedRevisionSchema.parse(request.body);
+    return services.sessions.interrupt(id, expectedRevision);
+  });
   for (const action of ["continue", "review", "archive"] as const) {
     server.post(`/api/sessions/:id/${action}`, async (request) => {
       const { id } = paramsWithIdSchema.parse(request.params);

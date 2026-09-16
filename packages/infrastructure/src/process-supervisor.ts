@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 
 const maxCapturedBytes = 64 * 1024;
 
@@ -22,7 +22,15 @@ export type LaunchProcessResult = {
   pid: number;
 };
 
+export type SupervisedProcessStatus = {
+  pid: number;
+  managed: boolean;
+  running: boolean;
+};
+
 export class ProcessSupervisor {
+  private readonly processes = new Map<number, ChildProcess>();
+
   launch(input: LaunchProcessInput): LaunchProcessResult {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
@@ -37,11 +45,36 @@ export class ProcessSupervisor {
       child.stderr?.on("data", (chunk: Buffer) => captured.pushStderr(chunk));
     }
     child.once("exit", (code, signal) => {
-      input.onExit?.({ code, signal, ...captured.toResult() });
+      try {
+        input.onExit?.({ code, signal, ...captured.toResult() });
+      } finally {
+        if (child.pid) this.processes.delete(child.pid);
+      }
     });
     if (!child.pid) throw new Error("Process did not expose a pid");
+    this.processes.set(child.pid, child);
     child.unref();
     return { pid: child.pid };
+  }
+
+  inspect(pid: number): SupervisedProcessStatus {
+    const child = this.processes.get(pid);
+    return { pid, managed: Boolean(child), running: Boolean(child && child.exitCode === null && child.signalCode === null) };
+  }
+
+  interrupt(pid: number, platform: NodeJS.Platform = process.platform): boolean {
+    const child = this.processes.get(pid);
+    if (!child || child.exitCode !== null || child.signalCode !== null) return false;
+    if (platform === "win32") {
+      const result = spawnSync("taskkill.exe", ["/pid", String(pid), "/t", "/f"], { windowsHide: true, shell: false });
+      return result.status === 0;
+    }
+    try {
+      process.kill(-pid, "SIGTERM");
+      return true;
+    } catch {
+      return child.kill("SIGTERM");
+    }
   }
 }
 

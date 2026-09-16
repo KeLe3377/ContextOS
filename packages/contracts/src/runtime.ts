@@ -72,3 +72,16 @@ export type AgentLaunchInfoDto = {
   cwd: string;
   mode: "manual-launch" | "queued-job";
 };
+
+export type SessionRuntimeStatusDto = {
+  sessionId: string;
+  adapterId: string;
+  run: SessionRunDto | null;
+  process: { pid: number; managed: boolean; running: boolean } | null;
+};
+
+export type SessionInterruptRuntimeDto = {
+  job: RuntimeJobDto;
+  run: SessionRunDto;
+  process: { pid: number; managed: boolean; running: boolean };
+};

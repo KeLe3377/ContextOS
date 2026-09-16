@@ -217,6 +217,45 @@ export class SqliteRuntimeRepository {
     return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
   }
 
+  getLatestSessionRun(sessionId: string): SessionRunDto | null {
+    const row = this.db.prepare("SELECT * FROM session_runs WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(sessionId) as SessionRunRow | undefined;
+    return row ? mapSessionRun(row) : null;
+  }
+
+  isSessionRunRunning(runId: string): boolean {
+    const row = this.db.prepare("SELECT status FROM session_runs WHERE id = ?").get(runId) as { status: string } | undefined;
+    return row?.status === "RUNNING";
+  }
+
+  markContinueCanceled(input: { sessionId: string; expectedSessionRevision: number; jobId: string; runId: string }, now: number): { job: RuntimeJobDto; run: SessionRunDto } {
+    const session = this.db.prepare("SELECT project_id, status, revision FROM sessions WHERE id = ?")
+      .get(input.sessionId) as { project_id: string; status: string; revision: number } | undefined;
+    if (!session) throw new ContextOsError("NOT_FOUND", "Session not found", { id: input.sessionId });
+    this.db.transaction(() => {
+      const updated = this.db.prepare("UPDATE sessions SET status = 'PAUSED', completed_at = NULL, last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND status = 'RUNNING'")
+        .run(now, now, input.sessionId, input.expectedSessionRevision);
+      if (updated.changes === 0) {
+        throw new ContextOsError("CONFLICT", "Session revision or runtime status conflict", {
+          id: input.sessionId,
+          expectedRevision: input.expectedSessionRevision
+        });
+      }
+      this.db.prepare("UPDATE jobs SET status = 'CANCELED', ended_at = ?, failure_code = 'INTERRUPTED', failure_message = 'Interrupted by user', updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
+        .run(now, now, input.jobId);
+      this.db.prepare("UPDATE session_runs SET status = 'CANCELED', ended_at = ?, failure_code = 'INTERRUPTED', failure_message = 'Interrupted by user', updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
+        .run(now, now, input.runId);
+      this.db.prepare("UPDATE job_attempts SET status = 'CANCELED', ended_at = ?, failure_code = 'INTERRUPTED', failure_message = 'Interrupted by user' WHERE job_id = ? AND status = 'STARTED'")
+        .run(now, input.jobId);
+      const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode: "INTERRUPTED" });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_INTERRUPTED', 'Interrupted Codex continue session', ?, ?)")
+        .run(newId("act"), session.project_id, input.sessionId, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'SESSION', ?, 'CONTINUE_INTERRUPTED', ?, ?, ?)")
+        .run(newId("audit"), session.project_id, input.sessionId, JSON.stringify({ status: session.status, revision: session.revision }), JSON.stringify({ status: "PAUSED", revision: session.revision + 1, jobId: input.jobId, runId: input.runId }), now);
+    })();
+    return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
+  }
+
 
 
   createContextPackageForSession(input: { projectId: string; sessionId: string; intent: string | null }, now: number): ContextPackageDto {

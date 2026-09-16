@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
-import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
+import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionInterruptRuntimeDto, SessionRunDto, SessionRuntimeStatusDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
@@ -118,6 +118,39 @@ export class ContinueSessionService {
     return this.runtime.getResumeCapsule(sessionId);
   }
 
+  inspectStatus(session: SessionDto): SessionRuntimeStatusDto {
+    const run = this.runtime.getLatestSessionRun(session.id);
+    const process = run?.pid === null || run?.pid === undefined
+      ? null
+      : this.adapters.getOrThrow(session.agentAdapterId).inspectStatus({ pid: run.pid, supervisor: this.supervisor });
+    return { sessionId: session.id, adapterId: session.agentAdapterId, run, process };
+  }
+
+  interrupt(session: SessionDto, expectedSessionRevision: number): SessionInterruptRuntimeDto {
+    const run = this.runtime.getLatestSessionRun(session.id);
+    if (!run || run.status !== "RUNNING" || !run.jobId || run.pid === null) {
+      throw new ContextOsError("CONFLICT", "Session has no running managed process", { sessionId: session.id });
+    }
+    const adapter = this.adapters.getOrThrow(session.agentAdapterId);
+    const process = adapter.inspectStatus({ pid: run.pid, supervisor: this.supervisor });
+    if (!process.managed || !process.running) {
+      throw new ContextOsError("CONFLICT", "Session process is not running or managed by this daemon", {
+        sessionId: session.id,
+        pid: run.pid
+      });
+    }
+    if (!adapter.interrupt({ pid: run.pid, supervisor: this.supervisor })) {
+      throw new ContextOsError("CONFLICT", "Session process could not be interrupted", { sessionId: session.id, pid: run.pid });
+    }
+    const canceled = this.runtime.markContinueCanceled({
+      sessionId: session.id,
+      expectedSessionRevision,
+      jobId: run.jobId,
+      runId: run.id
+    }, nowMs());
+    return { ...canceled, process: { pid: run.pid, managed: true, running: false } };
+  }
+
   importTranscript(session: SessionDto, input: TranscriptImportInput): TranscriptImportResult {
     return this.persistTranscript(session, input);
   }
@@ -206,9 +239,10 @@ export class ContinueSessionService {
   }
 
   private markProcessExit(input: { session: SessionDto; jobId: string; runId: string; exit: ProcessExitInfo }): void {
-    const evidenceIds = this.recordProcessOutputEvidence(input);
-    const status: SessionStatus = input.exit.code === 0 ? "COMPLETED" : "FAILED";
     try {
+      if (!this.runtime.isSessionRunRunning(input.runId)) return;
+      const evidenceIds = this.recordProcessOutputEvidence(input);
+      const status: SessionStatus = input.exit.code === 0 ? "COMPLETED" : "FAILED";
       if (input.exit.code === 0) {
         this.runtime.markContinueSucceeded({ jobId: input.jobId, runId: input.runId, exitCode: input.exit.code }, nowMs());
         this.writeResumeCapsule(input.session, input.runId, status, evidenceIds, "Codex run completed.", null);

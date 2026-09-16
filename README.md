@@ -166,6 +166,8 @@ npm run dev
 
 当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定 Codex session ID，后续只读取同一会话。它不会后台实时采集后续消息，也没有自动轮询。
 
+运行中的 Codex Session 可通过 `GET /api/sessions/:id/runtime-status` 查询当前 Run 和受管进程状态，并通过 `POST /api/sessions/:id/interrupt`（请求体包含 `expectedRevision`）终止进程树。中断后 Session 进入 `PAUSED`，Job 和 Run 记录为 `CANCELED`。
+
 ## Codex Adapter
 
 当前 registry 只启用 Codex adapter。Windows 默认命令是 `codex.cmd`，非 Windows 默认命令是 `codex`。可以用环境变量覆盖：
@@ -176,7 +178,7 @@ $env:CONTEXTOS_CODEX_ARGS='["--help"]'
 npm run dev
 ```
 
-Codex adapter 已实现 `discover`、`launch` 和 `importTranscript` first pass；`resume`、`inspectStatus`、`interrupt` 仍是能力位。Claude Code 和 Cursor 尚未启用。
+Codex adapter 已实现 `discover`、`launch`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass；`resume` 仍是能力位。Claude Code 和 Cursor 尚未启用。
 
 ## 验证
 
