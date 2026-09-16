@@ -1,14 +1,6 @@
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../../../infrastructure/src/process-supervisor.js";
 
-export type AgentCapability =
-  | "discover"
-  | "launch"
-  | "resume"
-  | "inspectStatus"
-  | "interrupt"
-  | "importTranscript";
-
 export type AgentLaunchInput = {
   cwd: string;
   supervisor: ProcessSupervisor;

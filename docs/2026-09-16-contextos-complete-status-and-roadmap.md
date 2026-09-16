@@ -250,19 +250,19 @@ frontend/styles.css
 - inspect 受当前 daemon 管理的 Codex 进程。
 - interrupt 受管进程树，并将 Session / Job / Run / attempt 原子记录为 `PAUSED` / `CANCELED`。
 - Codex transcript 文件自动发现与 adapter `importTranscript` first pass。
+- 共享 adapter contract test harness，覆盖可用/不可用 discovery、launch metadata、transcript normalization、stdout/stderr/exit、inspect 和 interrupt。
 
 遗留：
 
 - Codex resume 的深层语义。
 - Claude Code adapter。
 - Cursor adapter。
-- adapter fixtures / shared contract test suite 更完整化。
+- adapter fixtures 仍需随新增 adapter 扩展。
 
 建议后续 Adapter 顺序：
 
-1. 抽 shared adapter contract tests。
-2. 定义 Codex resume 深层语义。
-3. 最后才加 Claude Code / Cursor。
+1. 定义 Codex resume 深层语义。
+2. 最后才加 Claude Code / Cursor，并复用 shared contract tests。
 
 ## 6. 后端遗留路线
 
@@ -325,7 +325,7 @@ frontend/styles.css
 
 ## 8. 推荐下一步
 
-如果继续后端：优先转入语义级 Snapshot compare，或按前端集成反馈补齐 Context/Evidence API。
+如果继续后端：定义 Codex resume 深层语义，或按前端集成反馈补齐 Context/Evidence API。
 
 如果转前端：
 
@@ -335,5 +335,5 @@ frontend/styles.css
 
 如果转 Adapter：
 
-1. shared adapter contract tests。
-2. Codex resume 深层语义。
+1. Codex resume 深层语义。
+2. Claude Code / Cursor adapter 复用 shared contract tests。

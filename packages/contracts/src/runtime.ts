@@ -55,6 +55,17 @@ export type SessionRunDto = {
   revision: number;
 };
 
+export const agentCapabilityValues = [
+  "discover",
+  "launch",
+  "resume",
+  "inspectStatus",
+  "interrupt",
+  "importTranscript"
+] as const;
+
+export type AgentCapability = (typeof agentCapabilityValues)[number];
+
 export type AgentAdapterStatusDto = {
   id: string;
   displayName: string;
@@ -62,7 +73,7 @@ export type AgentAdapterStatusDto = {
   command: string;
   version: string | null;
   error: string | null;
-  capabilities: string[];
+  capabilities: AgentCapability[];
 };
 
 export type AgentLaunchInfoDto = {

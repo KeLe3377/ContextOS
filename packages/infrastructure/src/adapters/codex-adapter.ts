@@ -43,7 +43,7 @@ export class CodexAdapter implements AgentAdapter {
       command: this.command,
       version: !result.error && result.status === 0 ? output || null : null,
       error: result.error ? result.error.message : result.status === 0 ? null : output || `Exited with status ${result.status}`,
-      capabilities: ["discover", "launch", "resume", "inspectStatus", "interrupt", "importTranscript"]
+      capabilities: ["discover", "launch", "inspectStatus", "interrupt", "importTranscript"]
     };
   }
 

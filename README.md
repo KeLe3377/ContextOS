@@ -178,7 +178,7 @@ $env:CONTEXTOS_CODEX_ARGS='["--help"]'
 npm run dev
 ```
 
-Codex adapter 已实现 `discover`、`launch`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass；`resume` 仍是能力位。Claude Code 和 Cursor 尚未启用。
+Codex adapter 已实现 `discover`、`launch`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass，并通过共享 adapter contract tests；`resume` 仍是预留能力，尚未对外宣称支持。Claude Code 和 Cursor 尚未启用。
 
 ## 验证
 
