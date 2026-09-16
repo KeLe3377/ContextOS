@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
+import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 
 let server: FastifyInstance | undefined;
@@ -77,6 +78,16 @@ describe("Project API", () => {
     });
     expect(conflictResponse.statusCode).toBe(409);
     expect(conflictResponse.json().error.code).toBe("CONFLICT");
+
+    const db = new Database(join(tempDir!, "contextos.sqlite"), { readonly: true });
+    try {
+      const activity = db.prepare("SELECT event_type FROM activity_events WHERE resource_id = ? ORDER BY created_at, id").all(created.id);
+      const audit = db.prepare("SELECT action FROM audit_events WHERE resource_id = ? ORDER BY created_at, id").all(created.id);
+      expect(activity).toEqual([{ event_type: "PROJECT_CREATED" }, { event_type: "PROJECT_ARCHIVED" }]);
+      expect(audit).toEqual([{ action: "CREATE" }, { action: "STATUS_ARCHIVED" }]);
+    } finally {
+      db.close();
+    }
   });
 
   test("returns stable not found errors", async () => {

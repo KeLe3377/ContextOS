@@ -26,8 +26,14 @@ export class SqliteSessionRepository {
 
   create(input: SessionInput, now: number): SessionDto {
     const id = newId("sess");
-    this.db.prepare("INSERT INTO sessions (id, project_id, agent_adapter_id, title, intent, status, runtime_state, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'CREATED', '{}', ?, ?, 1)")
-      .run(id, input.projectId, input.agentAdapterId, input.title ?? null, input.intent ?? null, now, now);
+    this.db.transaction(() => {
+      this.db.prepare("INSERT INTO sessions (id, project_id, agent_adapter_id, title, intent, status, runtime_state, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'CREATED', '{}', ?, ?, 1)")
+        .run(id, input.projectId, input.agentAdapterId, input.title ?? null, input.intent ?? null, now, now);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'SESSION_CREATED', 'Session created', ?, ?)")
+        .run(newId("act"), input.projectId, id, JSON.stringify({ title: input.title ?? null, adapterId: input.agentAdapterId }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'USER', 'SESSION', ?, 'CREATE', ?, ?)")
+        .run(newId("audit"), input.projectId, id, JSON.stringify({ id, title: input.title ?? null, adapterId: input.agentAdapterId }), now);
+    })();
     return this.getByIdOrThrow(id);
   }
 
@@ -64,9 +70,21 @@ export class SqliteSessionRepository {
     const startedAt = status === "RUNNING" ? now : null;
     const completedAt = status === "COMPLETED" || status === "FAILED" ? now : null;
     const archivedAt = status === "ARCHIVED" ? now : null;
-    const result = this.db.prepare("UPDATE sessions SET status = ?, started_at = COALESCE(started_at, ?), completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 'RUNNING' THEN NULL ELSE completed_at END, last_activity_at = ?, archived_at = COALESCE(?, archived_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(status, startedAt, completedAt, completedAt, status, now, archivedAt, now, id, expectedRevision);
-    ensureChanged(result.changes, this.getById(id), "Session", id, expectedRevision);
+    const before = this.getById(id);
+    let changes = 0;
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE sessions SET status = ?, started_at = COALESCE(started_at, ?), completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 'RUNNING' THEN NULL ELSE completed_at END, last_activity_at = ?, archived_at = COALESCE(?, archived_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(status, startedAt, completedAt, completedAt, status, now, archivedAt, now, id, expectedRevision);
+      changes = result.changes;
+      if (result.changes > 0 && before) {
+        const after = this.getByIdOrThrow(id);
+        this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, ?, ?, ?, ?)")
+          .run(newId("act"), after.projectId, id, `SESSION_${status}`, `Session ${status.toLowerCase()}`, JSON.stringify({ beforeStatus: before.status, afterStatus: status }), now);
+        this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'SESSION', ?, ?, ?, ?, ?)")
+          .run(newId("audit"), after.projectId, id, `STATUS_${status}`, JSON.stringify(before), JSON.stringify(after), now);
+      }
+    })();
+    ensureChanged(changes, before ?? this.getById(id), "Session", id, expectedRevision);
     return this.getByIdOrThrow(id);
   }
 }

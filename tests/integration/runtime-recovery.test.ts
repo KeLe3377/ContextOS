@@ -26,7 +26,7 @@ afterEach(async () => {
     launchedPid = undefined;
   }
   if (tempDir) {
-    await rm(tempDir, { recursive: true, force: true });
+    await rmWithRetry(tempDir);
     tempDir = undefined;
   }
   restoreEnv();
@@ -102,4 +102,16 @@ function restoreEnv(): void {
 function setEnv(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];
   else process.env[key] = value;
+}
+
+async function rmWithRetry(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt === 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
 }

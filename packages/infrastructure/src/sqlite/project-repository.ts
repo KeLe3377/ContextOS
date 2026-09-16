@@ -31,21 +31,27 @@ export class SqliteProjectRepository {
     const id = newId("proj");
     const rootPathHash = createHash("sha256").update(input.rootPath).digest("hex");
 
-    this.db
-      .prepare(
-        "INSERT INTO projects (id, name, description, root_path, root_path_hash, status, default_rule_ids, agent_adapter_ids, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, 1)"
-      )
-      .run(
-        id,
-        input.name,
-        input.description ?? null,
-        input.rootPath,
-        rootPathHash,
-        JSON.stringify(input.defaultRuleIds),
-        JSON.stringify(input.agentAdapterIds),
-        now,
-        now
-      );
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO projects (id, name, description, root_path, root_path_hash, status, default_rule_ids, agent_adapter_ids, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, 1)"
+        )
+        .run(
+          id,
+          input.name,
+          input.description ?? null,
+          input.rootPath,
+          rootPathHash,
+          JSON.stringify(input.defaultRuleIds),
+          JSON.stringify(input.agentAdapterIds),
+          now,
+          now
+        );
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'PROJECT', ?, 'PROJECT_CREATED', 'Project created', ?, ?)")
+        .run(newId("act"), id, id, JSON.stringify({ name: input.name, rootPathHash }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'USER', 'PROJECT', ?, 'CREATE', ?, ?)")
+        .run(newId("audit"), id, id, JSON.stringify({ id, name: input.name, rootPathHash }), now);
+    })();
 
     return this.getByIdOrThrow(id);
   }
@@ -93,14 +99,26 @@ export class SqliteProjectRepository {
     now: number,
     archivedAt: number | null
   ): ProjectDto {
-    const result = this.db
-      .prepare(
-        "UPDATE projects SET status = ?, updated_at = ?, archived_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?"
-      )
-      .run(status, now, archivedAt, id, expectedRevision);
+    const before = this.getById(id);
+    let changes = 0;
+    this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          "UPDATE projects SET status = ?, updated_at = ?, archived_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?"
+        )
+        .run(status, now, archivedAt, id, expectedRevision);
+      changes = result.changes;
+      if (result.changes > 0 && before) {
+        const after = this.getByIdOrThrow(id);
+        this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'PROJECT', ?, ?, ?, ?, ?)")
+          .run(newId("act"), id, id, `PROJECT_${status}`, `Project ${status.toLowerCase()}`, JSON.stringify({ beforeStatus: before.status, afterStatus: status }), now);
+        this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'PROJECT', ?, ?, ?, ?, ?)")
+          .run(newId("audit"), id, id, `STATUS_${status}`, JSON.stringify(before), JSON.stringify(after), now);
+      }
+    })();
 
-    if (result.changes === 0) {
-      const current = this.getById(id);
+    if (changes === 0) {
+      const current = before ?? this.getById(id);
       if (!current) {
         throw new ContextOsError("NOT_FOUND", "Project not found", { id });
       }
@@ -130,4 +148,3 @@ function mapProject(row: ProjectRow): ProjectDto {
     archivedAt: row.archived_at === null ? null : new Date(row.archived_at).toISOString()
   };
 }
-

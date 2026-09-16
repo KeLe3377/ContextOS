@@ -147,6 +147,8 @@ export class SqliteRuntimeRepository {
         .run(newId("act"), input.projectId, input.sessionId, JSON.stringify({ jobId, runId, adapterId: input.adapterId }), now);
       this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CONTINUE_QUEUED', ?, ?)")
         .run(newId("audit"), input.projectId, input.sessionId, JSON.stringify({ jobId, runId }), now);
+      this.db.prepare("INSERT INTO outbox_events (id, topic, payload_json, status, next_attempt_at, created_at, updated_at) VALUES (?, 'session.continue.queued', ?, 'PENDING', ?, ?, ?)")
+        .run(newId("outbox"), JSON.stringify({ projectId: input.projectId, sessionId: input.sessionId, jobId, runId, adapterId: input.adapterId }), now, now, now);
     })();
     return { job: this.getJob(jobId), run: this.getSessionRun(runId) };
   }

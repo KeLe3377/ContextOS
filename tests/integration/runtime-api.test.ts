@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
+import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 
 const originalCommand = process.env.CONTEXTOS_CODEX_COMMAND;
@@ -94,7 +95,7 @@ describe("runtime APIs", () => {
   });
 
   test("creates a context package when continuing a session", async () => {
-    const { server } = await createTestServer(["-e", ""]);
+    const { server, tempDir } = await createTestServer(["-e", ""]);
     const projectResponse = await server.inject({
       method: "POST",
       url: "/api/projects",
@@ -153,6 +154,21 @@ describe("runtime APIs", () => {
     });
     expect(continued.statusCode).toBe(200);
 
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const outbox = db.prepare("SELECT topic, status, payload_json AS payloadJson FROM outbox_events ORDER BY created_at, id").all() as Array<{ topic: string; status: string; payloadJson: string }>;
+      expect(outbox).toEqual([
+        expect.objectContaining({ topic: "session.continue.queued", status: "PENDING" })
+      ]);
+      expect(JSON.parse(outbox[0].payloadJson)).toMatchObject({
+        projectId: project.id,
+        sessionId: session.id,
+        adapterId: "codex"
+      });
+    } finally {
+      db.close();
+    }
+
     const contextPack = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/context-pack` });
     expect(contextPack.statusCode).toBe(200);
     expect(contextPack.json().sessionId).toBe(session.id);
@@ -183,7 +199,7 @@ describe("runtime APIs", () => {
   });
 });
 
-async function createTestServer(args: string[]): Promise<{ server: FastifyInstance }> {
+async function createTestServer(args: string[]): Promise<{ server: FastifyInstance; tempDir: string }> {
   restoreEnv();
   process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
   process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(args);
@@ -201,7 +217,7 @@ async function createTestServer(args: string[]): Promise<{ server: FastifyInstan
     await server.close();
     await rm(tempDir, { recursive: true, force: true });
   });
-  return { server };
+  return { server, tempDir };
 }
 
 async function createSession(server: FastifyInstance): Promise<{ id: string; revision: number }> {

@@ -325,7 +325,7 @@ Steps:
 
 Can be short: medium. Conflict analysis can be deferred after evaluation exists.
 
-### Phase H: Idempotency, Audit, Activity, And Outbox Discipline
+### Phase H: Idempotency, Audit, Activity, And Outbox Discipline - first pass complete
 
 Purpose: make repeated requests and crashes safer while keeping these systems internal.
 
@@ -338,10 +338,10 @@ Files likely touched:
 
 Steps:
 
-- [ ] Implement `Idempotency-Key` handling for create/action endpoints that can be retried by UI.
-- [ ] Ensure important lifecycle actions write Audit and Activity in the same transaction as resource change.
-- [ ] Add an internal outbox dispatcher only after there is an actual consumer; until then keep outbox records as durable internal events.
-- [ ] Make API errors include stable codes and request IDs without stack traces or secrets.
+- [x] Implement `Idempotency-Key` handling for create/action endpoints that can be retried by UI.
+- [x] Ensure important Project, Session, and runtime lifecycle actions write Audit and Activity in the same transaction as resource change.
+- [x] Add an internal outbox dispatcher only after there is an actual consumer; until then keep outbox records as durable internal events.
+- [x] Make API errors include stable codes and request IDs without stack traces or secrets.
 
 Can be short: medium. Idempotency should be incremental per route group.
 
@@ -422,7 +422,7 @@ Start with the smallest work that makes the current loop more truthful:
 5. Phase E: Session evidence/resume capsule MVP. First pass complete on 2026-09-16.
 6. Phase F: core lifecycle hardening.
 7. Phase G: Rule evaluation MVP.
-8. Phase H: idempotency/audit/activity discipline.
+8. Phase H: idempotency/audit/activity discipline. First pass complete on 2026-09-16.
 9. Phase I: frontend action wiring.
 10. Phase J: adapter contract deepening. First pass complete on 2026-09-16.
 11. Phase K: packaging/docs/final verification. First pass complete on 2026-09-16.

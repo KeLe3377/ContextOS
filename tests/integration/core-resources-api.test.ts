@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
+import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 
 let server: FastifyInstance | undefined;
@@ -56,6 +57,16 @@ describe("core resource APIs", () => {
     });
     expect(continued.statusCode).toBe(200);
     expect(continued.json().status).toBe("RUNNING");
+
+    const db = new Database(join(tempDir!, "contextos.sqlite"), { readonly: true });
+    try {
+      const activity = db.prepare("SELECT event_type FROM activity_events WHERE resource_id = ? ORDER BY created_at, id").all(session.id);
+      const audit = db.prepare("SELECT action FROM audit_events WHERE resource_id = ? ORDER BY created_at, id").all(session.id);
+      expect(activity).toEqual(expect.arrayContaining([{ event_type: "SESSION_CREATED" }, { event_type: "SESSION_RUNNING" }]));
+      expect(audit).toEqual(expect.arrayContaining([{ action: "CREATE" }, { action: "STATUS_RUNNING" }]));
+    } finally {
+      db.close();
+    }
   });
 
   test("creates and accepts decisions", async () => {

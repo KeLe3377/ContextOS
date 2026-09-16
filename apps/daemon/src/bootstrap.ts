@@ -31,6 +31,7 @@ import { ContextOsError } from "../../../packages/shared/src/errors.js";
 import { nowMs } from "../../../packages/shared/src/clock.js";
 import { registerContextResourceRoutes } from "./http/routes/context-resources.js";
 import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
+import { registerIdempotencyHooks } from "./http/idempotency.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
 import { registerRuleRoutes } from "./http/routes/rules.js";
 import { registerRuntimeRoutes } from "./http/routes/runtime.js";
@@ -120,6 +121,7 @@ export async function createDaemonServer(
     },
     methods: ["GET", "POST", "PATCH", "OPTIONS"]
   });
+  registerIdempotencyHooks(server, sqlite.db);
   server.get("/api/health", async (request) => ({
     version: packageVersion,
     schemaVersion,
