@@ -102,6 +102,7 @@ first pass 已完成，仍有深层硬化空间。
 - 重复 verify 复用活动中的同类 Review Item；关闭后故障复发会新建。
 - `POST /api/evidence-snapshots/:id/compare` 可比较同 Project Snapshot 的 hash、size、type 和 source。
 - `GET /api/context-items/:id/versions` 可读取连续编号的内容版本和创建者 provenance。
+- `POST /api/context-items/:id/versions/:versionNumber/restore` 可将历史内容恢复为新版本，保留完整历史并记录恢复来源、Activity/Audit 与 revision 冲突。
 - Evidence Snapshot 现由 SQLite trigger 禁止 UPDATE/DELETE，Evidence Store verify 也拒绝越出 `evidence/` 根目录的 storage reference。
 
 已完成 DB/file 跨崩溃 recovery first pass：启动时清理未完成临时文件、隔离无 DB 引用的最终文件，并扫描已存储 Snapshot 的缺失/篡改状态，通过既有 Review Item 机制记录异常；health 暴露恢复计数且不泄露路径。
@@ -321,9 +322,7 @@ frontend/styles.css
 
 ## 8. 推荐下一步
 
-如果继续后端：
-
-1. Context Item 历史版本恢复。
+如果继续后端：优先转入正文/语义级 Snapshot compare，或按前端集成反馈补齐 Context/Evidence API。
 
 如果转前端：
 

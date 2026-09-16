@@ -304,7 +304,7 @@ describe("context resource APIs", () => {
     expect(response.json().error.code).toBe("INVALID_ARGUMENT");
   });
 
-  test("lists contiguous Context Item content versions with provenance", async () => {
+  test("lists and restores contiguous Context Item versions with provenance", async () => {
     const createdResponse = await server!.inject({
       method: "POST",
       url: "/api/context-items",
@@ -339,13 +339,15 @@ describe("context resource APIs", () => {
       }
     });
     expect(patchedResponse.statusCode).toBe(200);
+    const patched = patchedResponse.json();
 
     const versionsResponse = await server!.inject({
       method: "GET",
       url: `/api/context-items/${created.id}/versions`
     });
     expect(versionsResponse.statusCode).toBe(200);
-    expect(versionsResponse.json().items).toEqual([
+    const versions = versionsResponse.json().items;
+    expect(versions).toEqual([
       expect.objectContaining({
         contextItemId: created.id,
         versionNumber: 2,
@@ -365,5 +367,44 @@ describe("context resource APIs", () => {
         createdById: null
       })
     ]);
+
+    const restoredResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-items/${created.id}/versions/1/restore`,
+      payload: { expectedRevision: patched.revision }
+    });
+    expect(restoredResponse.statusCode).toBe(200);
+    const restored = restoredResponse.json();
+    expect(restored.item).toMatchObject({
+      id: created.id,
+      status: "ACTIVE",
+      summary: "Keep the daemon local.",
+      confidence: "MEDIUM",
+      metadata: { source: "design" },
+      revision: patched.revision + 1
+    });
+    expect(restored.version).toMatchObject({
+      contextItemId: created.id,
+      versionNumber: 3,
+      summary: "Keep the daemon local.",
+      createdByType: "RESTORE",
+      createdById: versions[1].id
+    });
+
+    const staleResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-items/${created.id}/versions/2/restore`,
+      payload: { expectedRevision: patched.revision }
+    });
+    expect(staleResponse.statusCode).toBe(409);
+    expect(staleResponse.json().error.code).toBe("CONFLICT");
+
+    const missingResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-items/${created.id}/versions/999/restore`,
+      payload: { expectedRevision: restored.item.revision }
+    });
+    expect(missingResponse.statusCode).toBe(404);
+    expect(missingResponse.json().error.code).toBe("NOT_FOUND");
   });
 });

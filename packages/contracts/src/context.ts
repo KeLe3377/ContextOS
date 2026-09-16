@@ -137,6 +137,13 @@ export const contextItemVersionDtoSchema = z.object({
   createdAt: z.string()
 });
 
+export const contextItemVersionRestoreInputSchema = expectedRevisionSchema;
+
+export const contextItemVersionRestoreResultSchema = z.object({
+  item: contextItemDtoSchema,
+  version: contextItemVersionDtoSchema
+});
+
 export type ContextSourceType = z.infer<typeof contextSourceTypeSchema>;
 export type ContextSourceStatus = z.infer<typeof contextSourceStatusSchema>;
 export type ContextSourceInput = z.infer<typeof contextSourceInputSchema>;
@@ -176,6 +183,8 @@ export const contextPackageDtoSchema = resourceMetaSchema.extend({
 
 export type ContextItemDto = z.infer<typeof contextItemDtoSchema>;
 export type ContextItemVersionDto = z.infer<typeof contextItemVersionDtoSchema>;
+export type ContextItemVersionRestoreInput = z.infer<typeof contextItemVersionRestoreInputSchema>;
+export type ContextItemVersionRestoreResult = z.infer<typeof contextItemVersionRestoreResultSchema>;
 export type ContextPackageEntryDto = z.infer<typeof contextPackageEntrySchema>;
 export type ContextPackageDto = z.infer<typeof contextPackageDtoSchema>;
 

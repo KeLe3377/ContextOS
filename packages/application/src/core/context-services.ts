@@ -7,6 +7,7 @@ import type {
   ContextItemPatch,
   ContextItemStatus,
   ContextItemVersionDto,
+  ContextItemVersionRestoreResult,
   ContextSourceDto,
   ContextSourceInput,
   ContextSourcePatch,
@@ -298,6 +299,10 @@ export class ContextItemService {
 
   patch(id: string, input: ContextItemPatch): ContextItemDto {
     return this.items.patch(id, input, nowMs());
+  }
+
+  restoreVersion(id: string, versionNumber: number, expectedRevision: number): ContextItemVersionRestoreResult {
+    return this.items.restoreVersion(id, versionNumber, expectedRevision, nowMs());
   }
 
   transition(id: string, action: "activate" | "mark-stale" | "archive", expectedRevision: number): ContextItemDto {

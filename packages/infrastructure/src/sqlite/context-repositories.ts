@@ -7,6 +7,7 @@ import type {
   ContextItemPatch,
   ContextItemStatus,
   ContextItemVersionDto,
+  ContextItemVersionRestoreResult,
   ContextItemType,
   ContextSourceDto,
   ContextSourceInput,
@@ -342,6 +343,38 @@ export class SqliteContextItemRepository {
         .run(versionId, id, versionNumber, next.title, next.summary, next.body, next.confidence, JSON.stringify(next.metadata), now);
     })();
     return this.getByIdOrThrow(id);
+  }
+
+  restoreVersion(id: string, versionNumber: number, expectedRevision: number, now: number): ContextItemVersionRestoreResult {
+    const current = this.getByIdOrThrow(id);
+    const target = this.db.prepare("SELECT * FROM context_item_versions WHERE context_item_id = ? AND version_number = ?")
+      .get(id, versionNumber) as ContextItemVersionRow | undefined;
+    if (!target) {
+      throw new ContextOsError("NOT_FOUND", "Context Item version not found", { id, versionNumber });
+    }
+
+    const restoredVersionId = newId("ctxv");
+    let restoredVersionNumber = 0;
+    this.db.transaction(() => {
+      restoredVersionNumber = (this.db.prepare("SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM context_item_versions WHERE context_item_id = ?")
+        .get(id) as { next_version: number }).next_version;
+      const result = this.db.prepare("UPDATE context_items SET title = ?, summary = ?, body = ?, confidence = ?, metadata_json = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(target.title, target.summary, target.body, target.confidence, target.metadata_json, now, id, expectedRevision);
+      ensureChanged(result.changes, current, "Context Item", id, expectedRevision);
+      this.db.prepare("INSERT INTO context_item_versions (id, context_item_id, version_number, title, summary, body, confidence, metadata_json, created_by_type, created_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESTORE', ?, ?)")
+        .run(restoredVersionId, id, restoredVersionNumber, target.title, target.summary, target.body, target.confidence, target.metadata_json, target.id, now);
+
+      const after = this.getByIdOrThrow(id);
+      const metadata = JSON.stringify({ restoredFromVersionId: target.id, restoredFromVersionNumber: versionNumber, newVersionNumber: restoredVersionNumber });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'CONTEXT_ITEM', ?, 'CONTEXT_ITEM_VERSION_RESTORED', 'Context Item version restored', ?, ?)")
+        .run(newId("act"), current.projectId, id, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'CONTEXT_ITEM', ?, 'RESTORE_VERSION', ?, ?, ?)")
+        .run(newId("audit"), current.projectId, id, JSON.stringify(current), JSON.stringify(after), now);
+    })();
+
+    const version = this.db.prepare("SELECT * FROM context_item_versions WHERE id = ?")
+      .get(restoredVersionId) as ContextItemVersionRow;
+    return { item: this.getByIdOrThrow(id), version: mapContextItemVersion(version) };
   }
 
   updateStatus(id: string, status: ContextItemStatus, expectedRevision: number, now: number): ContextItemDto {

@@ -5,6 +5,7 @@ import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages
 import {
   contextItemInputSchema,
   contextItemPatchSchema,
+  contextItemVersionRestoreInputSchema,
   contextSourceInputSchema,
   contextSourcePatchSchema,
   contextSourceSyncInputSchema,
@@ -13,6 +14,7 @@ import {
 } from "../../../../../packages/contracts/src/context.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
+const contextItemVersionParamsSchema = paramsWithIdSchema.extend({ versionNumber: z.coerce.number().int().positive() });
 const listWithProjectSchema = listQuerySchema.extend({
   projectId: z.string().optional(),
   sourceId: z.string().optional()
@@ -80,6 +82,11 @@ export async function registerContextResourceRoutes(
   server.get("/api/context-items/:id/versions", async (request) => ({
     items: services.contextItems.versions(paramsWithIdSchema.parse(request.params).id)
   }));
+  server.post("/api/context-items/:id/versions/:versionNumber/restore", async (request) => {
+    const { id, versionNumber } = contextItemVersionParamsSchema.parse(request.params);
+    const { expectedRevision } = contextItemVersionRestoreInputSchema.parse(request.body);
+    return services.contextItems.restoreVersion(id, versionNumber, expectedRevision);
+  });
   server.patch("/api/context-items/:id", async (request) => services.contextItems.patch(paramsWithIdSchema.parse(request.params).id, contextItemPatchSchema.parse(request.body)));
   for (const action of ["activate", "mark-stale", "archive"] as const) {
     server.post(`/api/context-items/:id/${action}`, async (request) => {
