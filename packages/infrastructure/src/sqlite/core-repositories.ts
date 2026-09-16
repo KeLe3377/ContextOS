@@ -1,7 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { SessionDto, SessionInput, SessionPatch, SessionStatus } from "../../../contracts/src/sessions.js";
 import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus } from "../../../contracts/src/decisions.js";
-import type { WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
+import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type { ReviewItemDto, ReviewItemInput, ReviewItemPriority, ReviewItemStatus } from "../../../contracts/src/review-items.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
@@ -64,8 +64,8 @@ export class SqliteSessionRepository {
     const startedAt = status === "RUNNING" ? now : null;
     const completedAt = status === "COMPLETED" || status === "FAILED" ? now : null;
     const archivedAt = status === "ARCHIVED" ? now : null;
-    const result = this.db.prepare("UPDATE sessions SET status = ?, started_at = COALESCE(started_at, ?), completed_at = COALESCE(?, completed_at), last_activity_at = ?, archived_at = COALESCE(?, archived_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(status, startedAt, completedAt, now, archivedAt, now, id, expectedRevision);
+    const result = this.db.prepare("UPDATE sessions SET status = ?, started_at = COALESCE(started_at, ?), completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 'RUNNING' THEN NULL ELSE completed_at END, last_activity_at = ?, archived_at = COALESCE(?, archived_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+      .run(status, startedAt, completedAt, completedAt, status, now, archivedAt, now, id, expectedRevision);
     ensureChanged(result.changes, this.getById(id), "Session", id, expectedRevision);
     return this.getByIdOrThrow(id);
   }
@@ -170,16 +170,86 @@ export class SqliteWorkItemRepository {
   }
 
   patch(id: string, input: WorkItemPatch, now: number): WorkItemDto {
-    const result = this.db.prepare("UPDATE work_items SET title = COALESCE(?, title), description = COALESCE(?, description), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(input.title ?? null, input.description ?? null, now, id, input.expectedRevision);
-    ensureChanged(result.changes, this.getById(id), "Work Item", id, input.expectedRevision);
+    const setParent = input.parentId !== undefined ? 1 : 0;
+    const before = this.getById(id);
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE work_items SET parent_id = CASE WHEN ? = 1 THEN ? ELSE parent_id END, title = COALESCE(?, title), description = COALESCE(?, description), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(setParent, input.parentId ?? null, input.title ?? null, input.description ?? null, now, id, input.expectedRevision);
+      ensureChanged(result.changes, before, "Work Item", id, input.expectedRevision);
+      if (input.dependencyIds !== undefined) {
+        this.db.prepare("DELETE FROM work_item_dependencies WHERE work_item_id = ?").run(id);
+        const insert = this.db.prepare("INSERT INTO work_item_dependencies (work_item_id, depends_on_id, dependency_type, created_at) VALUES (?, ?, 'BLOCKING', ?)");
+        for (const dependencyId of input.dependencyIds) insert.run(id, dependencyId, now);
+      }
+    })();
     return this.getByIdOrThrow(id);
+  }
+
+  assertParentInProject(parentId: string, projectId: string): void {
+    const parent = this.getByIdOrThrow(parentId);
+    if (parent.projectId !== projectId) {
+      throw new ContextOsError("INVALID_ARGUMENT", "Work Item parent must belong to the same project", { parentId, projectId });
+    }
+  }
+
+  assertValidParent(id: string, parentId: string | null): void {
+    if (parentId === null) return;
+    if (id === parentId) throw new ContextOsError("INVALID_ARGUMENT", "Work Item cannot be its own parent", { id });
+    const item = this.getByIdOrThrow(id);
+    const parent = this.getByIdOrThrow(parentId);
+    if (item.projectId !== parent.projectId) {
+      throw new ContextOsError("INVALID_ARGUMENT", "Work Item parent must belong to the same project", { id, parentId });
+    }
+    const createsCycle = this.db.prepare(`
+      WITH RECURSIVE ancestors(id, parent_id) AS (
+        SELECT id, parent_id FROM work_items WHERE id = ?
+        UNION ALL
+        SELECT work_items.id, work_items.parent_id
+        FROM work_items JOIN ancestors ON work_items.id = ancestors.parent_id
+      )
+      SELECT 1 FROM ancestors WHERE id = ? LIMIT 1
+    `).get(parentId, id);
+    if (createsCycle) throw new ContextOsError("INVALID_ARGUMENT", "Work Item parent would create a cycle", { id, parentId });
+  }
+
+  assertValidDependencies(id: string, dependencyIds: string[]): void {
+    const item = this.getByIdOrThrow(id);
+    if (new Set(dependencyIds).size !== dependencyIds.length) {
+      throw new ContextOsError("INVALID_ARGUMENT", "Work Item dependencies must be unique", { id });
+    }
+    for (const dependencyId of dependencyIds) {
+      if (dependencyId === id) throw new ContextOsError("INVALID_ARGUMENT", "Work Item cannot depend on itself", { id });
+      const dependency = this.getByIdOrThrow(dependencyId);
+      if (dependency.projectId !== item.projectId) {
+        throw new ContextOsError("INVALID_ARGUMENT", "Work Item dependencies must belong to the same project", { id, dependencyId });
+      }
+      const createsCycle = this.db.prepare(`
+        WITH RECURSIVE reachable(id) AS (
+          SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id = ?
+          UNION
+          SELECT d.depends_on_id FROM work_item_dependencies d JOIN reachable r ON d.work_item_id = r.id
+        )
+        SELECT 1 FROM reachable WHERE id = ? LIMIT 1
+      `).get(dependencyId, id);
+      if (createsCycle) throw new ContextOsError("INVALID_ARGUMENT", "Work Item dependency would create a cycle", { id, dependencyId });
+    }
+  }
+
+  listDependencies(id: string): WorkItemDependencyDto[] {
+    return this.db.prepare(`
+      SELECT d.work_item_id AS workItemId, d.depends_on_id AS dependsOnId,
+             d.dependency_type AS dependencyType, w.status AS status
+      FROM work_item_dependencies d
+      JOIN work_items w ON w.id = d.depends_on_id
+      WHERE d.work_item_id = ?
+      ORDER BY d.created_at, d.depends_on_id
+    `).all(id) as WorkItemDependencyDto[];
   }
 
   updateStatus(id: string, status: WorkItemStatus, expectedRevision: number, now: number): WorkItemDto {
     const completedAt = status === "DONE" ? now : null;
-    const result = this.db.prepare("UPDATE work_items SET status = ?, completed_at = COALESCE(?, completed_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(status, completedAt, now, id, expectedRevision);
+    const result = this.db.prepare("UPDATE work_items SET status = ?, completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? IN ('BACKLOG', 'CANCELED') THEN NULL ELSE completed_at END, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+      .run(status, completedAt, completedAt, status, now, id, expectedRevision);
     ensureChanged(result.changes, this.getById(id), "Work Item", id, expectedRevision);
     return this.getByIdOrThrow(id);
   }
@@ -232,10 +302,36 @@ export class SqliteReviewItemRepository {
 
   updateStatus(id: string, status: ReviewItemStatus, expectedRevision: number, now: number, resolution?: { type: string; reason: string }): ReviewItemDto {
     const resolvedAt = status === "RESOLVED" || status === "DISMISSED" ? now : null;
-    const result = this.db.prepare("UPDATE review_items SET status = ?, resolution_type = COALESCE(?, resolution_type), resolution_reason = COALESCE(?, resolution_reason), resolved_at = COALESCE(?, resolved_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(status, resolution?.type ?? null, resolution?.reason ?? null, resolvedAt, now, id, expectedRevision);
-    ensureChanged(result.changes, this.getById(id), "Review Item", id, expectedRevision);
+    const before = this.getById(id);
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE review_items SET status = ?, resolution_type = COALESCE(?, resolution_type), resolution_reason = COALESCE(?, resolution_reason), resolved_at = COALESCE(?, resolved_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(status, resolution?.type ?? null, resolution?.reason ?? null, resolvedAt, now, id, expectedRevision);
+      ensureChanged(result.changes, before, "Review Item", id, expectedRevision);
+      if (resolution && before) {
+        const after = this.getByIdOrThrow(id);
+        this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'REVIEW_ITEM', ?, ?, ?, ?, ?)")
+          .run(newId("audit"), after.projectId, id, status === "RESOLVED" ? "RESOLVE" : "DISMISS", JSON.stringify(before), JSON.stringify(after), now);
+      }
+    })();
     return this.getByIdOrThrow(id);
+  }
+
+  listActionLog(id: string): Array<Record<string, unknown>> {
+    return this.db.prepare(`
+      SELECT id, action, before_json AS beforeJson, after_json AS afterJson, created_at AS createdAt
+      FROM audit_events
+      WHERE resource_type = 'REVIEW_ITEM' AND resource_id = ?
+      ORDER BY created_at, id
+    `).all(id).map((row) => {
+      const value = row as { id: string; action: string; beforeJson: string | null; afterJson: string | null; createdAt: number };
+      return {
+        id: value.id,
+        action: value.action,
+        before: value.beforeJson ? JSON.parse(value.beforeJson) : null,
+        after: value.afterJson ? JSON.parse(value.afterJson) : null,
+        createdAt: new Date(value.createdAt).toISOString()
+      };
+    });
   }
 }
 

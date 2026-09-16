@@ -25,7 +25,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(7);
+    expect(getSchemaVersion(client)).toBe(8);
     const tables = client.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
       .all()

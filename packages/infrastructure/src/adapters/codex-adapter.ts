@@ -1,23 +1,27 @@
 import { spawnSync } from "node:child_process";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
-import type { ProcessSupervisor } from "../process-supervisor.js";
+import type { ProcessExitInfo, ProcessSupervisor } from "../process-supervisor.js";
 
 export class CodexAdapter {
   readonly id = "codex";
   readonly displayName = "Codex";
   private readonly command: string;
   private readonly launchArgs: string[];
+  private readonly platform: NodeJS.Platform;
 
   constructor(
-    command = process.env.CONTEXTOS_CODEX_COMMAND ?? "codex",
-    launchArgs = parseArgs(process.env.CONTEXTOS_CODEX_ARGS)
+    command = process.env.CONTEXTOS_CODEX_COMMAND ?? defaultCodexCommand(),
+    launchArgs = parseArgs(process.env.CONTEXTOS_CODEX_ARGS),
+    platform = process.platform
   ) {
     this.command = command;
     this.launchArgs = launchArgs;
+    this.platform = platform;
   }
 
   discover(): AgentAdapterStatusDto {
-    const result = spawnSync(this.command, ["--version"], {
+    const processCommand = resolveProcessCommand(this.command, ["--version"], this.platform);
+    const result = spawnSync(processCommand.command, processCommand.args, {
       encoding: "utf8",
       shell: false,
       timeout: 1500,
@@ -45,11 +49,33 @@ export class CodexAdapter {
     };
   }
 
-  launch(input: { cwd: string; supervisor: ProcessSupervisor }): { pid: number; launch: AgentLaunchInfoDto } {
+  launch(input: { cwd: string; supervisor: ProcessSupervisor; onExit?: (exit: ProcessExitInfo) => void }): { pid: number; launch: AgentLaunchInfoDto } {
     const launch = this.buildLaunchInfo(input);
-    const process = input.supervisor.launch({ command: launch.command, args: launch.args, cwd: launch.cwd });
+    const processCommand = resolveProcessCommand(launch.command, launch.args, this.platform);
+    const process = input.supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, onExit: input.onExit });
     return { pid: process.pid, launch };
   }
+}
+
+export function defaultCodexCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "codex.cmd" : "codex";
+}
+
+export function shouldLaunchWithShell(command: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32" && /\.(cmd|bat)$/i.test(command);
+}
+
+export function resolveProcessCommand(command: string, args: string[], platform: NodeJS.Platform = process.platform): { command: string; args: string[] } {
+  if (!shouldLaunchWithShell(command, platform)) return { command, args };
+  return {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", [command, ...args].map(quoteWindowsCmdArg).join(" ")]
+  };
+}
+
+function quoteWindowsCmdArg(value: string): string {
+  if (/^[A-Za-z0-9_./:\\-]+$/.test(value)) return value;
+  return `"${value.replace(/(["^&|<>])/g, "^$1")}"`;
 }
 
 function parseArgs(value: string | undefined): string[] {
@@ -62,3 +88,4 @@ function parseArgs(value: string | undefined): string[] {
   }
   return value.split(" ").map((part) => part.trim()).filter(Boolean);
 }
+

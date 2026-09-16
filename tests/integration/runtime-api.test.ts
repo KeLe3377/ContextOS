@@ -1,16 +1,172 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 
-let server: FastifyInstance | undefined;
-let tempDir: string | undefined;
+const originalCommand = process.env.CONTEXTOS_CODEX_COMMAND;
+const originalArgs = process.env.CONTEXTOS_CODEX_ARGS;
 
-beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-"));
-  server = await createDaemonServer({
+let cleanupTasks: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  for (const cleanup of cleanupTasks.splice(0).reverse()) await cleanup();
+  restoreEnv();
+});
+
+describe("runtime APIs", () => {
+  test("returns settings and codex adapter status", async () => {
+    const { server } = await createTestServer(["-e", ""]);
+
+    const settings = await server.inject({ method: "GET", url: "/api/settings" });
+    expect(settings.statusCode).toBe(200);
+    expect(settings.json().id).toBe("singleton");
+    expect(settings.json().confirmDestructiveActions).toBe(true);
+
+    const adapters = await server.inject({ method: "GET", url: "/api/agent-adapters" });
+    expect(adapters.statusCode).toBe(200);
+    expect(adapters.json().items[0].id).toBe("codex");
+    expect(adapters.json().items[0].available).toBe(true);
+    expect(adapters.json().items[0].capabilities).toContain("launch");
+  });
+
+  test("marks a short continue run completed after the process exits successfully", async () => {
+    const { server } = await createTestServer(["-e", "console.log('phase-e-output')"]);
+    const session = await createSession(server);
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json().status).toBe("RUNNING");
+    expect(continued.json().run.status).toBe("RUNNING");
+
+    const completed = await waitForSessionStatus(server, session.id, "COMPLETED");
+    expect(completed.status).toBe("COMPLETED");
+    expect(completed.completedAt).toBeTruthy();
+
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    expect(evidence.statusCode).toBe(200);
+    expect(evidence.json().items).toEqual([
+      expect.objectContaining({ evidenceType: "AGENT_OUTPUT", title: "Codex process output" })
+    ]);
+
+    const resume = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/resume-capsule` });
+    expect(resume.statusCode).toBe(200);
+    expect(resume.json()).toMatchObject({
+      sessionId: session.id,
+      status: "COMPLETED",
+      summary: "Codex run completed.",
+      nextAction: null,
+      evidenceSnapshotIds: [evidence.json().items[0].id]
+    });
+  });
+
+  test("marks a short continue run failed after the process exits non-zero", async () => {
+    const { server } = await createTestServer(["-e", "process.exit(7)"]);
+    const session = await createSession(server);
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json().status).toBe("RUNNING");
+    expect(continued.json().run.status).toBe("RUNNING");
+
+    const failed = await waitForSessionStatus(server, session.id, "FAILED");
+    expect(failed.status).toBe("FAILED");
+    expect(failed.completedAt).toBeTruthy();
+  });
+
+  test("creates a context package when continuing a session", async () => {
+    const { server } = await createTestServer(["-e", ""]);
+    const projectResponse = await server.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Runtime Context", rootPath: "D:/project/ContextOS" }
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json();
+
+    const snapshotResponse = await server.inject({
+      method: "POST",
+      url: "/api/evidence-snapshots",
+      payload: {
+        projectId: project.id,
+        evidenceType: "TEXT",
+        title: "Runtime evidence",
+        contentText: "Context packages should preserve selected evidence."
+      }
+    });
+    expect(snapshotResponse.statusCode).toBe(201);
+    const snapshot = snapshotResponse.json();
+
+    const itemResponse = await server.inject({
+      method: "POST",
+      url: "/api/context-items",
+      payload: {
+        projectId: project.id,
+        sourceSnapshotId: snapshot.id,
+        itemType: "SUMMARY",
+        title: "Context package rule",
+        summary: "Continue should record selected context.",
+        confidence: "HIGH"
+      }
+    });
+    expect(itemResponse.statusCode).toBe(201);
+    const item = itemResponse.json();
+
+    const activated = await server.inject({
+      method: "POST",
+      url: `/api/context-items/${item.id}/activate`,
+      payload: { expectedRevision: item.revision }
+    });
+    expect(activated.statusCode).toBe(200);
+
+    const sessionResponse = await server.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId: project.id, agentAdapterId: "codex", title: "Runtime context", intent: "Use selected context" }
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json();
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+
+    const contextPack = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/context-pack` });
+    expect(contextPack.statusCode).toBe(200);
+    expect(contextPack.json().sessionId).toBe(session.id);
+    expect(contextPack.json().purpose).toBe("Use selected context");
+    expect(contextPack.json().contextItems).toEqual([
+      expect.objectContaining({ id: item.id, title: "Context package rule", revision: activated.json().revision })
+    ]);
+    expect(contextPack.json().evidenceSnapshots).toEqual([
+      expect.objectContaining({ id: snapshot.id, title: "Runtime evidence", contentHash: snapshot.contentHash })
+    ]);
+    expect(contextPack.json().manifest).toMatchObject({
+      schemaVersion: "context-package.v1",
+      generatedFor: "session-continue"
+    });
+  });
+});
+
+async function createTestServer(args: string[]): Promise<{ server: FastifyInstance }> {
+  restoreEnv();
+  process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+  process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(args);
+
+  const tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-"));
+  const server = await createDaemonServer({
     config: {
       host: "127.0.0.1",
       port: 0,
@@ -18,29 +174,55 @@ beforeEach(async () => {
       databaseFile: join(tempDir, "contextos.sqlite")
     }
   });
-});
-
-afterEach(async () => {
-  if (server) {
+  cleanupTasks.push(async () => {
     await server.close();
-    server = undefined;
-  }
-  if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
-    tempDir = undefined;
-  }
-});
-
-describe("runtime APIs", () => {
-  test("returns settings and codex adapter status", async () => {
-    const settings = await server!.inject({ method: "GET", url: "/api/settings" });
-    expect(settings.statusCode).toBe(200);
-    expect(settings.json().id).toBe("singleton");
-    expect(settings.json().confirmDestructiveActions).toBe(true);
-
-    const adapters = await server!.inject({ method: "GET", url: "/api/agent-adapters" });
-    expect(adapters.statusCode).toBe(200);
-    expect(adapters.json().items[0].id).toBe("codex");
-    expect(adapters.json().items[0].capabilities).toContain("launch");
   });
-});
+  return { server };
+}
+
+async function createSession(server: FastifyInstance): Promise<{ id: string; revision: number }> {
+  const projectResponse = await server.inject({
+    method: "POST",
+    url: "/api/projects",
+    payload: { name: "Runtime", rootPath: "D:/project/ContextOS" }
+  });
+  expect(projectResponse.statusCode).toBe(201);
+  const project = projectResponse.json();
+
+  const sessionResponse = await server.inject({
+    method: "POST",
+    url: "/api/sessions",
+    payload: { projectId: project.id, agentAdapterId: "codex", title: "Runtime continue", intent: "Exercise lifecycle" }
+  });
+  expect(sessionResponse.statusCode).toBe(201);
+  return sessionResponse.json();
+}
+
+async function waitForSessionStatus(server: FastifyInstance, sessionId: string, status: string): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 2000;
+  let latest: Record<string, unknown> = {};
+  while (Date.now() < deadline) {
+    const response = await server.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
+    expect(response.statusCode).toBe(200);
+    latest = response.json() as Record<string, unknown>;
+    if (latest.status === status) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Session did not reach ${status}; latest=${JSON.stringify(latest)}`);
+}
+
+function restoreEnv(): void {
+  setEnv("CONTEXTOS_CODEX_COMMAND", originalCommand);
+  setEnv("CONTEXTOS_CODEX_ARGS", originalArgs);
+}
+
+function setEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
+
+
+
+

@@ -2,6 +2,8 @@ import type { Database } from "better-sqlite3";
 import type {
   RuleDto,
   RuleEnforcementMode,
+  RuleEvaluationDto,
+  RuleEvaluationInput,
   RuleInput,
   RulePatch,
   RuleStatus,
@@ -71,6 +73,21 @@ type RuleVersionRow = {
   created_by_id: string | null;
   created_at: number;
   activated_at: number | null;
+};
+
+type RuleEvaluationRow = {
+  id: string;
+  rule_id: string;
+  rule_version_id: string;
+  project_id: string;
+  event_type: string;
+  resource_type: string;
+  resource_id: string | null;
+  input_hash: string;
+  result: "MATCHED" | "NOT_MATCHED";
+  explanation: string;
+  evaluator_version: string;
+  created_at: number;
 };
 
 export class SqliteRuleRepository {
@@ -172,6 +189,67 @@ export class SqliteRuleRepository {
     return (this.db.prepare("SELECT * FROM rule_versions WHERE rule_id = ? ORDER BY version_number DESC").all(ruleId) as RuleVersionRow[]).map(mapRuleVersion);
   }
 
+  getCurrentVersion(ruleId: string): RuleVersionDto {
+    const rule = this.getByIdOrThrow(ruleId);
+    if (!rule.currentVersionId) throw new ContextOsError("INVALID_ARGUMENT", "Rule has no current version", { ruleId });
+    return this.getVersionByIdOrThrow(rule.currentVersionId);
+  }
+
+  listActiveWithVersions(projectId: string): Array<{ rule: RuleDto; version: RuleVersionDto }> {
+    return this.list({ projectId, status: "ACTIVE", limit: 200 }).map((rule) => ({
+      rule,
+      version: this.getCurrentVersion(rule.id)
+    })).sort((left, right) => left.version.precedence - right.version.precedence || left.rule.id.localeCompare(right.rule.id));
+  }
+
+  recordEvaluation(input: {
+    rule: RuleDto;
+    version: RuleVersionDto;
+    sample: RuleEvaluationInput;
+    inputHash: string;
+    result: "MATCHED" | "NOT_MATCHED";
+    explanation: string;
+    evaluatorVersion: string;
+  }, now: number): RuleEvaluationDto {
+    const id = newId("ruleeval");
+    this.db.prepare(`
+      INSERT INTO rule_evaluations (
+        id, rule_id, rule_version_id, project_id, event_type, resource_type,
+        resource_id, input_hash, result, explanation, evaluator_version, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, input.rule.id, input.version.id, input.rule.projectId, input.sample.eventType,
+      input.sample.resourceType, input.sample.resourceId ?? null, input.inputHash,
+      input.result, input.explanation, input.evaluatorVersion, now
+    );
+    return this.getEvaluationById(id);
+  }
+
+  listEvaluations(ruleId: string, limit = 50): RuleEvaluationDto[] {
+    this.getByIdOrThrow(ruleId);
+    return (this.db.prepare("SELECT * FROM rule_evaluations WHERE rule_id = ? ORDER BY created_at DESC, id DESC LIMIT ?").all(ruleId, limit) as RuleEvaluationRow[]).map(mapRuleEvaluation);
+  }
+
+  getUsage(ruleId: string): { evaluationCount: number; matchedCount: number; lastEvaluatedAt: string | null } {
+    this.getByIdOrThrow(ruleId);
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS evaluationCount,
+             SUM(CASE WHEN result = 'MATCHED' THEN 1 ELSE 0 END) AS matchedCount,
+             MAX(created_at) AS lastEvaluatedAt
+      FROM rule_evaluations WHERE rule_id = ?
+    `).get(ruleId) as { evaluationCount: number; matchedCount: number | null; lastEvaluatedAt: number | null };
+    return {
+      evaluationCount: row.evaluationCount,
+      matchedCount: row.matchedCount ?? 0,
+      lastEvaluatedAt: iso(row.lastEvaluatedAt)
+    };
+  }
+
+  private getEvaluationById(id: string): RuleEvaluationDto {
+    const row = this.db.prepare("SELECT * FROM rule_evaluations WHERE id = ?").get(id) as RuleEvaluationRow;
+    return mapRuleEvaluation(row);
+  }
+
   getVersionById(id: string): RuleVersionDto | null {
     const row = this.db.prepare("SELECT * FROM rule_versions WHERE id = ?").get(id) as RuleVersionRow | undefined;
     return row ? mapRuleVersion(row) : null;
@@ -193,8 +271,26 @@ function validateVersion(version: RuleVersionDto): string[] {
   const errors: string[] = [];
   if (Object.keys(version.effect).length === 0) errors.push("effect is required");
   if (!Array.isArray(version.conditions)) errors.push("conditions must be an array");
+  version.conditions.forEach((condition, index) => {
+    if (!isValidCondition(condition)) errors.push(`conditions[${index}] is invalid`);
+  });
+  version.exceptions.forEach((exception, index) => {
+    if (!isValidCondition(exception)) errors.push(`exceptions[${index}] is invalid`);
+  });
+  if (version.scope.eventTypes !== undefined && !isStringArray(version.scope.eventTypes)) errors.push("scope.eventTypes must be a string array");
+  if (version.scope.resourceTypes !== undefined && !isStringArray(version.scope.resourceTypes)) errors.push("scope.resourceTypes must be a string array");
   if (version.precedence < 0) errors.push("precedence must be non-negative");
   return errors;
+}
+
+function isValidCondition(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const condition = value as Record<string, unknown>;
+  return typeof condition.field === "string" && ["exists", "equals", "not_equals", "in", "contains"].includes(String(condition.operator));
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function mapRule(row: RuleRow): RuleDto {
@@ -230,6 +326,23 @@ function mapRuleVersion(row: RuleVersionRow): RuleVersionDto {
     createdById: row.created_by_id,
     createdAt: new Date(row.created_at).toISOString(),
     activatedAt: iso(row.activated_at)
+  };
+}
+
+function mapRuleEvaluation(row: RuleEvaluationRow): RuleEvaluationDto {
+  return {
+    id: row.id,
+    ruleId: row.rule_id,
+    ruleVersionId: row.rule_version_id,
+    projectId: row.project_id,
+    eventType: row.event_type,
+    resourceType: row.resource_type,
+    resourceId: row.resource_id,
+    inputHash: row.input_hash,
+    result: row.result,
+    explanation: row.explanation,
+    evaluatorVersion: row.evaluator_version,
+    createdAt: new Date(row.created_at).toISOString()
   };
 }
 

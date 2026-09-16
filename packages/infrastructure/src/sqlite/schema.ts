@@ -17,6 +17,7 @@ export const coreTableNames = [
   "context_packages",
   "rules",
   "rule_versions",
+  "rule_evaluations",
   "jobs",
   "job_attempts",
   "activity_events",

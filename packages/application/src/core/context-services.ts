@@ -10,7 +10,7 @@ import type {
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
 } from "../../../contracts/src/context.js";
-import type { FileEvidenceStore, StoredEvidence } from "../../../infrastructure/src/evidence/evidence-store.js";
+import type { EvidenceVerification, FileEvidenceStore, StoredEvidence } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type {
   SqliteContextItemRepository,
   SqliteContextSourceRepository,
@@ -64,6 +64,28 @@ export class EvidenceSnapshotService {
   get(id: string): EvidenceSnapshotDto {
     return this.snapshots.getByIdOrThrow(id);
   }
+
+  verify(id: string): EvidenceVerification {
+    const snapshot = this.snapshots.getByIdOrThrow(id);
+    if (!this.evidenceStore) {
+      return {
+        storageRef: snapshot.storageRef,
+        exists: false,
+        verified: false,
+        expectedHash: snapshot.contentHash,
+        actualHash: null,
+        expectedSizeBytes: snapshot.sizeBytes,
+        actualSizeBytes: null,
+        failureCode: "EVIDENCE_STORE_UNAVAILABLE",
+        failureMessage: "Evidence store is not configured"
+      };
+    }
+    return this.evidenceStore.verify({
+      storageRef: snapshot.storageRef,
+      expectedHash: snapshot.contentHash,
+      expectedSizeBytes: snapshot.sizeBytes
+    });
+  }
 }
 
 export class ContextItemService {
@@ -90,3 +112,4 @@ export class ContextItemService {
     return this.items.updateStatus(id, status, expectedRevision, nowMs());
   }
 }
+

@@ -53,6 +53,7 @@ export async function registerContextResourceRoutes(
     return services.evidenceSnapshots.create(evidenceSnapshotInputSchema.parse(request.body));
   });
   server.get("/api/evidence-snapshots/:id", async (request) => services.evidenceSnapshots.get(paramsWithIdSchema.parse(request.params).id));
+  server.post("/api/evidence-snapshots/:id/verify", async (request) => services.evidenceSnapshots.verify(paramsWithIdSchema.parse(request.params).id));
 
   server.get("/api/context-items", async (request) => {
     const query = listWithProjectSchema.parse(request.query);
@@ -73,3 +74,4 @@ export async function registerContextResourceRoutes(
     });
   }
 }
+

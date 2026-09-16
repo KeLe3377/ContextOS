@@ -20,6 +20,11 @@ export const reviewResolveSchema = z.object({
   expectedRevision: z.number().int().positive()
 });
 
+export const reviewDismissSchema = z.object({
+  resolutionReason: z.string().min(1),
+  expectedRevision: z.number().int().positive()
+});
+
 export const reviewAssignSchema = z.object({
   reviewerId: z.string().min(1),
   expectedRevision: z.number().int().positive()

@@ -69,6 +69,28 @@ export const ruleValidationResultSchema = z.object({
   errors: z.array(z.string())
 });
 
+export const ruleEvaluationInputSchema = z.object({
+  eventType: z.string().min(1),
+  resourceType: z.string().min(1),
+  resourceId: z.string().min(1).optional(),
+  data: jsonObjectSchema.default({})
+});
+
+export const ruleEvaluationDtoSchema = z.object({
+  id: z.string(),
+  ruleId: z.string(),
+  ruleVersionId: z.string(),
+  projectId: z.string(),
+  eventType: z.string(),
+  resourceType: z.string(),
+  resourceId: z.string().nullable(),
+  inputHash: z.string(),
+  result: z.enum(["MATCHED", "NOT_MATCHED"]),
+  explanation: z.string(),
+  evaluatorVersion: z.string(),
+  createdAt: z.string()
+});
+
 export type RuleStatus = z.infer<typeof ruleStatusSchema>;
 export type RuleEnforcementMode = z.infer<typeof ruleEnforcementModeSchema>;
 export type RuleValidationState = z.infer<typeof ruleValidationStateSchema>;
@@ -78,3 +100,5 @@ export type RuleVersionInput = z.infer<typeof ruleVersionInputSchema>;
 export type RuleDto = z.infer<typeof ruleDtoSchema>;
 export type RuleVersionDto = z.infer<typeof ruleVersionDtoSchema>;
 export type RuleValidationResult = z.infer<typeof ruleValidationResultSchema>;
+export type RuleEvaluationInput = z.infer<typeof ruleEvaluationInputSchema>;
+export type RuleEvaluationDto = z.infer<typeof ruleEvaluationDtoSchema>;

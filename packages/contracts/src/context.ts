@@ -112,6 +112,27 @@ export type ContextItemStatus = z.infer<typeof contextItemStatusSchema>;
 export type ContextConfidence = z.infer<typeof contextConfidenceSchema>;
 export type ContextItemInput = z.infer<typeof contextItemInputSchema>;
 export type ContextItemPatch = z.infer<typeof contextItemPatchSchema>;
+export const contextPackageEntrySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  contentHash: z.string().nullable(),
+  revision: z.number().int().nullable(),
+  selectionReason: z.string()
+});
+
+export const contextPackageDtoSchema = resourceMetaSchema.extend({
+  projectId: z.string(),
+  sessionId: z.string(),
+  name: z.string(),
+  purpose: z.string(),
+  contextItems: z.array(contextPackageEntrySchema),
+  evidenceSnapshots: z.array(contextPackageEntrySchema),
+  manifest: z.record(z.unknown())
+});
+
 export type ContextItemDto = z.infer<typeof contextItemDtoSchema>;
+export type ContextPackageEntryDto = z.infer<typeof contextPackageEntrySchema>;
+export type ContextPackageDto = z.infer<typeof contextPackageDtoSchema>;
+
 
 

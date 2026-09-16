@@ -3,7 +3,7 @@ import { z } from "zod";
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../../../packages/application/src/core/core-services.js";
 import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages/contracts/src/common.js";
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
-import { reviewAssignSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
+import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
 import { sessionInputSchema, sessionPatchSchema } from "../../../../../packages/contracts/src/sessions.js";
 import { workItemInputSchema, workItemPatchSchema } from "../../../../../packages/contracts/src/work-items.js";
 
@@ -29,6 +29,9 @@ export async function registerCoreResourceRoutes(
     return services.sessions.create(sessionInputSchema.parse(request.body));
   });
   server.get("/api/sessions/:id", async (request) => services.sessions.get(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/sessions/:id/context-pack", async (request) => services.sessions.getContextPackage(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/sessions/:id/evidence", async (request) => ({ items: services.sessions.listEvidence(paramsWithIdSchema.parse(request.params).id), page: { nextCursor: null, hasMore: false } }));
+  server.get("/api/sessions/:id/resume-capsule", async (request) => services.sessions.getResumeCapsule(paramsWithIdSchema.parse(request.params).id));
   server.patch("/api/sessions/:id", async (request) => services.sessions.patch(paramsWithIdSchema.parse(request.params).id, sessionPatchSchema.parse(request.body)));
   for (const action of ["continue", "review", "archive"] as const) {
     server.post(`/api/sessions/:id/${action}`, async (request) => {
@@ -67,6 +70,8 @@ export async function registerCoreResourceRoutes(
     return services.workItems.create(workItemInputSchema.parse(request.body));
   });
   server.get("/api/work-items/:id", async (request) => services.workItems.get(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/work-items/:id/readiness", async (request) => services.workItems.readiness(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/work-items/:id/dependencies", async (request) => ({ items: services.workItems.dependencies(paramsWithIdSchema.parse(request.params).id) }));
   server.patch("/api/work-items/:id", async (request) => services.workItems.patch(paramsWithIdSchema.parse(request.params).id, workItemPatchSchema.parse(request.body)));
   for (const action of ["mark-ready", "start", "block", "resolve-blocker", "send-to-review", "complete", "reopen", "cancel"] as const) {
     server.post(`/api/work-items/:id/${action}`, async (request) => {
@@ -86,6 +91,7 @@ export async function registerCoreResourceRoutes(
     return services.reviewItems.create(reviewItemInputSchema.parse(request.body));
   });
   server.get("/api/review-items/:id", async (request) => services.reviewItems.get(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/review-items/:id/action-log", async (request) => ({ items: services.reviewItems.actionLog(paramsWithIdSchema.parse(request.params).id) }));
   server.post("/api/review-items/:id/assign", async (request) => {
     const { id } = paramsWithIdSchema.parse(request.params);
     const body = reviewAssignSchema.parse(request.body);
@@ -102,7 +108,6 @@ export async function registerCoreResourceRoutes(
   });
   server.post("/api/review-items/:id/dismiss", async (request) => {
     const { id } = paramsWithIdSchema.parse(request.params);
-    const { expectedRevision } = expectedRevisionSchema.parse(request.body);
-    return services.reviewItems.dismiss(id, expectedRevision);
+    return services.reviewItems.dismiss(id, reviewDismissSchema.parse(request.body));
   });
 }

@@ -21,7 +21,7 @@ const navGroups = [
 const pages = {
   overview: { title: "Overview", subtitle: "Workspace status, pending governance, and the next executable work.", actions: [["refresh", "Refresh Context"]] },
   projects: { title: "Projects", subtitle: "Governed workspace boundaries and their active context policies.", actions: [["create_new_folder", "Add Project", "primary"], ["tune", "Edit Defaults"]] },
-  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["play_arrow", "Resume Session", "primary"], ["download", "Export Capsule"]] },
+  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["play_arrow", "Continue in Agent", "primary"], ["download", "Export Capsule"]] },
   review: { title: "Review Inbox", subtitle: "Human decisions required before derived context or rules become active.", actions: [["rule", "Approve Selected", "primary"], ["close", "Reject"]] },
   decisions: { title: "Decisions", subtitle: "Durable choices, rationale, provenance, and version history.", actions: [["add", "Record Decision", "primary"], ["compare_arrows", "Compare Versions"]] },
   work: { title: "Work Items", subtitle: "Executable units of work with readiness signals and blocked dependencies.", actions: [["play_arrow", "Start Ready Item", "primary"], ["add_task", "Create Item"]] },
@@ -34,6 +34,9 @@ const state = {
   page: location.hash.replace("#", "") || "overview",
   loading: true,
   error: null,
+  actionLoading: false,
+  actionMessage: null,
+  sessionDetails: null,
   data: emptyData()
 };
 if (!pages[state.page]) state.page = "overview";
@@ -55,16 +58,27 @@ function emptyData() {
   };
 }
 
-async function fetchJson(path) {
+async function fetchJson(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2500);
   try {
-    const response = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(body?.error?.message || `${response.status} ${response.statusText}`);
+    }
     return await response.json();
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function sendJson(path, method, payload) {
+  return fetchJson(path, { method, body: JSON.stringify(payload) });
 }
 
 async function loadData() {
@@ -97,8 +111,24 @@ async function loadData() {
   }
   state.data = next;
   state.error = failures.length === entries.length ? "Daemon unavailable" : failures[0] || null;
+  state.sessionDetails = await loadSessionDetails(next.sessions[0]);
   state.loading = false;
   render();
+}
+
+async function loadSessionDetails(session) {
+  if (!session) return null;
+  const [contextPack, evidence, resumeCapsule] = await Promise.all([
+    settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
+    settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
+    settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`))
+  ]);
+  return {
+    sessionId: session.id,
+    contextPack: contextPack.ok ? contextPack.value : null,
+    evidence: evidence.ok ? evidence.value.items : [],
+    resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null
+  };
 }
 
 async function settle(promise) {
@@ -110,7 +140,12 @@ function icon(name) { return `<span class="material-symbols-outlined">${name}</s
 function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c])); }
 function badge(text, tone = "") { return `<span class="badge ${tone}">${esc(text)}</span>`; }
 function actionId(label) { return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
-function button([ic, label, kind]) { return `<button class="btn ${kind || ""}" data-action="${actionId(label)}">${icon(ic)}<span>${label}</span></button>`; }
+const enabledActions = new Set(["refresh-context", "add-project", "continue-in-agent", "new-rule", "reset-changes", "save-changes"]);
+function button([ic, label, kind]) {
+  const id = actionId(label);
+  const disabled = !enabledActions.has(id) || state.actionLoading;
+  return `<button class="btn ${kind || ""}" data-action="${id}" ${disabled ? "disabled" : ""}>${icon(state.actionLoading && enabledActions.has(id) ? "progress_activity" : ic)}<span>${label}</span></button>`;
+}
 function fmtDate(value) { return value ? new Date(value).toLocaleString() : "-"; }
 function toneForStatus(status) {
   if (["ACTIVE", "RUNNING", "READY", "SUCCEEDED", "DONE", "ACCEPTED", "RESOLVED", "VALID"].includes(status)) return "green";
@@ -165,7 +200,8 @@ function projectPill() {
 
 function pageHeader(page) {
   const notice = state.error ? `<p class="lead">${esc(state.error)}. Showing available local data.</p>` : "";
-  return `<section class="page-head"><div><h1>${page.title}</h1><p class="lead">${page.subtitle}</p>${notice}</div><div class="actions">${page.actions.map(button).join("")}</div></section>`;
+  const actionNotice = state.actionMessage ? `<p class="action-notice ${state.actionMessage.error ? "error" : "success"}">${esc(state.actionMessage.text)}</p>` : "";
+  return `<section class="page-head"><div><h1>${page.title}</h1><p class="lead">${page.subtitle}</p>${notice}${actionNotice}</div><div class="actions">${page.actions.map(button).join("")}</div></section>`;
 }
 function panel(title, ic, body, meta = "") { return `<section class="panel"><div class="panel-head"><div class="panel-title">${icon(ic)}${title}</div><div class="panel-meta mono">${esc(meta)}</div></div>${body}</section>`; }
 function emptyNote(text) { return `<div class="empty-note">${esc(text)}</div>`; }
@@ -194,7 +230,22 @@ function renderProjects() {
 }
 
 function renderSessions() {
-  return `${pageHeader(pages.sessions)}${panel("Session Episodes", "terminal", table(["Session", "Agent", "Started", "Updated", "Status"], state.data.sessions.map(session => [`<strong>${esc(session.title || session.id)}</strong><div class='muted'>${esc(session.intent || "")}</div>`, esc(session.agentAdapterId), fmtDate(session.startedAt), fmtDate(session.updatedAt), badge(session.status, toneForStatus(session.status))]), "No sessions yet."))}`;
+  const details = state.sessionDetails;
+  const canContinue = status => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
+  const detailBody = details ? `<div class="detail-grid">
+    <div><span class="mono muted">CONTEXT ITEMS</span><strong>${details.contextPack?.contextItems?.length ?? 0}</strong></div>
+    <div><span class="mono muted">EVIDENCE</span><strong>${details.evidence.length}</strong></div>
+    <div><span class="mono muted">RESUME STATUS</span><strong>${esc(details.resumeCapsule?.status || "Not available")}</strong></div>
+    <div class="detail-wide"><span class="mono muted">NEXT ACTION</span><strong>${esc(details.resumeCapsule?.nextAction || "-")}</strong></div>
+  </div>` : emptyNote("Continue a session to generate its context package and resume capsule.");
+  return `${pageHeader(pages.sessions)}<div class="stack">
+    ${panel("Session Episodes", "terminal", table(["Session", "Agent", "Started", "Updated", "Status", "Action"], state.data.sessions.map(session => [
+      `<strong>${esc(session.title || session.id)}</strong><div class='muted'>${esc(session.intent || "")}</div>`,
+      esc(session.agentAdapterId), fmtDate(session.startedAt), fmtDate(session.updatedAt), badge(session.status, toneForStatus(session.status)),
+      `<button class="icon-btn table-action" data-session-continue="${esc(session.id)}" title="Continue in Agent" ${canContinue(session.status) && !state.actionLoading ? "" : "disabled"}>${icon("play_arrow")}</button>`
+    ]), "No sessions yet."))}
+    ${panel("Latest Session Context", "inventory_2", detailBody, details ? details.sessionId : "No session")}
+  </div>`;
 }
 
 function renderReview() { return `${pageHeader(pages.review)}${panel("Pending Review Items", "inbox", rows(state.data.reviews.map(item => [esc(item.summary), item.priority, toneForStatus(item.status), `${esc(item.sourceType)} · ${esc(item.status)}`]), "No review items."))}`; }
@@ -213,7 +264,7 @@ function renderSettings() {
   const adapters = state.data.adapters;
   const connected = adapters.filter(a => a.available).length;
   return `${pageHeader(pages.settings)}<div class="stack">
-    ${panel("General", "tune", settings ? `<div class="setting-row"><div><div class="title-sm">Default adapter</div><div class="muted">Adapter used when a session does not specify one.</div></div>${badge(settings.defaultAdapterId || "codex", "blue")}</div><div class="setting-row"><div><div class="title-sm">Review gate</div><div class="muted">Require confirmation before destructive actions.</div></div>${badge(settings.confirmDestructiveActions ? "Enabled" : "Disabled", settings.confirmDestructiveActions ? "green" : "amber")}</div><div class="setting-row"><div><div class="title-sm">Data directory</div><div class="muted mono">${esc(settings.dataDirectory)}</div></div>${badge(`rev ${settings.revision}`)}</div>` : emptyNote("Settings unavailable."), "Workspace & Defaults")}
+    ${panel("General", "tune", settings ? `<div class="setting-row"><div><div class="title-sm">Default adapter</div><div class="muted">Adapter used when a session does not specify one.</div></div><select id="setting-default-adapter"><option value="codex" ${(settings.defaultAdapterId || "codex") === "codex" ? "selected" : ""}>Codex</option></select></div><div class="setting-row"><div><div class="title-sm">Review gate</div><div class="muted">Require confirmation before destructive actions.</div></div><label class="toggle"><input id="setting-confirm-destructive" type="checkbox" ${settings.confirmDestructiveActions ? "checked" : ""} /><span>${settings.confirmDestructiveActions ? "Enabled" : "Disabled"}</span></label></div><div class="setting-row"><div><div class="title-sm">Launch at startup</div><div class="muted">Start the local daemon with the desktop session.</div></div><label class="toggle"><input id="setting-launch-startup" type="checkbox" ${settings.launchAtStartup ? "checked" : ""} /><span>${settings.launchAtStartup ? "Enabled" : "Disabled"}</span></label></div><div class="setting-row"><div><div class="title-sm">Data directory</div><div class="muted mono">${esc(settings.dataDirectory)}</div></div>${badge(`rev ${settings.revision}`)}</div>` : emptyNote("Settings unavailable."), "Workspace & Defaults")}
     ${panel("Agent Adapters", "smart_toy", `<div class="setting-row"><div><div class="title-sm">Connected adapter</div><div class="muted">Codex is attached when discovery succeeds.</div></div>${badge(`${connected} connected`, connected ? "green" : "amber")}</div>${adapters.map(adapter => `<div class="setting-row"><div><div class="title-sm">${esc(adapter.displayName)}</div><div class="muted mono">${esc(adapter.version || adapter.error || adapter.command)}</div></div>${badge(adapter.available ? "Available" : "Unavailable", adapter.available ? "green" : "red")}</div>`).join("") || emptyNote("No adapters discovered.")}`)}
     ${panel("Storage & Privacy", "lock", `<div class="setting-row"><div><div class="title-sm">Evidence retention</div><div class="muted">Keep immutable source snapshots unless explicitly archived.</div></div>${badge("Retain indefinitely")}</div><div class="setting-row"><div><div class="title-sm">Secret redaction</div><div class="muted">Scrub credentials before indexing source material.</div></div>${badge("Enabled", "green")}</div><div class="setting-row"><div><div class="title-sm">Bridge mode</div><div class="muted">Local CLI and IPC integration for desktop agents.</div></div>${badge("CLI / IPC bridge", "blue")}</div>`)}
   </div>`;
@@ -221,11 +272,121 @@ function renderSettings() {
 
 const renderers = { overview: renderOverview, projects: renderProjects, sessions: renderSessions, review: renderReview, decisions: renderDecisions, work: renderWork, context: renderContext, rules: renderRules, settings: renderSettings };
 
+async function runAction(task, successMessage) {
+  state.actionLoading = true;
+  state.actionMessage = null;
+  render();
+  try {
+    await task();
+    state.actionLoading = false;
+    state.actionMessage = { text: successMessage, error: false };
+    await loadData();
+  } catch (error) {
+    state.actionLoading = false;
+    state.actionMessage = { text: error instanceof Error ? error.message : "Action failed", error: true };
+    render();
+  }
+}
+
+async function continueSession(sessionId) {
+  const session = state.data.sessions.find(item => item.id === sessionId);
+  if (!session) throw new Error("No session is available to continue");
+  await sendJson(`/api/sessions/${session.id}/continue`, "POST", { expectedRevision: session.revision });
+  setTimeout(loadData, 500);
+}
+
+function openProjectDialog() {
+  openFormDialog({
+    title: "Add Project",
+    submitLabel: "Create Project",
+    fields: `
+      <label>Project name<input class="field" name="name" required /></label>
+      <label>Root path<input class="field mono" name="rootPath" required placeholder="D:/project/my-workspace" /></label>
+      <label>Description<input class="field" name="description" /></label>`,
+    onSubmit: values => runAction(() => sendJson("/api/projects", "POST", {
+      name: values.get("name"),
+      rootPath: values.get("rootPath"),
+      description: values.get("description") || undefined,
+      defaultRuleIds: [],
+      agentAdapterIds: ["codex"]
+    }), "Project created")
+  });
+}
+
+function openRuleDialog() {
+  const project = state.data.projects[0];
+  if (!project) {
+    state.actionMessage = { text: "Create a project before adding rules", error: true };
+    render();
+    return;
+  }
+  openFormDialog({
+    title: "New Rule",
+    submitLabel: "Create Rule",
+    fields: `
+      <label>Rule title<input class="field" name="title" required /></label>
+      <label>Description<input class="field" name="description" /></label>
+      <label>Enforcement<select name="enforcementMode"><option>REQUIRE_REVIEW</option><option>BLOCK</option><option>WARNING</option><option>ADVISORY</option></select></label>
+      <label>Reason<input class="field" name="reason" required /></label>`,
+    onSubmit: values => runAction(() => sendJson("/api/rules", "POST", {
+      projectId: project.id,
+      title: values.get("title"),
+      description: values.get("description") || undefined,
+      scope: { eventTypes: ["session.continue"] },
+      conditions: [],
+      effect: { reason: values.get("reason") },
+      enforcementMode: values.get("enforcementMode"),
+      precedence: 100,
+      exceptions: []
+    }), "Rule draft created")
+  });
+}
+
+function openFormDialog({ title, submitLabel, fields, onSubmit }) {
+  document.getElementById("form-dialog")?.remove();
+  const dialog = document.createElement("dialog");
+  dialog.id = "form-dialog";
+  dialog.innerHTML = `<form method="dialog" class="dialog-form"><div class="dialog-head"><h2>${esc(title)}</h2><button class="icon-btn" value="cancel" aria-label="Close">${icon("close")}</button></div><div class="dialog-fields">${fields}</div><div class="dialog-actions"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="default" data-submit>${esc(submitLabel)}</button></div></form>`;
+  document.body.appendChild(dialog);
+  dialog.querySelector("form").addEventListener("submit", event => {
+    if (event.submitter?.dataset.submit === undefined) return;
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    dialog.close();
+    dialog.remove();
+    onSubmit(values);
+  });
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.showModal();
+}
+
+function handleAction(action) {
+  if (action === "refresh-context" || action === "reset-changes") return loadData();
+  if (action === "add-project") return openProjectDialog();
+  if (action === "new-rule") return openRuleDialog();
+  if (action === "continue-in-agent") {
+    const session = state.data.sessions.find(item => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
+    return runAction(() => continueSession(session?.id), "Session continued in Codex");
+  }
+  if (action === "save-changes") {
+    const settings = state.data.settings;
+    if (!settings) return;
+    const payload = {
+      defaultAdapterId: document.getElementById("setting-default-adapter")?.value || "codex",
+      confirmDestructiveActions: Boolean(document.getElementById("setting-confirm-destructive")?.checked),
+      launchAtStartup: Boolean(document.getElementById("setting-launch-startup")?.checked),
+      expectedRevision: settings.revision
+    };
+    return runAction(() => sendJson("/api/settings", "PATCH", payload), "Settings saved");
+  }
+}
+
 function render() {
   document.getElementById("app").innerHTML = shell();
   document.getElementById("view").innerHTML = state.loading ? `${pageHeader(pages[state.page])}${emptyNote("Loading workspace data...")}` : renderers[state.page]();
-  document.querySelectorAll("[data-nav]").forEach(btn => btn.addEventListener("click", () => { state.page = btn.dataset.nav; location.hash = state.page; render(); }));
-  document.querySelectorAll("[data-action='refresh-context']").forEach(btn => btn.addEventListener("click", loadData));
+  document.querySelectorAll("[data-nav]").forEach(btn => btn.addEventListener("click", () => { state.page = btn.dataset.nav; state.actionMessage = null; location.hash = state.page; render(); }));
+  document.querySelectorAll("[data-action]").forEach(btn => btn.addEventListener("click", () => handleAction(btn.dataset.action)));
+  document.querySelectorAll("[data-session-continue]").forEach(btn => btn.addEventListener("click", () => runAction(() => continueSession(btn.dataset.sessionContinue), "Session continued in Codex")));
 }
 
 window.addEventListener("hashchange", () => {

@@ -29,7 +29,20 @@ export const sessionDtoSchema = resourceMetaSchema.extend({
   archivedAt: z.string().nullable()
 });
 
+export const resumeCapsuleDtoSchema = z.object({
+  sessionId: z.string(),
+  status: sessionStatusSchema,
+  intent: z.string().nullable(),
+  summary: z.string(),
+  nextAction: z.string().nullable(),
+  lastRunId: z.string().nullable(),
+  evidenceSnapshotIds: z.array(z.string()),
+  updatedAt: z.string()
+});
+
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 export type SessionInput = z.infer<typeof sessionInputSchema>;
 export type SessionPatch = z.infer<typeof sessionPatchSchema>;
 export type SessionDto = z.infer<typeof sessionDtoSchema>;
+export type ResumeCapsuleDto = z.infer<typeof resumeCapsuleDtoSchema>;
+

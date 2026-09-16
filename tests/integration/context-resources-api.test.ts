@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -39,7 +40,7 @@ afterEach(async () => {
 });
 
 describe("context resource APIs", () => {
-  test("captures evidence and promotes it into an active context item", async () => {
+  test("captures evidence, verifies its file, and promotes it into an active context item", async () => {
     const sourceResponse = await server!.inject({
       method: "POST",
       url: "/api/context-sources",
@@ -55,6 +56,8 @@ describe("context resource APIs", () => {
     const source = sourceResponse.json();
     expect(source.status).toBe("ACTIVE");
 
+    const contentText = "Evidence store comes before agent adapters.";
+    const expectedHash = `sha256:${createHash("sha256").update(contentText).digest("hex")}`;
     const snapshotResponse = await server!.inject({
       method: "POST",
       url: "/api/evidence-snapshots",
@@ -63,16 +66,29 @@ describe("context resource APIs", () => {
         sourceId: source.id,
         evidenceType: "TEXT",
         title: "Backend plan excerpt",
-        contentText: "Evidence store comes before agent adapters.",
-        contentHash: "sha256:context-api-test"
+        contentText
       }
     });
     expect(snapshotResponse.statusCode).toBe(201);
     const snapshot = snapshotResponse.json();
     expect(snapshot.sourceId).toBe(source.id);
+    expect(snapshot.contentHash).toBe(expectedHash);
     expect(snapshot.storageRef).toMatch(/^evidence\//);
-    expect(snapshot.sizeBytes).toBe(Buffer.byteLength("Evidence store comes before agent adapters.", "utf8"));
-    await expect(readFile(join(tempDir!, snapshot.storageRef), "utf8")).resolves.toBe("Evidence store comes before agent adapters.");
+    expect(snapshot.sizeBytes).toBe(Buffer.byteLength(contentText, "utf8"));
+    await expect(readFile(join(tempDir!, snapshot.storageRef), "utf8")).resolves.toBe(contentText);
+
+    const verification = await server!.inject({ method: "POST", url: `/api/evidence-snapshots/${snapshot.id}/verify`, payload: {} });
+    expect(verification.statusCode).toBe(200);
+    expect(verification.json()).toMatchObject({
+      storageRef: snapshot.storageRef,
+      exists: true,
+      verified: true,
+      expectedHash,
+      actualHash: expectedHash,
+      expectedSizeBytes: Buffer.byteLength(contentText, "utf8"),
+      actualSizeBytes: Buffer.byteLength(contentText, "utf8"),
+      failureCode: null
+    });
 
     const refreshedSource = await server!.inject({ method: "GET", url: `/api/context-sources/${source.id}` });
     expect(refreshedSource.json().lastSnapshotId).toBe(snapshot.id);
@@ -101,6 +117,20 @@ describe("context resource APIs", () => {
     expect(activated.statusCode).toBe(200);
     expect(activated.json().status).toBe("ACTIVE");
   });
+
+  test("rejects mismatched evidence content hashes", async () => {
+    const snapshotResponse = await server!.inject({
+      method: "POST",
+      url: "/api/evidence-snapshots",
+      payload: {
+        projectId,
+        evidenceType: "TEXT",
+        title: "Bad hash",
+        contentText: "This content has a real hash.",
+        contentHash: "sha256:not-the-real-hash"
+      }
+    });
+    expect(snapshotResponse.statusCode).toBe(400);
+    expect(snapshotResponse.json().error.code).toBe("INVALID_ARGUMENT");
+  });
 });
-
-

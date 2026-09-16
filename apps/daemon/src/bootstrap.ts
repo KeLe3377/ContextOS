@@ -27,6 +27,7 @@ import { SqliteRuntimeRepository } from "../../../packages/infrastructure/src/sq
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
+import { nowMs } from "../../../packages/shared/src/clock.js";
 import { registerContextResourceRoutes } from "./http/routes/context-resources.js";
 import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
@@ -78,18 +79,22 @@ export async function createDaemonServer(
   runMigrations(sqlite);
   const schemaVersion = getSchemaVersion(sqlite);
   const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
+  runtimeRepository.recoverOrphanRunningContinues(nowMs());
+  const evidenceStore = new FileEvidenceStore(config.dataDir);
   const codexAdapter = new CodexAdapter();
-  const continueSessionService = new ContinueSessionService(runtimeRepository, codexAdapter, new ProcessSupervisor());
+  const continueSessionService = new ContinueSessionService(runtimeRepository, codexAdapter, new ProcessSupervisor(), evidenceStore);
 
-  const projectService = new ProjectService(new SqliteProjectRepository(sqlite.db));
-  const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService);
+  const projectRepository = new SqliteProjectRepository(sqlite.db);
+  const reviewItemRepository = new SqliteReviewItemRepository(sqlite.db);
+  const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db), reviewItemRepository);
+  const projectService = new ProjectService(projectRepository);
+  const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService, projectRepository, ruleService);
   const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
   const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
-  const reviewItemService = new ReviewItemService(new SqliteReviewItemRepository(sqlite.db));
+  const reviewItemService = new ReviewItemService(reviewItemRepository);
   const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
-  const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), new FileEvidenceStore(config.dataDir));
+  const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), evidenceStore);
   const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
-  const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db));
   const settingsService = new SettingsService(runtimeRepository);
   const agentAdapterService = new AgentAdapterService(codexAdapter);
 
@@ -181,5 +186,7 @@ export async function createDaemonServer(
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
+
+
 
 

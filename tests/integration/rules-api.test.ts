@@ -8,8 +8,12 @@ import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 let server: FastifyInstance | undefined;
 let tempDir: string | undefined;
 let projectId: string;
+const originalCommand = process.env.CONTEXTOS_CODEX_COMMAND;
+const originalArgs = process.env.CONTEXTOS_CODEX_ARGS;
 
 beforeEach(async () => {
+  process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+  process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["-e", ""]);
   tempDir = await mkdtemp(join(tmpdir(), "contextos-rules-"));
   server = await createDaemonServer({
     config: {
@@ -36,6 +40,8 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = undefined;
   }
+  setEnv("CONTEXTOS_CODEX_COMMAND", originalCommand);
+  setEnv("CONTEXTOS_CODEX_ARGS", originalArgs);
 });
 
 describe("rules API", () => {
@@ -82,4 +88,111 @@ describe("rules API", () => {
     expect(versions.statusCode).toBe(200);
     expect(versions.json().items).toHaveLength(1);
   });
+
+  test("evaluates structured input deterministically and persists usage", async () => {
+    const rule = await createRule({
+      title: "Review Codex continues",
+      scope: { eventTypes: ["session.continue"], resourceTypes: ["session"] },
+      conditions: [{ field: "adapterId", operator: "equals", value: "codex" }],
+      effect: { reason: "Review agent continuation" },
+      enforcementMode: "REQUIRE_REVIEW"
+    });
+    const sample = {
+      eventType: "session.continue",
+      resourceType: "session",
+      resourceId: "sess_sample",
+      data: { adapterId: "codex", status: "CREATED" }
+    };
+    const first = await server!.inject({ method: "POST", url: `/api/rules/${rule.id}/test`, payload: sample });
+    const second = await server!.inject({ method: "POST", url: `/api/rules/${rule.id}/test`, payload: sample });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ result: "MATCHED", evaluatorVersion: "contextos.rules.v1" });
+    expect(second.json().inputHash).toBe(first.json().inputHash);
+
+    const evaluations = await server!.inject({ method: "GET", url: `/api/rules/${rule.id}/evaluations` });
+    expect(evaluations.json().items).toHaveLength(2);
+    const usage = await server!.inject({ method: "GET", url: `/api/rules/${rule.id}/usage` });
+    expect(usage.json()).toMatchObject({ evaluationCount: 2, matchedCount: 2 });
+  });
+
+  test("blocks session continue and creates review items from active rules", async () => {
+    const blocking = await activateRule(await createRule({
+      title: "Block created sessions",
+      scope: { eventTypes: ["session.continue"], resourceTypes: ["session"] },
+      conditions: [{ field: "status", operator: "equals", value: "CREATED" }],
+      effect: { reason: "Continuation blocked by policy" },
+      enforcementMode: "BLOCK"
+    }));
+    const session = await createSession();
+    const blocked = await server!.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error.message).toBe("Continuation blocked by policy");
+
+    const disabled = await server!.inject({
+      method: "POST",
+      url: `/api/rules/${blocking.id}/disable`,
+      payload: { expectedRevision: blocking.revision }
+    });
+    expect(disabled.statusCode).toBe(200);
+
+    await activateRule(await createRule({
+      title: "Review continuation",
+      scope: { eventTypes: ["session.continue"] },
+      conditions: [{ field: "adapterId", operator: "equals", value: "codex" }],
+      effect: { reason: "Human review required", action: "Inspect session" },
+      enforcementMode: "REQUIRE_REVIEW"
+    }));
+    const continued = await server!.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+
+    const reviews = await server!.inject({ method: "GET", url: `/api/review-items?projectId=${projectId}` });
+    expect(reviews.json().items).toEqual([
+      expect.objectContaining({ sourceType: "RULE", triggerType: "SESSION_CONTINUE", summary: "Human review required" })
+    ]);
+  });
 });
+
+async function createRule(input: Record<string, unknown>): Promise<Record<string, any>> {
+  const response = await server!.inject({
+    method: "POST",
+    url: "/api/rules",
+    payload: { projectId, precedence: 10, ...input }
+  });
+  expect(response.statusCode).toBe(201);
+  return response.json();
+}
+
+async function activateRule(rule: Record<string, any>): Promise<Record<string, any>> {
+  const validation = await server!.inject({ method: "POST", url: `/api/rules/${rule.id}/validate` });
+  expect(validation.statusCode).toBe(200);
+  const activation = await server!.inject({
+    method: "POST",
+    url: `/api/rules/${rule.id}/activate`,
+    payload: { expectedRevision: rule.revision }
+  });
+  expect(activation.statusCode).toBe(200);
+  return activation.json();
+}
+
+async function createSession(): Promise<Record<string, any>> {
+  const response = await server!.inject({
+    method: "POST",
+    url: "/api/sessions",
+    payload: { projectId, agentAdapterId: "codex", title: "Governed session" }
+  });
+  expect(response.statusCode).toBe(201);
+  return response.json();
+}
+
+function setEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
