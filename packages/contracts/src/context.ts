@@ -73,6 +73,30 @@ export const evidenceSnapshotCompareInputSchema = z.object({
   otherSnapshotId: z.string().min(1)
 });
 
+export const evidenceSnapshotContentCompareInputSchema = evidenceSnapshotCompareInputSchema.extend({
+  maxChars: z.number().int().min(100).max(200_000).default(50_000)
+});
+
+export const evidenceSnapshotContentChangeSchema = z.object({
+  kind: z.enum(["ADDED", "REMOVED"]),
+  baseStartLine: z.number().int().positive(),
+  otherStartLine: z.number().int().positive(),
+  lineCount: z.number().int().nonnegative(),
+  text: z.string(),
+  truncated: z.boolean()
+});
+
+export const evidenceSnapshotContentCompareDtoSchema = z.object({
+  baseSnapshotId: z.string(),
+  otherSnapshotId: z.string(),
+  projectId: z.string(),
+  identical: z.boolean(),
+  addedLines: z.number().int().nonnegative(),
+  removedLines: z.number().int().nonnegative(),
+  changes: z.array(evidenceSnapshotContentChangeSchema),
+  truncated: z.boolean()
+});
+
 export const evidenceSnapshotCompareDtoSchema = z.object({
   baseSnapshotId: z.string(),
   otherSnapshotId: z.string(),
@@ -157,6 +181,8 @@ export type EvidenceSnapshotInput = z.infer<typeof evidenceSnapshotInputSchema>;
 export type EvidenceSnapshotDto = z.infer<typeof evidenceSnapshotDtoSchema>;
 export type EvidenceSnapshotCompareInput = z.infer<typeof evidenceSnapshotCompareInputSchema>;
 export type EvidenceSnapshotCompareDto = z.infer<typeof evidenceSnapshotCompareDtoSchema>;
+export type EvidenceSnapshotContentCompareInput = z.infer<typeof evidenceSnapshotContentCompareInputSchema>;
+export type EvidenceSnapshotContentCompareDto = z.infer<typeof evidenceSnapshotContentCompareDtoSchema>;
 
 export type ContextItemType = z.infer<typeof contextItemTypeSchema>;
 export type ContextItemStatus = z.infer<typeof contextItemStatusSchema>;

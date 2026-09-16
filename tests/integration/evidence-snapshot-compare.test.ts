@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -76,6 +76,64 @@ describe("Evidence Snapshot compare", () => {
       code: "CONFLICT",
       message: "Evidence Snapshots must belong to the same project"
     });
+
+    const contentResponse = await server!.inject({
+      method: "POST",
+      url: `/api/evidence-snapshots/${first.id}/compare-content`,
+      payload: { otherSnapshotId: second.id }
+    });
+    expect(contentResponse.statusCode).toBe(409);
+    expect(contentResponse.json().error.code).toBe("CONFLICT");
+  });
+
+  test("compares verified text content with line positions and bounded output", async () => {
+    const projectId = await createProject("Content compare");
+    const first = await createSnapshot(projectId, { title: "First", evidenceType: "TEXT", contentText: "alpha\nbeta\ngamma\n" });
+    const changed = await createSnapshot(projectId, { title: "Changed", evidenceType: "TEXT", contentText: "alpha\nBETA\ngamma\ndelta\n" });
+
+    const identical = await compareContent(first.id, first.id);
+    expect(identical).toMatchObject({ identical: true, addedLines: 0, removedLines: 0, changes: [], truncated: false });
+
+    const comparison = await compareContent(first.id, changed.id);
+    expect(comparison).toMatchObject({
+      baseSnapshotId: first.id,
+      otherSnapshotId: changed.id,
+      projectId,
+      identical: false,
+      addedLines: 2,
+      removedLines: 1,
+      truncated: false
+    });
+    expect(comparison.changes).toEqual([
+      expect.objectContaining({ kind: "REMOVED", baseStartLine: 2, otherStartLine: 2, lineCount: 1, text: "beta\n", truncated: false }),
+      expect.objectContaining({ kind: "ADDED", baseStartLine: 3, otherStartLine: 2, lineCount: 1, text: "BETA\n", truncated: false }),
+      expect.objectContaining({ kind: "ADDED", baseStartLine: 4, otherStartLine: 4, lineCount: 1, text: "delta\n", truncated: false })
+    ]);
+
+    const longChange = await createSnapshot(projectId, { title: "Long", evidenceType: "TEXT", contentText: `alpha\n${"x".repeat(200)}\n` });
+    const truncated = await compareContent(first.id, longChange.id, 100);
+    expect(truncated.truncated).toBe(true);
+    expect(truncated.changes.reduce((length: number, change: { text: string }) => length + change.text.length, 0)).toBeLessThanOrEqual(100);
+  });
+
+  test("rejects content comparison when stored Evidence fails verification", async () => {
+    const projectId = await createProject("Integrity compare");
+    const first = await createSnapshot(projectId, { title: "First", evidenceType: "TEXT", contentText: "trusted" });
+    const second = await createSnapshot(projectId, { title: "Second", evidenceType: "TEXT", contentText: "also trusted" });
+    await writeFile(join(tempDir!, second.storageRef), "tampered", "utf8");
+
+    const response = await server!.inject({
+      method: "POST",
+      url: `/api/evidence-snapshots/${first.id}/compare-content`,
+      payload: { otherSnapshotId: second.id }
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("CONFLICT");
+
+    const reviews = await server!.inject({ method: "GET", url: `/api/review-items?projectId=${projectId}` });
+    expect(reviews.json().items).toEqual([
+      expect.objectContaining({ sourceId: second.id, triggerType: "EVIDENCE_CONTENT_MISMATCH" })
+    ]);
   });
 });
 
@@ -106,5 +164,15 @@ async function compare(baseSnapshotId: string, otherSnapshotId: string): Promise
     payload: { otherSnapshotId }
   });
   expect(response.statusCode).toBe(200);
+  return response.json();
+}
+
+async function compareContent(baseSnapshotId: string, otherSnapshotId: string, maxChars?: number): Promise<Record<string, any>> {
+  const response = await server!.inject({
+    method: "POST",
+    url: `/api/evidence-snapshots/${baseSnapshotId}/compare-content`,
+    payload: { otherSnapshotId, ...(maxChars === undefined ? {} : { maxChars }) }
+  });
+  expect(response.statusCode, response.body).toBe(200);
   return response.json();
 }

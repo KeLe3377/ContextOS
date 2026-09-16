@@ -9,6 +9,7 @@ import {
   contextSourceInputSchema,
   contextSourcePatchSchema,
   contextSourceSyncInputSchema,
+  evidenceSnapshotContentCompareInputSchema,
   evidenceSnapshotCompareInputSchema,
   evidenceSnapshotInputSchema
 } from "../../../../../packages/contracts/src/context.js";
@@ -67,6 +68,11 @@ export async function registerContextResourceRoutes(
     const { id } = paramsWithIdSchema.parse(request.params);
     const { otherSnapshotId } = evidenceSnapshotCompareInputSchema.parse(request.body);
     return services.evidenceSnapshots.compare(id, otherSnapshotId);
+  });
+  server.post("/api/evidence-snapshots/:id/compare-content", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const { otherSnapshotId, maxChars } = evidenceSnapshotContentCompareInputSchema.parse(request.body);
+    return services.evidenceSnapshots.compareContent(id, otherSnapshotId, maxChars);
   });
 
   server.get("/api/context-items", async (request) => {

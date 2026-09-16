@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { diffLines } from "diff";
 import type {
   ContextItemDto,
   ContextItemInput,
@@ -14,6 +15,7 @@ import type {
   ContextSourceStatus,
   ContextSourceSyncResult,
   EvidenceSnapshotCompareDto,
+  EvidenceSnapshotContentCompareDto,
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
 } from "../../../contracts/src/context.js";
@@ -211,12 +213,7 @@ export class EvidenceSnapshotService {
   compare(baseSnapshotId: string, otherSnapshotId: string): EvidenceSnapshotCompareDto {
     const base = this.snapshots.getByIdOrThrow(baseSnapshotId);
     const other = this.snapshots.getByIdOrThrow(otherSnapshotId);
-    if (base.projectId !== other.projectId) {
-      throw new ContextOsError("CONFLICT", "Evidence Snapshots must belong to the same project", {
-        baseSnapshotId,
-        otherSnapshotId
-      });
-    }
+    assertSameProject(base, other);
 
     const fields = {
       contentHash: compareField(base.contentHash, other.contentHash),
@@ -235,6 +232,80 @@ export class EvidenceSnapshotService {
     };
   }
 
+  compareContent(baseSnapshotId: string, otherSnapshotId: string, maxChars: number): EvidenceSnapshotContentCompareDto {
+    const base = this.snapshots.getByIdOrThrow(baseSnapshotId);
+    const other = this.snapshots.getByIdOrThrow(otherSnapshotId);
+    assertSameProject(base, other);
+    const baseText = this.readSnapshotContent(base);
+    const otherText = this.readSnapshotContent(other);
+    const parts = diffLines(baseText, otherText);
+    let baseLine = 1;
+    let otherLine = 1;
+    let addedLines = 0;
+    let removedLines = 0;
+    let remainingChars = maxChars;
+    let truncated = false;
+    const changes: EvidenceSnapshotContentCompareDto["changes"] = [];
+
+    for (const part of parts) {
+      const lineCount = part.count ?? countLines(part.value);
+      if (!part.added && !part.removed) {
+        baseLine += lineCount;
+        otherLine += lineCount;
+        continue;
+      }
+      if (part.added) addedLines += lineCount;
+      if (part.removed) removedLines += lineCount;
+      const text = part.value.slice(0, remainingChars);
+      const partTruncated = text.length < part.value.length;
+      if (text.length > 0) {
+        changes.push({
+          kind: part.added ? "ADDED" : "REMOVED",
+          baseStartLine: baseLine,
+          otherStartLine: otherLine,
+          lineCount,
+          text,
+          truncated: partTruncated
+        });
+        remainingChars -= text.length;
+      }
+      if (partTruncated || text.length === 0) truncated = true;
+      if (part.added) otherLine += lineCount;
+      if (part.removed) baseLine += lineCount;
+    }
+
+    return {
+      baseSnapshotId,
+      otherSnapshotId,
+      projectId: base.projectId,
+      identical: baseText === otherText,
+      addedLines,
+      removedLines,
+      changes,
+      truncated
+    };
+  }
+
+  private readSnapshotContent(snapshot: EvidenceSnapshotDto): string {
+    if (!snapshot.storageRef) {
+      if (snapshot.contentText !== null) return snapshot.contentText;
+      throw new ContextOsError("INVALID_ARGUMENT", "Evidence Snapshot has no comparable text content", { id: snapshot.id });
+    }
+    if (!this.evidenceStore) {
+      throw new ContextOsError("INVALID_CONFIG", "Evidence store is not configured");
+    }
+    try {
+      return this.evidenceStore.readVerifiedText({
+        storageRef: snapshot.storageRef,
+        expectedHash: snapshot.contentHash,
+        expectedSizeBytes: snapshot.sizeBytes
+      });
+    } catch (error) {
+      if (error instanceof ContextOsError && error.code === "CONFLICT") this.verify(snapshot.id);
+      throw error;
+    }
+  }
+
   recoverStoredEvidence(): { snapshotsChecked: number; missingFilesDetected: number; mismatchedFilesDetected: number } {
     const snapshots = this.snapshots.listStoredForRecovery();
     let missingFilesDetected = 0;
@@ -250,6 +321,20 @@ export class EvidenceSnapshotService {
 
 function compareField<T>(base: T, other: T): { base: T; other: T; same: boolean } {
   return { base, other, same: base === other };
+}
+
+function assertSameProject(base: EvidenceSnapshotDto, other: EvidenceSnapshotDto): void {
+  if (base.projectId !== other.projectId) {
+    throw new ContextOsError("CONFLICT", "Evidence Snapshots must belong to the same project", {
+      baseSnapshotId: base.id,
+      otherSnapshotId: other.id
+    });
+  }
+}
+
+function countLines(value: string): number {
+  if (!value) return 0;
+  return value.split(/\r\n|\r|\n/).length - (value.endsWith("\n") || value.endsWith("\r") ? 1 : 0);
 }
 
 function evidenceReviewInput(snapshot: EvidenceSnapshotDto, failureCode: string | null): ReviewItemInput | null {

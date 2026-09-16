@@ -121,6 +121,25 @@ export class FileEvidenceStore {
     }
   }
 
+  readVerifiedText(input: { storageRef: string; expectedHash: string; expectedSizeBytes: number | null }): string {
+    const target = evidencePath(this.rootDir, input.storageRef);
+    if (!target) {
+      throw new ContextOsError("INVALID_ARGUMENT", "Evidence storage reference is outside the evidence root");
+    }
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(target);
+    } catch {
+      throw new ContextOsError("CONFLICT", "Evidence content is unavailable", { failureCode: "FILE_MISSING" });
+    }
+    const actualHash = hashBytes(bytes);
+    const sizeMatches = input.expectedSizeBytes === null || bytes.byteLength === input.expectedSizeBytes;
+    if (actualHash !== input.expectedHash || !sizeMatches) {
+      throw new ContextOsError("CONFLICT", "Evidence content failed integrity verification", { failureCode: "CONTENT_MISMATCH" });
+    }
+    return bytes.toString("utf8");
+  }
+
   remove(storageRef: string): void {
     const evidenceRoot = resolve(this.rootDir, "evidence");
     const target = resolve(this.rootDir, storageRef);
