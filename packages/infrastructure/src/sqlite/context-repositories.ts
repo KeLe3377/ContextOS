@@ -182,6 +182,11 @@ export class SqliteEvidenceSnapshotRepository {
     return row ? mapEvidenceSnapshot(row) : null;
   }
 
+  listStoredForRecovery(): EvidenceSnapshotDto[] {
+    return (this.db.prepare("SELECT * FROM evidence_snapshots WHERE storage_ref IS NOT NULL ORDER BY created_at, id")
+      .all() as EvidenceSnapshotRow[]).map(mapEvidenceSnapshot);
+  }
+
   completeSourceSync(input: {
     sourceId: string;
     expectedRevision: number;

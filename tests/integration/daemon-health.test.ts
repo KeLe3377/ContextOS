@@ -50,7 +50,16 @@ describe("daemon health endpoint", () => {
     expect(body.version).toMatch(/\d+\.\d+\.\d+/);
     expect(body.schemaVersion).toBe(8);
     expect(body.processState).toBe("ready");
-    expect(body.recovery).toEqual({ orphanContinuesRecovered: 0 });
+    expect(body.recovery).toEqual({
+      orphanContinuesRecovered: 0,
+      evidence: {
+        temporaryFilesRemoved: 0,
+        orphanFilesQuarantined: 0,
+        snapshotsChecked: 0,
+        missingFilesDetected: 0,
+        mismatchedFilesDetected: 0
+      }
+    });
     expect(body.requestId).toBe("test-request-1");
     expect(JSON.stringify(body)).not.toContain(tempDir);
     expect(JSON.stringify(body)).not.toContain("contextos.sqlite");

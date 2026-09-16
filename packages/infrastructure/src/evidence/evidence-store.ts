@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ContextOsError } from "../../../shared/src/errors.js";
 
 export type StoredEvidence = {
@@ -19,6 +19,11 @@ export type EvidenceVerification = {
   actualSizeBytes: number | null;
   failureCode: string | null;
   failureMessage: string | null;
+};
+
+export type EvidenceFileRecovery = {
+  temporaryFilesRemoved: number;
+  orphanFilesQuarantined: number;
 };
 
 export class FileEvidenceStore {
@@ -110,6 +115,57 @@ export class FileEvidenceStore {
     }
     rmSync(target, { force: true });
   }
+
+  recover(referencedStorageRefs: Iterable<string>): EvidenceFileRecovery {
+    const evidenceRoot = resolve(this.rootDir, "evidence");
+    const referenced = new Set(Array.from(referencedStorageRefs, (value) => value.replaceAll("\\", "/")));
+    let temporaryFilesRemoved = 0;
+    let orphanFilesQuarantined = 0;
+
+    for (const filePath of listFiles(evidenceRoot)) {
+      const storageRef = relative(resolve(this.rootDir), filePath).split(sep).join("/");
+      if (filePath.endsWith(".tmp")) {
+        rmSync(filePath, { force: true });
+        temporaryFilesRemoved += 1;
+        continue;
+      }
+      if (referenced.has(storageRef)) continue;
+
+      const orphanRelativePath = relative(evidenceRoot, filePath);
+      const target = availableRecoveryPath(resolve(this.rootDir, "recovery", "evidence-orphans", orphanRelativePath));
+      mkdirSync(dirname(target), { recursive: true });
+      renameSync(filePath, target);
+      orphanFilesQuarantined += 1;
+    }
+
+    return { temporaryFilesRemoved, orphanFilesQuarantined };
+  }
+}
+
+function listFiles(root: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+  return entries.flatMap((entry) => {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) return listFiles(path);
+    return entry.isFile() ? [path] : [];
+  });
+}
+
+function availableRecoveryPath(target: string): string {
+  if (!existsSync(target)) return target;
+  let sequence = 1;
+  while (existsSync(`${target}.${sequence}`)) sequence += 1;
+  return `${target}.${sequence}`;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function hashBytes(bytes: Buffer): string {

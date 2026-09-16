@@ -233,6 +233,18 @@ export class EvidenceSnapshotService {
       fields
     };
   }
+
+  recoverStoredEvidence(): { snapshotsChecked: number; missingFilesDetected: number; mismatchedFilesDetected: number } {
+    const snapshots = this.snapshots.listStoredForRecovery();
+    let missingFilesDetected = 0;
+    let mismatchedFilesDetected = 0;
+    for (const snapshot of snapshots) {
+      const verification = this.verify(snapshot.id);
+      if (verification.failureCode === "FILE_MISSING") missingFilesDetected += 1;
+      if (verification.failureCode === "CONTENT_MISMATCH") mismatchedFilesDetected += 1;
+    }
+    return { snapshotsChecked: snapshots.length, missingFilesDetected, mismatchedFilesDetected };
+  }
 }
 
 function compareField<T>(base: T, other: T): { base: T; other: T; same: boolean } {

@@ -84,15 +84,21 @@ export async function createDaemonServer(
     sqlite = SqliteClient.open({ databaseFile: config.databaseFile });
     runMigrations(sqlite);
     const schemaVersion = getSchemaVersion(sqlite);
+    const evidenceStore = new FileEvidenceStore(config.dataDir);
+    const evidenceSnapshotRepository = new SqliteEvidenceSnapshotRepository(sqlite.db);
+    const evidenceFilesRecovery = evidenceStore.recover(
+      evidenceSnapshotRepository.listStoredForRecovery().flatMap((snapshot) => snapshot.storageRef ? [snapshot.storageRef] : [])
+    );
+    const reviewItemRepository = new SqliteReviewItemRepository(sqlite.db);
+    const evidenceSnapshotService = new EvidenceSnapshotService(evidenceSnapshotRepository, evidenceStore, reviewItemRepository);
+    const evidenceIntegrityRecovery = evidenceSnapshotService.recoverStoredEvidence();
     const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
     const orphanContinuesRecovered = runtimeRepository.recoverOrphanRunningContinues(nowMs());
-    const evidenceStore = new FileEvidenceStore(config.dataDir);
     const codexAdapter = new CodexAdapter();
     const adapterRegistry = new AgentAdapterRegistry([codexAdapter]);
     const continueSessionService = new ContinueSessionService(runtimeRepository, adapterRegistry, new ProcessSupervisor(), evidenceStore);
 
     const projectRepository = new SqliteProjectRepository(sqlite.db);
-    const reviewItemRepository = new SqliteReviewItemRepository(sqlite.db);
     const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db), reviewItemRepository);
     const projectService = new ProjectService(projectRepository);
     const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService, projectRepository, ruleService);
@@ -100,9 +106,7 @@ export async function createDaemonServer(
     const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
     const reviewItemService = new ReviewItemService(reviewItemRepository);
     const contextSourceRepository = new SqliteContextSourceRepository(sqlite.db);
-    const evidenceSnapshotRepository = new SqliteEvidenceSnapshotRepository(sqlite.db);
     const contextSourceService = new ContextSourceService(contextSourceRepository, evidenceSnapshotRepository, projectRepository, evidenceStore);
-    const evidenceSnapshotService = new EvidenceSnapshotService(evidenceSnapshotRepository, evidenceStore, reviewItemRepository);
     const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
     const settingsService = new SettingsService(runtimeRepository);
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
@@ -133,7 +137,11 @@ export async function createDaemonServer(
     schemaVersion,
     processState: "ready",
     recovery: {
-      orphanContinuesRecovered
+      orphanContinuesRecovered,
+      evidence: {
+        ...evidenceFilesRecovery,
+        ...evidenceIntegrityRecovery
+      }
     },
     requestId: request.id
   }));

@@ -103,9 +103,10 @@ first pass 已完成，仍有深层硬化空间。
 - `POST /api/evidence-snapshots/:id/compare` 可比较同 Project Snapshot 的 hash、size、type 和 source。
 - `GET /api/context-items/:id/versions` 可读取连续编号的内容版本和创建者 provenance。
 
+已完成 DB/file 跨崩溃 recovery first pass：启动时清理未完成临时文件、隔离无 DB 引用的最终文件，并扫描已存储 Snapshot 的缺失/篡改状态，通过既有 Review Item 机制记录异常；health 暴露恢复计数且不泄露路径。
+
 仍待后续：
 
-- DB/file 跨崩溃 recovery。
 - 正文或语义级 snapshot compare。
 - 更系统的 evidence immutability enforcement audit。
 
@@ -322,9 +323,8 @@ frontend/styles.css
 
 如果继续后端：
 
-1. Evidence DB/file 跨崩溃 recovery。
-2. Evidence Snapshot immutability audit。
-3. Context Item 历史版本恢复。
+1. Evidence Snapshot immutability audit。
+2. Context Item 历史版本恢复。
 
 如果转前端：
 
