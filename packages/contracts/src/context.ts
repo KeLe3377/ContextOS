@@ -61,6 +61,24 @@ export const evidenceSnapshotDtoSchema = z.object({
   createdAt: z.string()
 });
 
+export const evidenceSnapshotCompareInputSchema = z.object({
+  otherSnapshotId: z.string().min(1)
+});
+
+export const evidenceSnapshotCompareDtoSchema = z.object({
+  baseSnapshotId: z.string(),
+  otherSnapshotId: z.string(),
+  projectId: z.string(),
+  identical: z.boolean(),
+  changedFields: z.array(z.enum(["contentHash", "sizeBytes", "evidenceType", "sourceId"])),
+  fields: z.object({
+    contentHash: z.object({ base: z.string(), other: z.string(), same: z.boolean() }),
+    sizeBytes: z.object({ base: z.number().int().nullable(), other: z.number().int().nullable(), same: z.boolean() }),
+    evidenceType: z.object({ base: evidenceTypeSchema, other: evidenceTypeSchema, same: z.boolean() }),
+    sourceId: z.object({ base: z.string().nullable(), other: z.string().nullable(), same: z.boolean() })
+  })
+});
+
 export const contextItemTypeSchema = z.enum(["FACT", "SUMMARY", "CONSTRAINT", "OPEN_QUESTION", "RISK", "HANDOFF"]);
 export const contextItemStatusSchema = z.enum(["DRAFT", "ACTIVE", "STALE", "ARCHIVED"]);
 export const contextConfidenceSchema = z.enum(["LOW", "MEDIUM", "HIGH"]);
@@ -106,6 +124,8 @@ export type ContextSourceDto = z.infer<typeof contextSourceDtoSchema>;
 export type EvidenceType = z.infer<typeof evidenceTypeSchema>;
 export type EvidenceSnapshotInput = z.infer<typeof evidenceSnapshotInputSchema>;
 export type EvidenceSnapshotDto = z.infer<typeof evidenceSnapshotDtoSchema>;
+export type EvidenceSnapshotCompareInput = z.infer<typeof evidenceSnapshotCompareInputSchema>;
+export type EvidenceSnapshotCompareDto = z.infer<typeof evidenceSnapshotCompareDtoSchema>;
 
 export type ContextItemType = z.infer<typeof contextItemTypeSchema>;
 export type ContextItemStatus = z.infer<typeof contextItemStatusSchema>;

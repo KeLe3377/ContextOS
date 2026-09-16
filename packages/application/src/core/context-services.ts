@@ -7,6 +7,7 @@ import type {
   ContextSourceInput,
   ContextSourcePatch,
   ContextSourceStatus,
+  EvidenceSnapshotCompareDto,
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
 } from "../../../contracts/src/context.js";
@@ -20,6 +21,7 @@ import type {
 } from "../../../infrastructure/src/sqlite/context-repositories.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { newId } from "../../../shared/src/id.js";
+import { ContextOsError } from "../../../shared/src/errors.js";
 
 export class ContextSourceService {
   constructor(private readonly sources: SqliteContextSourceRepository) {}
@@ -95,6 +97,37 @@ export class EvidenceSnapshotService {
       : null;
     return { ...verification, reviewItem };
   }
+
+  compare(baseSnapshotId: string, otherSnapshotId: string): EvidenceSnapshotCompareDto {
+    const base = this.snapshots.getByIdOrThrow(baseSnapshotId);
+    const other = this.snapshots.getByIdOrThrow(otherSnapshotId);
+    if (base.projectId !== other.projectId) {
+      throw new ContextOsError("CONFLICT", "Evidence Snapshots must belong to the same project", {
+        baseSnapshotId,
+        otherSnapshotId
+      });
+    }
+
+    const fields = {
+      contentHash: compareField(base.contentHash, other.contentHash),
+      sizeBytes: compareField(base.sizeBytes, other.sizeBytes),
+      evidenceType: compareField(base.evidenceType, other.evidenceType),
+      sourceId: compareField(base.sourceId, other.sourceId)
+    };
+    const changedFields = (Object.keys(fields) as Array<keyof typeof fields>).filter((field) => !fields[field].same);
+    return {
+      baseSnapshotId,
+      otherSnapshotId,
+      projectId: base.projectId,
+      identical: changedFields.length === 0,
+      changedFields,
+      fields
+    };
+  }
+}
+
+function compareField<T>(base: T, other: T): { base: T; other: T; same: boolean } {
+  return { base, other, same: base === other };
 }
 
 function evidenceReviewInput(snapshot: EvidenceSnapshotDto, failureCode: string | null): ReviewItemInput | null {

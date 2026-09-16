@@ -7,6 +7,7 @@ import {
   contextItemPatchSchema,
   contextSourceInputSchema,
   contextSourcePatchSchema,
+  evidenceSnapshotCompareInputSchema,
   evidenceSnapshotInputSchema
 } from "../../../../../packages/contracts/src/context.js";
 
@@ -54,6 +55,11 @@ export async function registerContextResourceRoutes(
   });
   server.get("/api/evidence-snapshots/:id", async (request) => services.evidenceSnapshots.get(paramsWithIdSchema.parse(request.params).id));
   server.post("/api/evidence-snapshots/:id/verify", async (request) => services.evidenceSnapshots.verify(paramsWithIdSchema.parse(request.params).id));
+  server.post("/api/evidence-snapshots/:id/compare", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const { otherSnapshotId } = evidenceSnapshotCompareInputSchema.parse(request.body);
+    return services.evidenceSnapshots.compare(id, otherSnapshotId);
+  });
 
   server.get("/api/context-items", async (request) => {
     const query = listWithProjectSchema.parse(request.query);

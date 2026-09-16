@@ -100,11 +100,12 @@ first pass 已完成，仍有深层硬化空间。
 - 旧 `evidence/<snapshotId>.txt` 仍可 verify。
 - verify 发现文件缺失或内容不匹配时自动创建 Review Item。
 - 重复 verify 复用活动中的同类 Review Item；关闭后故障复发会新建。
+- `POST /api/evidence-snapshots/:id/compare` 可比较同 Project Snapshot 的 hash、size、type 和 source。
 
 仍待后续：
 
 - DB/file 跨崩溃 recovery。
-- 更完整的 snapshot compare。
+- 正文或语义级 snapshot compare。
 - 更系统的 evidence immutability enforcement audit。
 
 ### Phase E: Session Evidence / Resume Capsule
@@ -288,7 +289,7 @@ frontend/styles.css
 ### 6.2 Evidence / Context 深化
 
 - Evidence Snapshot immutability 全链路约束。
-- Snapshot compare。
+- 正文或语义级 Snapshot compare。
 - Context Item version history。
 - Context Source sync first pass。
 
@@ -318,10 +319,10 @@ frontend/styles.css
 
 如果继续后端：
 
-1. Snapshot compare。
-2. Context Item version history 查询。
-3. Context Source sync first pass。
-4. Evidence DB/file 跨崩溃 recovery。
+1. Context Item version history 查询。
+2. Context Source sync first pass。
+3. Evidence DB/file 跨崩溃 recovery。
+4. Evidence Snapshot immutability audit。
 
 如果转前端：
 

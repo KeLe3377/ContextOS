@@ -95,7 +95,7 @@ Remaining gaps:
 - Context Item versions and provenance are simplified.
 - Context Package manifest is missing.
 - Manual text transcript import is complete; Codex file discovery and live capture are still missing.
-- Snapshot compare/verify is minimal or missing.
+- Metadata Snapshot compare and verify are complete; content/semantic comparison remains deferred.
 
 Action: prioritize Context Package and evidence integrity because they are needed for meaningful `Continue in Agent`.
 
