@@ -1,12 +1,14 @@
+import { createHash } from "node:crypto";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
-import type { ResumeCapsuleDto, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
+import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
 import type { SqliteRuntimeRepository } from "../../../infrastructure/src/sqlite/runtime-repository.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { newId } from "../../../shared/src/id.js";
+import { ContextOsError } from "../../../shared/src/errors.js";
 
 export type SessionContinueRuntime = {
   run: SessionRunDto;
@@ -117,6 +119,62 @@ export class ContinueSessionService {
   }
 
   importTranscript(session: SessionDto, input: TranscriptImportInput): TranscriptImportResult {
+    return this.persistTranscript(session, input);
+  }
+
+  importAdapterTranscript(session: SessionDto, input: AdapterTranscriptImportInput): AdapterTranscriptImportResult {
+    const adapter = this.adapters.getOrThrow(session.agentAdapterId);
+    if (session.externalSessionId && input.externalSessionId && session.externalSessionId !== input.externalSessionId) {
+      throw new ContextOsError("CONFLICT", "Session is already bound to a different external agent session", {
+        sessionId: session.id,
+        externalSessionId: session.externalSessionId
+      });
+    }
+    const imported = adapter.importTranscript({
+      cwd: this.runtime.getProjectRoot(session.projectId),
+      externalSessionId: input.externalSessionId ?? session.externalSessionId ?? undefined
+    });
+    if (session.externalSessionId && session.externalSessionId !== imported.externalSessionId) {
+      throw new ContextOsError("CONFLICT", "Adapter returned a different external session", { sessionId: session.id });
+    }
+    const contentHash = `sha256:${createHash("sha256").update(imported.contentText, "utf8").digest("hex")}`;
+    const existing = this.runtime.findSessionTranscriptByHash(session.id, contentHash);
+    const result = existing
+      ? { evidence: existing, resumeCapsule: this.runtime.bindExternalSession(session.id, imported.externalSessionId, nowMs()) }
+      : this.persistTranscript(session, {
+          contentText: imported.contentText,
+          title: input.title ?? "Imported Codex transcript",
+          summary: input.summary ?? `Imported ${imported.messageCount} Codex transcript messages.`
+        }, {
+          externalSessionId: imported.externalSessionId,
+          metadata: {
+            adapterId: adapter.id,
+            externalSessionId: imported.externalSessionId,
+            parserVersion: imported.parserVersion,
+            sourceUpdatedAt: imported.sourceUpdatedAt,
+            messageCount: imported.messageCount,
+            transcriptTruncated: imported.truncated
+          }
+        });
+    return {
+      ...result,
+      adapter: {
+        id: adapter.id,
+        externalSessionId: imported.externalSessionId,
+        parserVersion: imported.parserVersion,
+        sourceUpdatedAt: imported.sourceUpdatedAt,
+        messageCount: imported.messageCount,
+        truncated: imported.truncated,
+        reused: Boolean(existing)
+      }
+    };
+  }
+
+  private persistTranscript(
+    session: SessionDto,
+    input: TranscriptImportInput,
+    provenance?: { externalSessionId?: string; metadata?: Record<string, unknown> }
+  ): TranscriptImportResult {
     if (!this.evidenceStore) throw new Error("Evidence store is not configured");
     const evidenceId = newId("ev");
     const stored = this.evidenceStore.writeText({
@@ -133,7 +191,9 @@ export class ContinueSessionService {
         summary: input.summary ?? "Imported transcript captured.",
         contentHash: stored.contentHash,
         storageRef: stored.storageRef,
-        sizeBytes: stored.sizeBytes
+        sizeBytes: stored.sizeBytes,
+        externalSessionId: provenance?.externalSessionId,
+        metadata: provenance?.metadata
       }, nowMs());
     } catch (error) {
       try {

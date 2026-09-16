@@ -20,7 +20,7 @@ Project
 
 如果按“本地优先 Codex workspace loop”定义，当前版本已经可运行、可测试、可展示。
 
-如果按最初完整设计定义，ContextOS 还没有完成多 Agent、Codex transcript 自动发现/实时采集、正式前端、完整 scheduler/outbox dispatcher、深层 provenance/versioning 等产品能力。
+如果按最初完整设计定义，ContextOS 还没有完成多 Agent、Codex transcript 实时采集、正式前端、完整 scheduler/outbox dispatcher、深层 provenance/versioning 等产品能力。
 
 ## 2. 当前代码状态
 
@@ -122,8 +122,8 @@ first pass 已完成，仍有深层硬化空间。
 
 当前边界：
 
-- 不会自动导入 Codex GUI 当前对话。
-- 不会实时采集 Codex CLI 后续 transcript。
+- 已支持按 Project root 自动发现并显式导入本机 Codex transcript，首次导入后绑定 external session ID。
+- 不会后台轮询或实时采集 Codex CLI 后续 transcript。
 
 ### Phase F: Core Resource Lifecycle
 
@@ -250,7 +250,7 @@ frontend/styles.css
 
 遗留：
 
-- Codex transcript 文件自动发现与导入（手动 text payload API 已完成）。
+- Codex transcript 文件自动发现与 adapter `importTranscript` first pass 已完成。
 - Codex inspectStatus。
 - Codex interrupt。
 - Codex resume 的深层语义。
@@ -260,10 +260,9 @@ frontend/styles.css
 
 建议后续 Adapter 顺序：
 
-1. 先做 Codex transcript 文件位置调查和 adapter importTranscript 接入。
-2. 再做 Codex inspectStatus / interrupt。
-3. 再抽 shared adapter contract tests。
-4. 最后才加 Claude Code / Cursor。
+1. 做 Codex inspectStatus / interrupt。
+2. 再抽 shared adapter contract tests。
+3. 最后才加 Claude Code / Cursor。
 
 ## 6. 后端遗留路线
 
@@ -280,10 +279,15 @@ frontend/styles.css
 - 更新 Resume Capsule summary，并保留已有 evidence 与 lastRunId。
 - project 分区文件、Activity/Audit、幂等回放和已结束 Session 导入均有集成测试。
 
+自动发现与导入 first pass 已完成：
+
+- `POST /api/sessions/:id/import-transcript/auto`。
+- 从 Codex JSONL `session_meta` 读取 session ID 与 cwd，按 Project root 隔离并选择最近匹配会话。
+- 仅抽取 user/assistant 文本，排除 developer、推理密文、工具调用和工具输出。
+- Session 绑定 external session ID；重复导入未变化内容时复用 Evidence。
+
 仍待后续：
 
-- Codex transcript 文件位置自动发现。
-- adapter `importTranscript` 接入。
 - 实时 transcript bridge。
 - message role/turn 解析。
 - 前端 import UI。
@@ -331,6 +335,5 @@ frontend/styles.css
 
 如果转 Adapter：
 
-1. Codex transcript 文件位置调查。
-2. Codex importTranscript first pass。
-3. inspectStatus / interrupt。
+1. Codex inspectStatus / interrupt。
+2. shared adapter contract tests。

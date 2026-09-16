@@ -20,10 +20,20 @@ export type AgentLaunchResult = {
   launch: AgentLaunchInfoDto;
 };
 
+export type AgentTranscriptImportResult = {
+  externalSessionId: string;
+  contentText: string;
+  sourceUpdatedAt: string;
+  parserVersion: string;
+  messageCount: number;
+  truncated: boolean;
+};
+
 export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
   discover(): AgentAdapterStatusDto;
   buildLaunchInfo(input: { cwd: string }): AgentLaunchInfoDto;
   launch(input: AgentLaunchInput): AgentLaunchResult;
+  importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult;
 }

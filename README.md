@@ -164,7 +164,7 @@ npm run dev
 4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。
 5. 回到 Sessions 页面刷新，可以在 Latest Session Context 里看到 Context Package ID 和 `ContextOS handoff prompt` evidence。
 
-当前版本不会自动读取 Codex GUI 当前对话，也不会实时导入 Codex CLI 后续聊天 transcript。`Continue in Agent` 负责启动 Codex 并记录 handoff、运行状态、进程输出证据；历史/实时 transcript 导入属于后续 adapter 深化。
+当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定 Codex session ID，后续只读取同一会话。它不会后台实时采集后续消息，也没有自动轮询。
 
 ## Codex Adapter
 
@@ -176,7 +176,7 @@ $env:CONTEXTOS_CODEX_ARGS='["--help"]'
 npm run dev
 ```
 
-adapter contract 已预留 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt`、`importTranscript` 能力位，但 Claude Code、Cursor 和 transcript import 还没有启用。
+Codex adapter 已实现 `discover`、`launch` 和 `importTranscript` first pass；`resume`、`inspectStatus`、`interrupt` 仍是能力位。Claude Code 和 Cursor 尚未启用。
 
 ## 验证
 

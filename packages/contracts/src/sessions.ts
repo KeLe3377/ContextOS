@@ -47,14 +47,32 @@ export const transcriptImportInputSchema = z.object({
   title: z.string().refine((value) => value.trim().length > 0, "Title must not be blank").optional()
 });
 
+export const adapterTranscriptImportInputSchema = z.object({
+  externalSessionId: z.string().trim().min(1).optional(),
+  summary: z.string().refine((value) => value.trim().length > 0, "Summary must not be blank").optional(),
+  title: z.string().refine((value) => value.trim().length > 0, "Title must not be blank").optional()
+});
+
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 export type SessionInput = z.infer<typeof sessionInputSchema>;
 export type SessionPatch = z.infer<typeof sessionPatchSchema>;
 export type SessionDto = z.infer<typeof sessionDtoSchema>;
 export type ResumeCapsuleDto = z.infer<typeof resumeCapsuleDtoSchema>;
 export type TranscriptImportInput = z.infer<typeof transcriptImportInputSchema>;
+export type AdapterTranscriptImportInput = z.infer<typeof adapterTranscriptImportInputSchema>;
 export type TranscriptImportResult = {
   evidence: EvidenceSnapshotDto;
   resumeCapsule: ResumeCapsuleDto;
+};
+export type AdapterTranscriptImportResult = TranscriptImportResult & {
+  adapter: {
+    id: string;
+    externalSessionId: string;
+    parserVersion: string;
+    sourceUpdatedAt: string;
+    messageCount: number;
+    truncated: boolean;
+    reused: boolean;
+  };
 };
 

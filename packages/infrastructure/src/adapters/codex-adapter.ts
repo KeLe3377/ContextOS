@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process";
-import type { AgentAdapter } from "../../../application/src/ports/agent-adapter.js";
+import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { AgentAdapter, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
+import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../process-supervisor.js";
 
 export class CodexAdapter implements AgentAdapter {
@@ -9,15 +13,18 @@ export class CodexAdapter implements AgentAdapter {
   private readonly command: string;
   private readonly launchArgs: string[];
   private readonly platform: NodeJS.Platform;
+  private readonly sessionsDir: string;
 
   constructor(
     command = process.env.CONTEXTOS_CODEX_COMMAND ?? defaultCodexCommand(),
     launchArgs = parseArgs(process.env.CONTEXTOS_CODEX_ARGS),
-    platform = process.platform
+    platform = process.platform,
+    sessionsDir = defaultCodexSessionsDir()
   ) {
     this.command = command;
     this.launchArgs = launchArgs;
     this.platform = platform;
+    this.sessionsDir = sessionsDir;
   }
 
   discover(): AgentAdapterStatusDto {
@@ -56,6 +63,143 @@ export class CodexAdapter implements AgentAdapter {
     const process = input.supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, onExit: input.onExit });
     return { pid: process.pid, launch };
   }
+
+  importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult {
+    const candidates = listJsonlFiles(this.sessionsDir)
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    for (const path of candidates) {
+      const metadata = readSessionMetadata(path);
+      if (!metadata || !isPathWithin(input.cwd, metadata.cwd)) continue;
+      if (input.externalSessionId && metadata.id !== input.externalSessionId) continue;
+      return parseCodexTranscript(path, metadata.id);
+    }
+    throw new ContextOsError("NOT_FOUND", input.externalSessionId
+      ? "Codex transcript was not found for this Project and external session"
+      : "No Codex transcript was found for this Project");
+  }
+}
+
+export function defaultCodexSessionsDir(): string {
+  if (process.env.CONTEXTOS_CODEX_SESSIONS_DIR) return process.env.CONTEXTOS_CODEX_SESSIONS_DIR;
+  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+  return join(codexHome, "sessions");
+}
+
+type CodexSessionMetadata = { id: string; cwd: string };
+
+function readSessionMetadata(path: string): CodexSessionMetadata | null {
+  const line = readFirstLine(path);
+  if (!line) return null;
+  try {
+    const row = JSON.parse(line) as { type?: string; payload?: { id?: string; session_id?: string; cwd?: string } };
+    const id = row.payload?.id ?? row.payload?.session_id;
+    return row.type === "session_meta" && id && row.payload?.cwd ? { id, cwd: row.payload.cwd } : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCodexTranscript(path: string, externalSessionId: string): AgentTranscriptImportResult {
+  const file = statSync(path);
+  if (file.size > 50 * 1024 * 1024) {
+    throw new ContextOsError("INVALID_ARGUMENT", "Codex transcript exceeds the 50 MB import limit", { externalSessionId });
+  }
+  const messages: string[] = [];
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+    if (!line) continue;
+    try {
+      const row = JSON.parse(line) as {
+        type?: string;
+        payload?: { type?: string; role?: string; content?: Array<{ type?: string; text?: string }> };
+      };
+      const payload = row.payload;
+      if (row.type !== "response_item" || payload?.type !== "message" || !["user", "assistant"].includes(payload.role ?? "")) continue;
+      const text = (payload.content ?? [])
+        .filter((item) => item.type === "input_text" || item.type === "output_text")
+        .map((item) => item.text ?? "")
+        .join("\n")
+        .trim();
+      if (text) messages.push(`${payload.role!.toUpperCase()}:\n${text}`);
+    } catch {
+      // A crash can leave one partial JSONL record; valid records remain importable.
+    }
+  }
+  if (messages.length === 0) {
+    throw new ContextOsError("INVALID_ARGUMENT", "Codex transcript contains no user or assistant messages", { externalSessionId });
+  }
+
+  const separator = "\n\n";
+  const selected: string[] = [];
+  let length = 0;
+  let oversizedMessageTruncated = false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const addedLength = message.length + (selected.length ? separator.length : 0);
+    if (length + addedLength > 1_000_000) break;
+    selected.unshift(message);
+    length += addedLength;
+  }
+  if (selected.length === 0) {
+    selected.push(messages.at(-1)!.slice(-1_000_000));
+    oversizedMessageTruncated = true;
+  }
+  return {
+    externalSessionId,
+    contentText: selected.join(separator),
+    sourceUpdatedAt: file.mtime.toISOString(),
+    parserVersion: "codex-jsonl.v1",
+    messageCount: selected.length,
+    truncated: oversizedMessageTruncated || selected.length < messages.length
+  };
+}
+
+function listJsonlFiles(root: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+  return entries.flatMap((entry) => {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) return listJsonlFiles(path);
+    return entry.isFile() && entry.name.endsWith(".jsonl") ? [path] : [];
+  });
+}
+
+function readFirstLine(path: string): string | null {
+  const fd = openSync(path, "r");
+  try {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total < 1024 * 1024) {
+      const buffer = Buffer.alloc(Math.min(64 * 1024, 1024 * 1024 - total));
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, total);
+      if (bytesRead === 0) break;
+      const chunk = buffer.subarray(0, bytesRead);
+      const newline = chunk.indexOf(10);
+      chunks.push(newline >= 0 ? chunk.subarray(0, newline) : chunk);
+      total += newline >= 0 ? newline : bytesRead;
+      if (newline >= 0) break;
+    }
+    return chunks.length ? Buffer.concat(chunks).toString("utf8").replace(/\r$/, "") : null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  try {
+    const relativePath = relative(realpathSync(resolve(root)), realpathSync(resolve(candidate)));
+    return relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
+  } catch {
+    return false;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 export function defaultCodexCommand(platform: NodeJS.Platform = process.platform): string {

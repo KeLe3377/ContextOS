@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -8,12 +8,14 @@ import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 
 const originalCommand = process.env.CONTEXTOS_CODEX_COMMAND;
 const originalArgs = process.env.CONTEXTOS_CODEX_ARGS;
+const originalSessionsDir = process.env.CONTEXTOS_CODEX_SESSIONS_DIR;
 let cleanupTasks: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   for (const cleanup of cleanupTasks.splice(0).reverse()) await cleanup();
   setEnv("CONTEXTOS_CODEX_COMMAND", originalCommand);
   setEnv("CONTEXTOS_CODEX_ARGS", originalArgs);
+  setEnv("CONTEXTOS_CODEX_SESSIONS_DIR", originalSessionsDir);
 });
 
 describe("transcript import API", () => {
@@ -133,6 +135,82 @@ describe("transcript import API", () => {
     try {
       const row = db.prepare("SELECT COUNT(*) AS count FROM evidence_snapshots WHERE json_extract(metadata_json, '$.sessionId') = ? AND json_extract(metadata_json, '$.stream') = 'imported-transcript'").get(session.id) as { count: number };
       expect(row.count).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("auto-discovers, binds, and reuses a Codex transcript for the Project", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-auto-transcript-"));
+    const projectRoot = join(tempDir, "workspace");
+    const sessionsDir = join(tempDir, "codex-sessions", "2026", "09", "16");
+    await Promise.all([mkdir(projectRoot), mkdir(sessionsDir, { recursive: true })]);
+    const externalSessionId = "codex-auto-session";
+    const transcriptPath = join(sessionsDir, `rollout-${externalSessionId}.jsonl`);
+    const rows = [
+      { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "preserve the API decision" }] } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "the decision is preserved" }] } }
+    ];
+    await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+    process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+    process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["--version"]);
+    process.env.CONTEXTOS_CODEX_SESSIONS_DIR = join(tempDir, "codex-sessions");
+    const server = await createDaemonServer({
+      config: { host: "127.0.0.1", port: 0, dataDir: tempDir, databaseFile: join(tempDir, "contextos.sqlite") }
+    });
+    cleanupTasks.push(async () => {
+      await server.close();
+      await rm(tempDir, { recursive: true, force: true });
+    });
+    const projectResponse = await server.inject({ method: "POST", url: "/api/projects", payload: { name: "Auto transcript", rootPath: projectRoot } });
+    const project = projectResponse.json();
+    const sessionResponse = await server.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId: project.id, agentAdapterId: "codex", title: "Auto import" }
+    });
+    const session = sessionResponse.json();
+
+    const first = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(first.statusCode, first.body).toBe(201);
+    const result = first.json();
+    expect(result.adapter).toMatchObject({
+      id: "codex",
+      externalSessionId,
+      parserVersion: "codex-jsonl.v1",
+      messageCount: 2,
+      truncated: false,
+      reused: false
+    });
+    expect(result.evidence.metadata).toMatchObject({
+      sessionId: session.id,
+      stream: "imported-transcript",
+      adapterId: "codex",
+      externalSessionId,
+      parserVersion: "codex-jsonl.v1"
+    });
+    await expect(readFile(join(tempDir, result.evidence.storageRef), "utf8")).resolves.toBe(
+      "USER:\npreserve the API decision\n\nASSISTANT:\nthe decision is preserved"
+    );
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.json().externalSessionId).toBe(externalSessionId);
+
+    const repeated = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(repeated.statusCode).toBe(201);
+    expect(repeated.json().adapter.reused).toBe(true);
+    expect(repeated.json().evidence.id).toBe(result.evidence.id);
+    const mismatched = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/import-transcript/auto`,
+      payload: { externalSessionId: "different-codex-session" }
+    });
+    expect(mismatched.statusCode).toBe(409);
+    expect(mismatched.json().error.code).toBe("CONFLICT");
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const count = db.prepare("SELECT COUNT(*) AS count FROM evidence_snapshots WHERE json_extract(metadata_json, '$.sessionId') = ? AND json_extract(metadata_json, '$.externalSessionId') = ?").get(session.id, externalSessionId) as { count: number };
+      expect(count.count).toBe(1);
     } finally {
       db.close();
     }

@@ -108,6 +108,7 @@ type ResumeSessionRow = {
   status: SessionStatus;
   runtime_state: string;
   updated_at: number;
+  external_session_id: string | null;
 };
 
 type ResumeCapsuleState = {
@@ -261,14 +262,17 @@ export class SqliteRuntimeRepository {
     return mapEvidenceSnapshot(this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(input.id) as EvidenceSnapshotRow);
   }
 
-  importSessionTranscript(input: { id: string; projectId: string; sessionId: string; title: string; summary: string; contentHash: string; storageRef: string; sizeBytes: number }, now: number): TranscriptImportResult {
+  importSessionTranscript(input: { id: string; projectId: string; sessionId: string; title: string; summary: string; contentHash: string; storageRef: string; sizeBytes: number; externalSessionId?: string; metadata?: Record<string, unknown> }, now: number): TranscriptImportResult {
     return this.db.transaction(() => {
       const row = this.getResumeSessionRow(input.sessionId);
       const state = JSON.parse(row.runtime_state) as { resumeCapsule?: ResumeCapsuleState };
       const current = mapResumeCapsule(row, state.resumeCapsule);
       const evidenceSnapshotIds = [...new Set([...current.evidenceSnapshotIds, input.id])];
       const importedAt = new Date(now).toISOString();
-      const metadata = { sessionId: input.sessionId, stream: "imported-transcript", importedAt };
+      if (row.external_session_id && input.externalSessionId && row.external_session_id !== input.externalSessionId) {
+        throw new ContextOsError("CONFLICT", "Session is already bound to a different external agent session", { sessionId: input.sessionId });
+      }
+      const metadata = { ...input.metadata, sessionId: input.sessionId, stream: "imported-transcript", importedAt };
 
       this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, storage_ref, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, NULL, 'AGENT_OUTPUT', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)")
         .run(input.id, input.projectId, input.title, input.contentHash, input.storageRef, input.sizeBytes, JSON.stringify(metadata), now, now);
@@ -294,12 +298,30 @@ export class SqliteRuntimeRepository {
         evidenceSnapshotIds: next.evidenceSnapshotIds,
         updatedAt: next.updatedAt
       };
-      this.db.prepare("UPDATE sessions SET runtime_state = ?, resume_capsule_id = ?, last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
-        .run(JSON.stringify(state), evidenceSnapshotIds[0] ?? null, now, now, input.sessionId);
+      this.db.prepare("UPDATE sessions SET runtime_state = ?, resume_capsule_id = ?, external_session_id = COALESCE(external_session_id, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+        .run(JSON.stringify(state), evidenceSnapshotIds[0] ?? null, input.externalSessionId ?? null, now, now, input.sessionId);
 
       const evidence = this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(input.id) as EvidenceSnapshotRow;
       return { evidence: mapEvidenceSnapshot(evidence), resumeCapsule: next };
     })();
+  }
+
+  findSessionTranscriptByHash(sessionId: string, contentHash: string): EvidenceSnapshotDto | null {
+    const row = this.db.prepare("SELECT * FROM evidence_snapshots WHERE content_hash = ? AND json_extract(metadata_json, '$.sessionId') = ? AND json_extract(metadata_json, '$.stream') = 'imported-transcript' ORDER BY created_at DESC LIMIT 1")
+      .get(contentHash, sessionId) as EvidenceSnapshotRow | undefined;
+    return row ? mapEvidenceSnapshot(row) : null;
+  }
+
+  bindExternalSession(sessionId: string, externalSessionId: string, now: number): ResumeCapsuleDto {
+    const row = this.getResumeSessionRow(sessionId);
+    if (row.external_session_id && row.external_session_id !== externalSessionId) {
+      throw new ContextOsError("CONFLICT", "Session is already bound to a different external agent session", { sessionId });
+    }
+    if (!row.external_session_id) {
+      this.db.prepare("UPDATE sessions SET external_session_id = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND external_session_id IS NULL")
+        .run(externalSessionId, now, sessionId);
+    }
+    return this.getResumeCapsule(sessionId);
   }
 
   listSessionEvidence(sessionId: string): EvidenceSnapshotDto[] {
@@ -366,7 +388,7 @@ export class SqliteRuntimeRepository {
 
 
   private getResumeSessionRow(sessionId: string): ResumeSessionRow {
-    const row = this.db.prepare("SELECT id, project_id, intent, status, runtime_state, updated_at FROM sessions WHERE id = ?").get(sessionId) as ResumeSessionRow | undefined;
+    const row = this.db.prepare("SELECT id, project_id, intent, status, runtime_state, updated_at, external_session_id FROM sessions WHERE id = ?").get(sessionId) as ResumeSessionRow | undefined;
     if (!row) throw new ContextOsError("NOT_FOUND", "Session not found", { id: sessionId });
     return row;
   }
