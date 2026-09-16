@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -50,6 +50,7 @@ describe("daemon health endpoint", () => {
     expect(body.version).toMatch(/\d+\.\d+\.\d+/);
     expect(body.schemaVersion).toBe(8);
     expect(body.processState).toBe("ready");
+    expect(body.recovery).toEqual({ orphanContinuesRecovered: 0 });
     expect(body.requestId).toBe("test-request-1");
     expect(JSON.stringify(body)).not.toContain(tempDir);
     expect(JSON.stringify(body)).not.toContain("contextos.sqlite");
@@ -67,6 +68,37 @@ describe("daemon health endpoint", () => {
     ).rejects.toMatchObject({
       code: "INVALID_CONFIG"
     });
+  });
+
+  test("rejects a second daemon for the same data directory until the first closes", async () => {
+    const config = testConfig();
+    server = await createDaemonServer({ config });
+
+    await expect(createDaemonServer({ config })).rejects.toMatchObject({
+      code: "CONFLICT"
+    });
+
+    await server.close();
+    server = undefined;
+
+    server = await createDaemonServer({ config });
+    const response = await server.inject({ method: "GET", url: "/api/health" });
+    expect(response.statusCode).toBe(200);
+  });
+
+  test("releases the data directory lock when server initialization fails", async () => {
+    const config = testConfig();
+    await expect(createDaemonServer({
+      config: {
+        ...config,
+        databaseFile: tempDir!
+      }
+    })).rejects.toThrow();
+    await expect(access(join(tempDir!, ".daemon.lock"))).rejects.toThrow();
+
+    server = await createDaemonServer({ config });
+    const response = await server.inject({ method: "GET", url: "/api/health" });
+    expect(response.statusCode).toBe(200);
   });
 });
 

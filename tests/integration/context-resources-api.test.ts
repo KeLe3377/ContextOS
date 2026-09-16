@@ -73,7 +73,7 @@ describe("context resource APIs", () => {
     const snapshot = snapshotResponse.json();
     expect(snapshot.sourceId).toBe(source.id);
     expect(snapshot.contentHash).toBe(expectedHash);
-    expect(snapshot.storageRef).toMatch(/^evidence\//);
+    expect(snapshot.storageRef).toMatch(new RegExp(`^evidence/${projectId}/`));
     expect(snapshot.sizeBytes).toBe(Buffer.byteLength(contentText, "utf8"));
     await expect(readFile(join(tempDir!, snapshot.storageRef), "utf8")).resolves.toBe(contentText);
 

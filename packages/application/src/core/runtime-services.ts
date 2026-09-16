@@ -141,7 +141,7 @@ export class ContinueSessionService {
     if (!output.trim()) return [];
     try {
       const evidenceId = newId("ev");
-      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, contentText: output });
+      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, projectId: input.session.projectId, contentText: output });
       const snapshot = this.runtime.createSessionRunEvidence({
         id: evidenceId,
         projectId: input.session.projectId,
@@ -164,7 +164,7 @@ export class ContinueSessionService {
     try {
       const evidenceId = newId("ev");
       const contentText = formatHandoffPrompt(input);
-      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, contentText });
+      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, projectId: input.session.projectId, contentText });
       this.runtime.createSessionHandoffEvidence({
         id: evidenceId,
         projectId: input.session.projectId,

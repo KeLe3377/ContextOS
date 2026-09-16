@@ -52,7 +52,7 @@ export class EvidenceSnapshotService {
 
   create(input: EvidenceSnapshotInput): EvidenceSnapshotDto {
     const stored: StoredEvidence | undefined = input.contentText && this.evidenceStore
-      ? this.evidenceStore.writeText({ snapshotId: newId("evblob"), contentText: input.contentText, contentHash: input.contentHash })
+      ? this.evidenceStore.writeText({ snapshotId: newId("evblob"), projectId: input.projectId, contentText: input.contentText, contentHash: input.contentHash })
       : undefined;
     return this.snapshots.create(input, nowMs(), stored);
   }

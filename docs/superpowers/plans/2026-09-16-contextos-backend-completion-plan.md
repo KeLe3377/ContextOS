@@ -50,9 +50,9 @@ Status: mostly done.
 
 Remaining gaps:
 
-- Data directory lock is not complete.
-- Startup/shutdown lifecycle is minimal.
-- Health does not yet expose scheduler/recovery status because scheduler/recovery is minimal.
+- Data directory lock first pass is complete.
+- Startup/shutdown lifecycle has a first pass; deeper worker lifecycle can wait for a scheduler.
+- Health exposes minimal recovery status; scheduler status can wait until a scheduler exists.
 
 Action: finish later during runtime recovery work, not as a separate large refactor.
 
@@ -86,11 +86,11 @@ Action: harden per object, starting only where frontend or runtime loop needs it
 
 ### Original Task 4: Evidence Store And Context
 
-Status: minimal done.
+Status: first pass done.
 
 Remaining gaps:
 
-- Evidence write path is not fully crash-safe: temp file, fsync, atomic rename, DB transaction, recovery.
+- Evidence write path now uses temp file, fsync, atomic rename, and project-partitioned storage; DB/file recovery is still a future hardening area.
 - Evidence Snapshot immutability is not enforced at every layer.
 - Context Item versions and provenance are simplified.
 - Context Package manifest is missing.
@@ -248,7 +248,7 @@ Files likely touched:
 Steps:
 
 - [ ] Write evidence through temp file -> hash/size -> atomic rename -> DB metadata.
-- [ ] Store evidence under `evidence/<project-id>/<snapshot-id>.txt` or a similarly stable internal path, not user-provided filenames.
+- [x] Store evidence under `evidence/<project-id>/<snapshot-id>.txt` or a similarly stable internal path, not user-provided filenames.
 - [ ] Add verification endpoint behavior that recomputes hash and size.
 - [ ] Prevent mutation of content-bearing snapshot fields after creation.
 - [ ] Add missing-file and hash-mismatch failure states.

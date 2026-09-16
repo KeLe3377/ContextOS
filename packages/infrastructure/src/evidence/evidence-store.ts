@@ -24,7 +24,7 @@ export type EvidenceVerification = {
 export class FileEvidenceStore {
   constructor(private readonly rootDir: string) {}
 
-  writeText(input: { snapshotId: string; contentText: string; contentHash?: string }): StoredEvidence {
+  writeText(input: { snapshotId: string; contentText: string; contentHash?: string; projectId?: string }): StoredEvidence {
     const bytes = Buffer.from(input.contentText, "utf8");
     const contentHash = hashBytes(bytes);
     if (input.contentHash && input.contentHash !== contentHash) {
@@ -34,7 +34,9 @@ export class FileEvidenceStore {
       });
     }
 
-    const storageRef = `evidence/${input.snapshotId}.txt`;
+    const storageRef = input.projectId
+      ? `evidence/${sanitizeSegment(input.projectId)}/${input.snapshotId}.txt`
+      : `evidence/${input.snapshotId}.txt`;
     const finalPath = join(this.rootDir, storageRef);
     const tempPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
     mkdirSync(dirname(finalPath), { recursive: true });
@@ -102,6 +104,10 @@ export class FileEvidenceStore {
 
 function hashBytes(bytes: Buffer): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function sanitizeSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
 function fsyncFile(path: string): void {

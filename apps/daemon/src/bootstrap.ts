@@ -29,6 +29,7 @@ import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
 import { nowMs } from "../../../packages/shared/src/clock.js";
+import { acquireRuntimeLock } from "./runtime-lock.js";
 import { registerContextResourceRoutes } from "./http/routes/context-resources.js";
 import { registerCoreResourceRoutes } from "./http/routes/core-resources.js";
 import { registerIdempotencyHooks } from "./http/idempotency.js";
@@ -77,36 +78,39 @@ export async function createDaemonServer(
   options: CreateDaemonServerOptions = {}
 ): Promise<FastifyInstance> {
   const config = loadDaemonConfig(options.config ?? {});
-  const sqlite = SqliteClient.open({ databaseFile: config.databaseFile });
-  runMigrations(sqlite);
-  const schemaVersion = getSchemaVersion(sqlite);
-  const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
-  runtimeRepository.recoverOrphanRunningContinues(nowMs());
-  const evidenceStore = new FileEvidenceStore(config.dataDir);
-  const codexAdapter = new CodexAdapter();
-  const adapterRegistry = new AgentAdapterRegistry([codexAdapter]);
-  const continueSessionService = new ContinueSessionService(runtimeRepository, adapterRegistry, new ProcessSupervisor(), evidenceStore);
+  const runtimeLock = acquireRuntimeLock(config.dataDir);
+  let sqlite: SqliteClient | undefined;
+  try {
+    sqlite = SqliteClient.open({ databaseFile: config.databaseFile });
+    runMigrations(sqlite);
+    const schemaVersion = getSchemaVersion(sqlite);
+    const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
+    const orphanContinuesRecovered = runtimeRepository.recoverOrphanRunningContinues(nowMs());
+    const evidenceStore = new FileEvidenceStore(config.dataDir);
+    const codexAdapter = new CodexAdapter();
+    const adapterRegistry = new AgentAdapterRegistry([codexAdapter]);
+    const continueSessionService = new ContinueSessionService(runtimeRepository, adapterRegistry, new ProcessSupervisor(), evidenceStore);
 
-  const projectRepository = new SqliteProjectRepository(sqlite.db);
-  const reviewItemRepository = new SqliteReviewItemRepository(sqlite.db);
-  const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db), reviewItemRepository);
-  const projectService = new ProjectService(projectRepository);
-  const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService, projectRepository, ruleService);
-  const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
-  const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
-  const reviewItemService = new ReviewItemService(reviewItemRepository);
-  const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
-  const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), evidenceStore);
-  const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
-  const settingsService = new SettingsService(runtimeRepository);
-  const agentAdapterService = new AgentAdapterService(adapterRegistry);
+    const projectRepository = new SqliteProjectRepository(sqlite.db);
+    const reviewItemRepository = new SqliteReviewItemRepository(sqlite.db);
+    const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db), reviewItemRepository);
+    const projectService = new ProjectService(projectRepository);
+    const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService, projectRepository, ruleService);
+    const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
+    const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
+    const reviewItemService = new ReviewItemService(reviewItemRepository);
+    const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
+    const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), evidenceStore);
+    const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
+    const settingsService = new SettingsService(runtimeRepository);
+    const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
-  const server = Fastify({
-    logger: false,
-    genReqId: (request) => request.headers["x-request-id"]?.toString() ?? randomUUID()
-  });
+    const server = Fastify({
+      logger: false,
+      genReqId: (request) => request.headers["x-request-id"]?.toString() ?? randomUUID()
+    });
 
-  await server.register(cors, {
+    await server.register(cors, {
     origin: (origin, callback) => {
       if (!origin || origin === "null") {
         callback(null, true);
@@ -121,33 +125,36 @@ export async function createDaemonServer(
     },
     methods: ["GET", "POST", "PATCH", "OPTIONS"]
   });
-  registerIdempotencyHooks(server, sqlite.db);
-  server.get("/api/health", async (request) => ({
+    registerIdempotencyHooks(server, sqlite.db);
+    server.get("/api/health", async (request) => ({
     version: packageVersion,
     schemaVersion,
     processState: "ready",
+    recovery: {
+      orphanContinuesRecovered
+    },
     requestId: request.id
   }));
 
-  await registerProjectRoutes(server, projectService);
-  await registerCoreResourceRoutes(server, {
+    await registerProjectRoutes(server, projectService);
+    await registerCoreResourceRoutes(server, {
     sessions: sessionService,
     decisions: decisionService,
     workItems: workItemService,
     reviewItems: reviewItemService
   });
-  await registerContextResourceRoutes(server, {
+    await registerContextResourceRoutes(server, {
     contextSources: contextSourceService,
     evidenceSnapshots: evidenceSnapshotService,
     contextItems: contextItemService
   });
-  await registerRuleRoutes(server, ruleService);
-  await registerRuntimeRoutes(server, {
+    await registerRuleRoutes(server, ruleService);
+    await registerRuntimeRoutes(server, {
     settings: settingsService,
     agentAdapters: agentAdapterService
   });
 
-  server.setErrorHandler((error, request, reply) => {
+    server.setErrorHandler((error, request, reply) => {
     if (error instanceof ContextOsError) {
       const statusCode = error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;
       reply.status(statusCode).send({
@@ -180,11 +187,17 @@ export async function createDaemonServer(
     });
   });
 
-  server.addHook("onClose", async () => {
-    sqlite.close();
-  });
+    server.addHook("onClose", async () => {
+      if (sqlite) sqlite.close();
+      runtimeLock.release();
+    });
 
-  return server;
+    return server;
+  } catch (error) {
+    sqlite?.close();
+    runtimeLock.release();
+    throw error;
+  }
 }
 
 function isLoopbackHost(host: string): boolean {
