@@ -101,6 +101,7 @@ first pass 已完成，仍有深层硬化空间。
 - verify 发现文件缺失或内容不匹配时自动创建 Review Item。
 - 重复 verify 复用活动中的同类 Review Item；关闭后故障复发会新建。
 - `POST /api/evidence-snapshots/:id/compare` 可比较同 Project Snapshot 的 hash、size、type 和 source。
+- `GET /api/context-items/:id/versions` 可读取连续编号的内容版本和创建者 provenance。
 
 仍待后续：
 
@@ -290,7 +291,7 @@ frontend/styles.css
 
 - Evidence Snapshot immutability 全链路约束。
 - 正文或语义级 Snapshot compare。
-- Context Item version history。
+- Context Item 更深层 provenance 与历史版本恢复。
 - Context Source sync first pass。
 
 ### 6.3 Runtime / Jobs 深化
@@ -319,10 +320,10 @@ frontend/styles.css
 
 如果继续后端：
 
-1. Context Item version history 查询。
-2. Context Source sync first pass。
-3. Evidence DB/file 跨崩溃 recovery。
-4. Evidence Snapshot immutability audit。
+1. Context Source sync first pass。
+2. Evidence DB/file 跨崩溃 recovery。
+3. Evidence Snapshot immutability audit。
+4. Context Item 历史版本恢复。
 
 如果转前端：
 

@@ -133,4 +133,67 @@ describe("context resource APIs", () => {
     expect(snapshotResponse.statusCode).toBe(400);
     expect(snapshotResponse.json().error.code).toBe("INVALID_ARGUMENT");
   });
+
+  test("lists contiguous Context Item content versions with provenance", async () => {
+    const createdResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-items",
+      payload: {
+        projectId,
+        itemType: "CONSTRAINT",
+        title: "Runtime boundary",
+        summary: "Keep the daemon local.",
+        confidence: "MEDIUM",
+        metadata: { source: "design" }
+      }
+    });
+    expect(createdResponse.statusCode).toBe(201);
+    const created = createdResponse.json();
+
+    const activatedResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-items/${created.id}/activate`,
+      payload: { expectedRevision: created.revision }
+    });
+    expect(activatedResponse.statusCode).toBe(200);
+    const activated = activatedResponse.json();
+
+    const patchedResponse = await server!.inject({
+      method: "PATCH",
+      url: `/api/context-items/${created.id}`,
+      payload: {
+        summary: "Keep the daemon bound to loopback.",
+        confidence: "HIGH",
+        metadata: { source: "verified-design" },
+        expectedRevision: activated.revision
+      }
+    });
+    expect(patchedResponse.statusCode).toBe(200);
+
+    const versionsResponse = await server!.inject({
+      method: "GET",
+      url: `/api/context-items/${created.id}/versions`
+    });
+    expect(versionsResponse.statusCode).toBe(200);
+    expect(versionsResponse.json().items).toEqual([
+      expect.objectContaining({
+        contextItemId: created.id,
+        versionNumber: 2,
+        summary: "Keep the daemon bound to loopback.",
+        confidence: "HIGH",
+        metadata: { source: "verified-design" },
+        createdByType: "USER",
+        createdById: null
+      }),
+      expect.objectContaining({
+        contextItemId: created.id,
+        versionNumber: 1,
+        summary: "Keep the daemon local.",
+        confidence: "MEDIUM",
+        metadata: { source: "design" },
+        createdByType: "USER",
+        createdById: null
+      })
+    ]);
+  });
 });

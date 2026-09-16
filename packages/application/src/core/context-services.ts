@@ -3,6 +3,7 @@ import type {
   ContextItemInput,
   ContextItemPatch,
   ContextItemStatus,
+  ContextItemVersionDto,
   ContextSourceDto,
   ContextSourceInput,
   ContextSourcePatch,
@@ -169,6 +170,10 @@ export class ContextItemService {
 
   get(id: string): ContextItemDto {
     return this.items.getByIdOrThrow(id);
+  }
+
+  versions(id: string): ContextItemVersionDto[] {
+    return this.items.listVersions(id);
   }
 
   patch(id: string, input: ContextItemPatch): ContextItemDto {

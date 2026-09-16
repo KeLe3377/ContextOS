@@ -115,6 +115,20 @@ export const contextItemDtoSchema = resourceMetaSchema.extend({
   archivedAt: z.string().nullable()
 });
 
+export const contextItemVersionDtoSchema = z.object({
+  id: z.string(),
+  contextItemId: z.string(),
+  versionNumber: z.number().int().positive(),
+  title: z.string(),
+  summary: z.string(),
+  body: z.string().nullable(),
+  confidence: contextConfidenceSchema,
+  metadata: z.record(z.unknown()),
+  createdByType: z.string(),
+  createdById: z.string().nullable(),
+  createdAt: z.string()
+});
+
 export type ContextSourceType = z.infer<typeof contextSourceTypeSchema>;
 export type ContextSourceStatus = z.infer<typeof contextSourceStatusSchema>;
 export type ContextSourceInput = z.infer<typeof contextSourceInputSchema>;
@@ -151,6 +165,7 @@ export const contextPackageDtoSchema = resourceMetaSchema.extend({
 });
 
 export type ContextItemDto = z.infer<typeof contextItemDtoSchema>;
+export type ContextItemVersionDto = z.infer<typeof contextItemVersionDtoSchema>;
 export type ContextPackageEntryDto = z.infer<typeof contextPackageEntrySchema>;
 export type ContextPackageDto = z.infer<typeof contextPackageDtoSchema>;
 

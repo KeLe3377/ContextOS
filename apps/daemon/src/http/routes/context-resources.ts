@@ -71,6 +71,9 @@ export async function registerContextResourceRoutes(
     return services.contextItems.create(contextItemInputSchema.parse(request.body));
   });
   server.get("/api/context-items/:id", async (request) => services.contextItems.get(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/context-items/:id/versions", async (request) => ({
+    items: services.contextItems.versions(paramsWithIdSchema.parse(request.params).id)
+  }));
   server.patch("/api/context-items/:id", async (request) => services.contextItems.patch(paramsWithIdSchema.parse(request.params).id, contextItemPatchSchema.parse(request.body)));
   for (const action of ["activate", "mark-stale", "archive"] as const) {
     server.post(`/api/context-items/:id/${action}`, async (request) => {

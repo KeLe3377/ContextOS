@@ -92,7 +92,7 @@ Remaining gaps:
 
 - Evidence write path now uses temp file, fsync, atomic rename, and project-partitioned storage; DB/file recovery is still a future hardening area.
 - Evidence Snapshot immutability is not enforced at every layer.
-- Context Item versions and provenance are simplified.
+- Context Item version history is queryable with creator provenance; restore and deeper provenance remain deferred.
 - Context Package manifest is missing.
 - Manual text transcript import is complete; Codex file discovery and live capture are still missing.
 - Metadata Snapshot compare and verify are complete; content/semantic comparison remains deferred.

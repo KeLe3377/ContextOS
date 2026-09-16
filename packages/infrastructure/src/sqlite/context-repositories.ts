@@ -6,6 +6,7 @@ import type {
   ContextItemInput,
   ContextItemPatch,
   ContextItemStatus,
+  ContextItemVersionDto,
   ContextItemType,
   ContextSourceDto,
   ContextSourceInput,
@@ -209,6 +210,20 @@ type ContextItemRow = {
   archived_at: number | null;
 };
 
+type ContextItemVersionRow = {
+  id: string;
+  context_item_id: string;
+  version_number: number;
+  title: string;
+  summary: string;
+  body: string | null;
+  confidence: ContextConfidence;
+  metadata_json: string;
+  created_by_type: string;
+  created_by_id: string | null;
+  created_at: number;
+};
+
 export class SqliteContextItemRepository {
   constructor(private readonly db: Database) {}
 
@@ -246,6 +261,12 @@ export class SqliteContextItemRepository {
     return item;
   }
 
+  listVersions(id: string): ContextItemVersionDto[] {
+    this.getByIdOrThrow(id);
+    return (this.db.prepare("SELECT * FROM context_item_versions WHERE context_item_id = ? ORDER BY version_number DESC")
+      .all(id) as ContextItemVersionRow[]).map(mapContextItemVersion);
+  }
+
   patch(id: string, input: ContextItemPatch, now: number): ContextItemDto {
     const current = this.getByIdOrThrow(id);
     const next = {
@@ -255,7 +276,8 @@ export class SqliteContextItemRepository {
       confidence: input.confidence ?? current.confidence,
       metadata: input.metadata ?? current.metadata
     };
-    const versionNumber = current.revision + 1;
+    const versionNumber = (this.db.prepare("SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM context_item_versions WHERE context_item_id = ?")
+      .get(id) as { next_version: number }).next_version;
     const versionId = newId("ctxv");
     this.db.transaction(() => {
       const result = this.db.prepare("UPDATE context_items SET title = ?, summary = ?, body = ?, confidence = ?, metadata_json = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
@@ -292,6 +314,22 @@ function mapContextItem(row: ContextItemRow): ContextItemDto {
     updatedAt: new Date(row.updated_at).toISOString(),
     revision: row.revision,
     archivedAt: iso(row.archived_at)
+  };
+}
+
+function mapContextItemVersion(row: ContextItemVersionRow): ContextItemVersionDto {
+  return {
+    id: row.id,
+    contextItemId: row.context_item_id,
+    versionNumber: row.version_number,
+    title: row.title,
+    summary: row.summary,
+    body: row.body,
+    confidence: row.confidence,
+    metadata: parseJsonObject(row.metadata_json),
+    createdByType: row.created_by_type,
+    createdById: row.created_by_id,
+    createdAt: new Date(row.created_at).toISOString()
   };
 }
 
