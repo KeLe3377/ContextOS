@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
+import type { AgentAdapter } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../process-supervisor.js";
 
-export class CodexAdapter {
+export class CodexAdapter implements AgentAdapter {
   readonly id = "codex";
   readonly displayName = "Codex";
   private readonly command: string;
@@ -35,7 +36,7 @@ export class CodexAdapter {
       command: this.command,
       version: !result.error && result.status === 0 ? output || null : null,
       error: result.error ? result.error.message : result.status === 0 ? null : output || `Exited with status ${result.status}`,
-      capabilities: ["discover", "launch", "resume"]
+      capabilities: ["discover", "launch", "resume", "inspectStatus", "interrupt", "importTranscript"]
     };
   }
 

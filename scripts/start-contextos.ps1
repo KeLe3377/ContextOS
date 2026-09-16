@@ -1,0 +1,45 @@
+param(
+  [int]$Port = 4721,
+  [string]$HostName = "127.0.0.1",
+  [string]$DataDir = ".contextos",
+  [switch]$NoBrowser
+)
+
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$frontendPath = Join-Path $repoRoot "frontend\index.html"
+$databaseFile = Join-Path $DataDir "contextos.sqlite"
+$healthUrl = "http://${HostName}:${Port}/api/health"
+
+Set-Location $repoRoot
+
+if (-not (Test-Path (Join-Path $repoRoot "node_modules"))) {
+  Write-Host "Installing dependencies..."
+  npm install
+}
+
+if (-not (Test-Path $frontendPath)) {
+  throw "Frontend entry not found: $frontendPath"
+}
+
+$env:CONTEXTOS_HOST = $HostName
+$env:CONTEXTOS_PORT = "$Port"
+$env:CONTEXTOS_DATA_DIR = $DataDir
+$env:CONTEXTOS_DATABASE_FILE = $databaseFile
+
+Write-Host ""
+Write-Host "ContextOS local startup"
+Write-Host "Daemon:   $healthUrl"
+Write-Host "Frontend: $frontendPath"
+Write-Host "Data:     $(Join-Path $repoRoot $DataDir)"
+Write-Host ""
+Write-Host "Keep this terminal open while testing. Press Ctrl+C to stop the daemon."
+Write-Host ""
+
+if (-not $NoBrowser) {
+  Start-Process $frontendPath
+  Start-Process $healthUrl
+}
+
+npm run dev

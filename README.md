@@ -131,4 +131,61 @@ frontend/index.html
 
 这个原型用于确认信息架构、视觉密度和页面关系。后端稳定后，正式前端建议迁移为 React + TypeScript + Vite，并用真实 API 替换静态数据。
 
+## 本地启动
+
+Windows 上推荐使用一键脚本：
+
+```powershell
+cd D:\project\ContextOS
+npm run start:local
+```
+
+脚本会在缺少依赖时运行 `npm install`，启动本地 daemon，并打开：
+
+```text
+http://127.0.0.1:4721/api/health
+frontend/index.html
+```
+
+默认数据目录是 `.contextos/`，数据库是 `.contextos/contextos.sqlite`。这些本地运行数据已经被 `.gitignore` 排除。
+
+也可以手动启动 daemon：
+
+```powershell
+npm install
+npm run dev
+```
+
+## 基本测试流程
+
+1. 打开 `frontend/index.html`。
+2. 在 Projects 创建或确认一个项目，Root path 使用不带外层引号的绝对路径，例如 `D:\project\ContextOS`。
+3. 在 Sessions 点击 `New Session`，填写 title 和 intent。
+4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。
+5. 回到 Sessions 页面刷新，可以在 Latest Session Context 里看到 Context Package ID 和 `ContextOS handoff prompt` evidence。
+
+当前版本不会自动读取 Codex GUI 当前对话，也不会实时导入 Codex CLI 后续聊天 transcript。`Continue in Agent` 负责启动 Codex 并记录 handoff、运行状态、进程输出证据；历史/实时 transcript 导入属于后续 adapter 深化。
+
+## Codex Adapter
+
+当前 registry 只启用 Codex adapter。Windows 默认命令是 `codex.cmd`，非 Windows 默认命令是 `codex`。可以用环境变量覆盖：
+
+```powershell
+$env:CONTEXTOS_CODEX_COMMAND="codex.cmd"
+$env:CONTEXTOS_CODEX_ARGS='["--help"]'
+npm run dev
+```
+
+adapter contract 已预留 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt`、`importTranscript` 能力位，但 Claude Code、Cursor 和 transcript import 还没有启用。
+
+## 验证
+
+提交前建议运行：
+
+```powershell
+node --check frontend/app.js
+npm run build
+npm test
+```
+
 

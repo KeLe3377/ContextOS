@@ -18,7 +18,6 @@ export async function registerRuntimeRoutes(
   }));
   server.get("/api/agent-adapters/:id", async (request) => {
     const { id } = adapterParamsSchema.parse(request.params);
-    if (id !== "codex") return { id, available: false, error: "Unsupported adapter" };
-    return services.agentAdapters.getCodex();
+    return services.agentAdapters.get(id);
   });
 }

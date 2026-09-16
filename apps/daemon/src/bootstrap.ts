@@ -8,6 +8,7 @@ import { RuleService } from "../../../packages/application/src/core/rule-service
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
 import { CodexAdapter } from "../../../packages/infrastructure/src/adapters/codex-adapter.js";
+import { AgentAdapterRegistry } from "../../../packages/infrastructure/src/adapters/registry.js";
 import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
 import { ProcessSupervisor } from "../../../packages/infrastructure/src/process-supervisor.js";
 import {
@@ -82,7 +83,8 @@ export async function createDaemonServer(
   runtimeRepository.recoverOrphanRunningContinues(nowMs());
   const evidenceStore = new FileEvidenceStore(config.dataDir);
   const codexAdapter = new CodexAdapter();
-  const continueSessionService = new ContinueSessionService(runtimeRepository, codexAdapter, new ProcessSupervisor(), evidenceStore);
+  const adapterRegistry = new AgentAdapterRegistry([codexAdapter]);
+  const continueSessionService = new ContinueSessionService(runtimeRepository, adapterRegistry, new ProcessSupervisor(), evidenceStore);
 
   const projectRepository = new SqliteProjectRepository(sqlite.db);
   const reviewItemRepository = new SqliteReviewItemRepository(sqlite.db);
@@ -96,7 +98,7 @@ export async function createDaemonServer(
   const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), evidenceStore);
   const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
   const settingsService = new SettingsService(runtimeRepository);
-  const agentAdapterService = new AgentAdapterService(codexAdapter);
+  const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
   const server = Fastify({
     logger: false,

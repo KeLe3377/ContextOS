@@ -198,6 +198,8 @@ export class SqliteRuntimeRepository {
         .run(now, input.failureCode, input.failureMessage, now, input.jobId);
       this.db.prepare("UPDATE session_runs SET status = 'FAILED', ended_at = ?, failure_code = ?, failure_message = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
         .run(now, input.failureCode, input.failureMessage, now, input.runId);
+      this.db.prepare("UPDATE sessions SET status = 'FAILED', completed_at = COALESCE(completed_at, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = (SELECT session_id FROM session_runs WHERE id = ?) AND status IN ('CREATED', 'RUNNING')")
+        .run(now, now, now, input.runId);
       this.db.prepare("INSERT INTO job_attempts (id, job_id, status, started_at, ended_at, failure_code, failure_message) VALUES (?, ?, 'FAILED', ?, ?, ?, ?)")
         .run(newId("jattempt"), input.jobId, now, now, input.failureCode, input.failureMessage);
     })();
@@ -237,6 +239,13 @@ export class SqliteRuntimeRepository {
 
   createSessionRunEvidence(input: { id: string; projectId: string; sessionId: string; runId: string; title: string; contentHash: string; storageRef: string; sizeBytes: number; outputTruncated: boolean }, now: number): EvidenceSnapshotDto {
     const metadata = { sessionId: input.sessionId, runId: input.runId, stream: "process-output", outputTruncated: input.outputTruncated };
+    this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, storage_ref, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, NULL, 'AGENT_OUTPUT', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)")
+      .run(input.id, input.projectId, input.title, input.contentHash, input.storageRef, input.sizeBytes, JSON.stringify(metadata), now, now);
+    return mapEvidenceSnapshot(this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(input.id) as EvidenceSnapshotRow);
+  }
+
+  createSessionHandoffEvidence(input: { id: string; projectId: string; sessionId: string; contextPackageId: string; title: string; contentHash: string; storageRef: string; sizeBytes: number }, now: number): EvidenceSnapshotDto {
+    const metadata = { sessionId: input.sessionId, contextPackageId: input.contextPackageId, stream: "contextos-handoff" };
     this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, storage_ref, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, NULL, 'AGENT_OUTPUT', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)")
       .run(input.id, input.projectId, input.title, input.contentHash, input.storageRef, input.sizeBytes, JSON.stringify(metadata), now, now);
     return mapEvidenceSnapshot(this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(input.id) as EvidenceSnapshotRow);

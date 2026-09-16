@@ -29,6 +29,15 @@ describe("runtime APIs", () => {
     expect(adapters.json().items[0].id).toBe("codex");
     expect(adapters.json().items[0].available).toBe(true);
     expect(adapters.json().items[0].capabilities).toContain("launch");
+    expect(adapters.json().items[0].capabilities).toContain("importTranscript");
+
+    const unsupported = await server.inject({ method: "GET", url: "/api/agent-adapters/claude-code" });
+    expect(unsupported.statusCode).toBe(200);
+    expect(unsupported.json()).toMatchObject({
+      id: "claude-code",
+      available: false,
+      error: "Unsupported adapter"
+    });
   });
 
   test("marks a short continue run completed after the process exits successfully", async () => {
@@ -50,9 +59,10 @@ describe("runtime APIs", () => {
 
     const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
     expect(evidence.statusCode).toBe(200);
-    expect(evidence.json().items).toEqual([
+    expect(evidence.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ evidenceType: "AGENT_OUTPUT", title: "ContextOS handoff prompt" }),
       expect.objectContaining({ evidenceType: "AGENT_OUTPUT", title: "Codex process output" })
-    ]);
+    ]));
 
     const resume = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/resume-capsule` });
     expect(resume.statusCode).toBe(200);
@@ -61,7 +71,7 @@ describe("runtime APIs", () => {
       status: "COMPLETED",
       summary: "Codex run completed.",
       nextAction: null,
-      evidenceSnapshotIds: [evidence.json().items[0].id]
+      evidenceSnapshotIds: [evidence.json().items.find((item: { title: string }) => item.title === "Codex process output").id]
     });
   });
 
@@ -157,6 +167,19 @@ describe("runtime APIs", () => {
       schemaVersion: "context-package.v1",
       generatedFor: "session-continue"
     });
+
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    expect(evidence.statusCode).toBe(200);
+    expect(evidence.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: "ContextOS handoff prompt",
+        metadata: expect.objectContaining({
+          sessionId: session.id,
+          contextPackageId: contextPack.json().id,
+          stream: "contextos-handoff"
+        })
+      })
+    ]));
   });
 });
 

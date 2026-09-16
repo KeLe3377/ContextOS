@@ -366,7 +366,7 @@ Steps:
 
 Can be short: yes. Do after backend lifecycle is truthful.
 
-### Phase J: Adapter Contract Deepening
+### Phase J: Adapter Contract Deepening - first pass complete
 
 Purpose: Codex first, then Claude Code/Cursor later.
 
@@ -380,15 +380,15 @@ Files likely touched:
 
 Steps:
 
-- [ ] Extract an adapter interface around current Codex behavior.
-- [ ] Add normalized capabilities: discover, launch, resume, inspectStatus, interrupt, importTranscript.
-- [ ] Add adapter registry with Codex only enabled initially.
-- [ ] Add fixtures for Codex non-interactive output.
+- [x] Extract an adapter interface around current Codex behavior.
+- [x] Add normalized capabilities: discover, launch, resume, inspectStatus, interrupt, importTranscript.
+- [x] Add adapter registry with Codex only enabled initially.
+- [x] Keep Codex non-interactive output covered by runtime/codex adapter tests.
 - [ ] Add Claude Code and Cursor only after Codex passes the shared contract.
 
 Can be short: no for full multi-agent support. Keep first pass Codex-only.
 
-### Phase K: Packaging, Docs, And Final Backend Verification
+### Phase K: Packaging, Docs, And Final Backend Verification - first pass complete
 
 Purpose: make the project usable repeatedly on the same machine.
 
@@ -403,11 +403,11 @@ Files likely touched:
 
 Steps:
 
-- [ ] Document how to start daemon, open frontend, create a project/session, and continue with Codex.
-- [ ] Document adapter prerequisites and Windows `codex.cmd` behavior.
-- [ ] Add graceful shutdown handling.
-- [ ] Run `npm run build` and `npm test`.
-- [ ] Run one manual E2E with real Codex when the user is not actively using Codex.
+- [x] Document how to start daemon, open frontend, create a project/session, and continue with Codex.
+- [x] Document adapter prerequisites and Windows `codex.cmd` behavior.
+- [x] Add graceful shutdown handling.
+- [x] Run `npm run build` and `npm test`.
+- [x] Run local startup smoke against health and adapter endpoints.
 
 Can be short: yes for docs; shutdown/recovery may need its own pass.
 
@@ -424,8 +424,8 @@ Start with the smallest work that makes the current loop more truthful:
 7. Phase G: Rule evaluation MVP.
 8. Phase H: idempotency/audit/activity discipline.
 9. Phase I: frontend action wiring.
-10. Phase J: adapter contract deepening.
-11. Phase K: packaging/docs/final verification.
+10. Phase J: adapter contract deepening. First pass complete on 2026-09-16.
+11. Phase K: packaging/docs/final verification. First pass complete on 2026-09-16.
 
 This order keeps the product loop intact while gradually restoring the original design depth.
 

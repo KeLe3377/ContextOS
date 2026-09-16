@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx apps/daemon/src/main.ts",
+    "start:local": "powershell -ExecutionPolicy Bypass -File scripts/start-contextos.ps1",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -21,7 +21,7 @@ const navGroups = [
 const pages = {
   overview: { title: "Overview", subtitle: "Workspace status, pending governance, and the next executable work.", actions: [["refresh", "Refresh Context"]] },
   projects: { title: "Projects", subtitle: "Governed workspace boundaries and their active context policies.", actions: [["create_new_folder", "Add Project", "primary"], ["tune", "Edit Defaults"]] },
-  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["play_arrow", "Continue in Agent", "primary"], ["download", "Export Capsule"]] },
+  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["add", "New Session", "primary"], ["play_arrow", "Continue in Agent"], ["download", "Export Capsule"]] },
   review: { title: "Review Inbox", subtitle: "Human decisions required before derived context or rules become active.", actions: [["rule", "Approve Selected", "primary"], ["close", "Reject"]] },
   decisions: { title: "Decisions", subtitle: "Durable choices, rationale, provenance, and version history.", actions: [["add", "Record Decision", "primary"], ["compare_arrows", "Compare Versions"]] },
   work: { title: "Work Items", subtitle: "Executable units of work with readiness signals and blocked dependencies.", actions: [["play_arrow", "Start Ready Item", "primary"], ["add_task", "Create Item"]] },
@@ -138,9 +138,10 @@ async function settle(promise) {
 
 function icon(name) { return `<span class="material-symbols-outlined">${name}</span>`; }
 function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c])); }
+function stripWrappingQuotes(value) { return String(value ?? "").trim().replace(/^["'](.+)["']$/, "$1"); }
 function badge(text, tone = "") { return `<span class="badge ${tone}">${esc(text)}</span>`; }
 function actionId(label) { return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
-const enabledActions = new Set(["refresh-context", "add-project", "continue-in-agent", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "new-rule", "reset-changes", "save-changes"]);
 function button([ic, label, kind]) {
   const id = actionId(label);
   const disabled = !enabledActions.has(id) || state.actionLoading;
@@ -232,11 +233,16 @@ function renderProjects() {
 function renderSessions() {
   const details = state.sessionDetails;
   const canContinue = status => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
+  const evidenceList = details?.evidence.length
+    ? `<div class="detail-wide"><span class="mono muted">EVIDENCE SNAPSHOTS</span><div class="stack compact">${details.evidence.slice(0, 4).map(item => `<div class="metric-row"><span>${esc(item.title)}</span>${badge(item.evidenceType, "blue")}</div>`).join("")}</div></div>`
+    : "";
   const detailBody = details ? `<div class="detail-grid">
     <div><span class="mono muted">CONTEXT ITEMS</span><strong>${details.contextPack?.contextItems?.length ?? 0}</strong></div>
     <div><span class="mono muted">EVIDENCE</span><strong>${details.evidence.length}</strong></div>
     <div><span class="mono muted">RESUME STATUS</span><strong>${esc(details.resumeCapsule?.status || "Not available")}</strong></div>
+    <div class="detail-wide"><span class="mono muted">CONTEXT PACKAGE</span><strong>${esc(details.contextPack?.id || "Not generated")}</strong></div>
     <div class="detail-wide"><span class="mono muted">NEXT ACTION</span><strong>${esc(details.resumeCapsule?.nextAction || "-")}</strong></div>
+    ${evidenceList}
   </div>` : emptyNote("Continue a session to generate its context package and resume capsule.");
   return `${pageHeader(pages.sessions)}<div class="stack">
     ${panel("Session Episodes", "terminal", table(["Session", "Agent", "Started", "Updated", "Status", "Action"], state.data.sessions.map(session => [
@@ -305,11 +311,40 @@ function openProjectDialog() {
       <label>Description<input class="field" name="description" /></label>`,
     onSubmit: values => runAction(() => sendJson("/api/projects", "POST", {
       name: values.get("name"),
-      rootPath: values.get("rootPath"),
+      rootPath: stripWrappingQuotes(values.get("rootPath")),
       description: values.get("description") || undefined,
       defaultRuleIds: [],
       agentAdapterIds: ["codex"]
     }), "Project created")
+  });
+}
+
+function openSessionDialog() {
+  const project = state.data.projects[0];
+  if (!project) {
+    state.actionMessage = { text: "Create a project before starting a session", error: true };
+    render();
+    return;
+  }
+  const defaultTitle = `Session ${new Date().toLocaleString()}`;
+  openFormDialog({
+    title: "New Session",
+    submitLabel: "Create Session",
+    fields: `
+      <label>Project<input class="field" value="${esc(project.name)}" disabled /></label>
+      <label>Title<input class="field" name="title" required value="${esc(defaultTitle)}" /></label>
+      <label>Intent<input class="field" name="intent" required placeholder="What should the agent help with?" /></label>
+      <label>Agent<select name="agentAdapterId"><option value="codex">Codex</option></select></label>`,
+    onSubmit: values => runAction(async () => {
+      state.page = "sessions";
+      location.hash = "sessions";
+      await sendJson("/api/sessions", "POST", {
+        projectId: project.id,
+        agentAdapterId: values.get("agentAdapterId") || "codex",
+        title: values.get("title"),
+        intent: values.get("intent")
+      });
+    }, "Session created")
   });
 }
 
@@ -363,9 +398,15 @@ function openFormDialog({ title, submitLabel, fields, onSubmit }) {
 function handleAction(action) {
   if (action === "refresh-context" || action === "reset-changes") return loadData();
   if (action === "add-project") return openProjectDialog();
+  if (action === "new-session") return openSessionDialog();
   if (action === "new-rule") return openRuleDialog();
   if (action === "continue-in-agent") {
     const session = state.data.sessions.find(item => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
+    if (!session) {
+      state.actionMessage = { text: "Create a session before continuing in an agent", error: true };
+      render();
+      return;
+    }
     return runAction(() => continueSession(session?.id), "Session continued in Codex");
   }
   if (action === "save-changes") {

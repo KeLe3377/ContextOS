@@ -1,7 +1,7 @@
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
 import type { ResumeCapsuleDto, SessionDto, SessionStatus } from "../../../contracts/src/sessions.js";
-import type { CodexAdapter } from "../../../infrastructure/src/adapters/codex-adapter.js";
+import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
 import type { SqliteRuntimeRepository } from "../../../infrastructure/src/sqlite/runtime-repository.js";
@@ -28,21 +28,33 @@ export class SettingsService {
 }
 
 export class AgentAdapterService {
-  constructor(private readonly codex: CodexAdapter) {}
+  constructor(private readonly registry: AgentAdapterRegistry) {}
 
   list(): AgentAdapterStatusDto[] {
-    return [this.codex.discover()];
+    return this.registry.list().map((adapter) => adapter.discover());
   }
 
-  getCodex(): AgentAdapterStatusDto {
-    return this.codex.discover();
+  get(id: string): AgentAdapterStatusDto {
+    const adapter = this.registry.get(id);
+    if (!adapter) {
+      return {
+        id,
+        displayName: id,
+        available: false,
+        command: id,
+        version: null,
+        error: "Unsupported adapter",
+        capabilities: []
+      };
+    }
+    return adapter.discover();
   }
 }
 
 export class ContinueSessionService {
   constructor(
     private readonly runtime: SqliteRuntimeRepository,
-    private readonly codex: CodexAdapter,
+    private readonly adapters: AgentAdapterRegistry,
     private readonly supervisor: ProcessSupervisor,
     private readonly evidenceStore?: FileEvidenceStore
   ) {}
@@ -50,8 +62,10 @@ export class ContinueSessionService {
   continue(session: SessionDto): SessionContinueRuntime {
     const rootPath = this.runtime.getProjectRoot(session.projectId);
     const contextPackage = this.runtime.createContextPackageForSession({ projectId: session.projectId, sessionId: session.id, intent: session.intent }, nowMs());
-    const adapter = this.codex.discover();
-    const launch = this.codex.buildLaunchInfo({ cwd: rootPath });
+    this.recordHandoffEvidence({ session, rootPath, contextPackage });
+    const agentAdapter = this.adapters.getOrThrow(session.agentAdapterId);
+    const adapter = agentAdapter.discover();
+    const launch = agentAdapter.buildLaunchInfo({ cwd: rootPath });
     const created = this.runtime.createContinueSessionJob({
       sessionId: session.id,
       projectId: session.projectId,
@@ -72,7 +86,7 @@ export class ContinueSessionService {
     }
 
     try {
-      const launched = this.codex.launch({
+      const launched = agentAdapter.launch({
         cwd: rootPath,
         supervisor: this.supervisor,
         onExit: (exit) => this.markProcessExit({ session, jobId: created.job.id, runId: created.run.id, exit })
@@ -145,6 +159,27 @@ export class ContinueSessionService {
     }
   }
 
+  private recordHandoffEvidence(input: { session: SessionDto; rootPath: string; contextPackage: ContextPackageDto }): void {
+    if (!this.evidenceStore) return;
+    try {
+      const evidenceId = newId("ev");
+      const contentText = formatHandoffPrompt(input);
+      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, contentText });
+      this.runtime.createSessionHandoffEvidence({
+        id: evidenceId,
+        projectId: input.session.projectId,
+        sessionId: input.session.id,
+        contextPackageId: input.contextPackage.id,
+        title: "ContextOS handoff prompt",
+        contentHash: stored.contentHash,
+        storageRef: stored.storageRef,
+        sizeBytes: stored.sizeBytes
+      }, nowMs());
+    } catch {
+      // Handoff evidence helps the user orient Codex, but launch lifecycle must remain primary.
+    }
+  }
+
   private writeResumeCapsule(session: SessionDto, runId: string, status: SessionStatus, evidenceSnapshotIds: string[], summary: string, nextAction: string | null): void {
     try {
       this.runtime.writeResumeCapsule({
@@ -170,4 +205,39 @@ function formatProcessOutput(exit: ProcessExitInfo): string {
   if (exit.stdout.trim()) parts.push(`\nstdout:\n${exit.stdout}`);
   if (exit.stderr.trim()) parts.push(`\nstderr:\n${exit.stderr}`);
   return `${parts.join("\n")}\n`;
+}
+
+function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; contextPackage: ContextPackageDto }): string {
+  const contextItems = input.contextPackage.contextItems.length
+    ? input.contextPackage.contextItems.map((item) => `- ${item.title} (${item.selectionReason}, rev ${item.revision ?? "n/a"})`).join("\n")
+    : "- No active context items selected.";
+  const evidenceSnapshots = input.contextPackage.evidenceSnapshots.length
+    ? input.contextPackage.evidenceSnapshots.map((snapshot) => `- ${snapshot.title} (${snapshot.selectionReason}, ${snapshot.contentHash ?? "no hash"})`).join("\n")
+    : "- No source evidence snapshots selected.";
+
+  return [
+    "# ContextOS Handoff",
+    "",
+    "You were launched from ContextOS for a managed agent session.",
+    "The current Codex GUI conversation is not automatically included yet; use this handoff as the session boundary.",
+    "",
+    `Session ID: ${input.session.id}`,
+    `Project ID: ${input.session.projectId}`,
+    `Project root: ${input.rootPath}`,
+    `Title: ${input.session.title ?? "Untitled session"}`,
+    `Intent: ${input.session.intent ?? "Continue the session."}`,
+    `Context Package ID: ${input.contextPackage.id}`,
+    "",
+    "## Selected Context Items",
+    contextItems,
+    "",
+    "## Selected Evidence Snapshots",
+    evidenceSnapshots,
+    "",
+    "## Instructions",
+    "- Work inside the project root unless the user directs otherwise.",
+    "- Preserve evidence-worthy outputs and decisions so ContextOS can capture them later.",
+    "- If this task depends on prior GUI conversation, ask the user to paste or import that transcript.",
+    ""
+  ].join("\n");
 }
