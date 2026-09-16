@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -9,9 +9,12 @@ import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 let server: FastifyInstance | undefined;
 let tempDir: string | undefined;
 let projectId: string;
+let projectRoot: string;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "contextos-context-"));
+  projectRoot = join(tempDir, "project");
+  await mkdir(projectRoot);
   server = await createDaemonServer({
     config: {
       host: "127.0.0.1",
@@ -23,7 +26,7 @@ beforeEach(async () => {
   const projectResponse = await server.inject({
     method: "POST",
     url: "/api/projects",
-    payload: { name: "Context", rootPath: "D:/project/ContextOS" }
+    payload: { name: "Context", rootPath: projectRoot }
   });
   projectId = projectResponse.json().id;
 });
@@ -132,6 +135,173 @@ describe("context resource APIs", () => {
     });
     expect(snapshotResponse.statusCode).toBe(400);
     expect(snapshotResponse.json().error.code).toBe("INVALID_ARGUMENT");
+  });
+
+  test("syncs local files, reuses unchanged evidence, and captures changed content", async () => {
+    const relativePath = join("docs", "source.md");
+    await mkdir(join(projectRoot, "docs"));
+    await writeFile(join(projectRoot, relativePath), "first version", "utf8");
+    const sourceResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-sources",
+      payload: { projectId, sourceType: "FILE", name: "Local source", locator: relativePath }
+    });
+    const source = sourceResponse.json();
+
+    const firstResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${source.id}/sync`,
+      payload: { expectedRevision: source.revision }
+    });
+    expect(firstResponse.statusCode).toBe(200);
+    const first = firstResponse.json();
+    expect(first.reused).toBe(false);
+    expect(first.source).toMatchObject({ lastSnapshotId: first.snapshot.id, revision: source.revision + 1 });
+    expect(first.source.lastCheckedAt).not.toBeNull();
+    expect(first.snapshot).toMatchObject({
+      projectId,
+      sourceId: source.id,
+      evidenceType: "FILE",
+      title: "Local source",
+      uri: relativePath,
+      sizeBytes: Buffer.byteLength("first version")
+    });
+
+    const verification = await server!.inject({ method: "POST", url: `/api/evidence-snapshots/${first.snapshot.id}/verify`, payload: {} });
+    expect(verification.json()).toMatchObject({ verified: true, failureCode: null });
+
+    const repeatedResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${source.id}/sync`,
+      payload: { expectedRevision: first.source.revision }
+    });
+    expect(repeatedResponse.statusCode).toBe(200);
+    const repeated = repeatedResponse.json();
+    expect(repeated.reused).toBe(true);
+    expect(repeated.snapshot.id).toBe(first.snapshot.id);
+
+    await writeFile(join(projectRoot, relativePath), "second version", "utf8");
+    const changedResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${source.id}/sync`,
+      payload: { expectedRevision: repeated.source.revision }
+    });
+    expect(changedResponse.statusCode).toBe(200);
+    const changed = changedResponse.json();
+    expect(changed.reused).toBe(false);
+    expect(changed.snapshot.id).not.toBe(first.snapshot.id);
+    expect(changed.source.lastSnapshotId).toBe(changed.snapshot.id);
+
+    await writeFile(join(projectRoot, relativePath), "third version", "utf8");
+    const staleResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${source.id}/sync`,
+      payload: { expectedRevision: repeated.source.revision }
+    });
+    expect(staleResponse.statusCode).toBe(409);
+    expect(staleResponse.json().error.code).toBe("CONFLICT");
+    await expect(readdir(join(tempDir!, "evidence", projectId))).resolves.toHaveLength(2);
+  });
+
+  test("rejects unsupported or inactive Context Sources", async () => {
+    const urlSourceResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-sources",
+      payload: { projectId, sourceType: "URL", name: "Remote", locator: "https://example.com" }
+    });
+    const urlSource = urlSourceResponse.json();
+    const unsupported = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${urlSource.id}/sync`,
+      payload: { expectedRevision: urlSource.revision }
+    });
+    expect(unsupported.statusCode).toBe(400);
+    expect(unsupported.json().error.code).toBe("INVALID_ARGUMENT");
+
+    const fileSourceResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-sources",
+      payload: { projectId, sourceType: "FILE", name: "Paused", locator: "paused.md" }
+    });
+    const fileSource = fileSourceResponse.json();
+    const pausedResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${fileSource.id}/pause`,
+      payload: { expectedRevision: fileSource.revision }
+    });
+    const paused = pausedResponse.json();
+    const inactive = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${fileSource.id}/sync`,
+      payload: { expectedRevision: paused.revision }
+    });
+    expect(inactive.statusCode).toBe(409);
+    expect(inactive.json().error.code).toBe("CONFLICT");
+
+    const archivedResponse = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${fileSource.id}/archive`,
+      payload: { expectedRevision: paused.revision }
+    });
+    const archived = archivedResponse.json();
+    const archivedSync = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${fileSource.id}/sync`,
+      payload: { expectedRevision: archived.revision }
+    });
+    expect(archivedSync.statusCode).toBe(409);
+    expect(archivedSync.json().error.code).toBe("CONFLICT");
+  });
+
+  test("rejects missing files and locators outside the Project root", async () => {
+    const missingResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-sources",
+      payload: { projectId, sourceType: "FILE", name: "Missing", locator: "missing.md" }
+    });
+    const missing = missingResponse.json();
+    const missingSync = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${missing.id}/sync`,
+      payload: { expectedRevision: missing.revision }
+    });
+    expect(missingSync.statusCode).toBe(400);
+    expect(missingSync.json().error.code).toBe("INVALID_ARGUMENT");
+
+    const traversalResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-sources",
+      payload: { projectId, sourceType: "FILE", name: "Traversal", locator: join("..", "outside.md") }
+    });
+    const traversal = traversalResponse.json();
+    const traversalSync = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${traversal.id}/sync`,
+      payload: { expectedRevision: traversal.revision }
+    });
+    expect(traversalSync.statusCode).toBe(400);
+    expect(traversalSync.json().error.code).toBe("INVALID_ARGUMENT");
+  });
+
+  test("rejects a directory link that escapes the Project root", async () => {
+    const outsideDir = join(tempDir!, "outside");
+    await mkdir(outsideDir);
+    await writeFile(join(outsideDir, "secret.md"), "outside", "utf8");
+    await symlink(outsideDir, join(projectRoot, "linked"), "junction");
+
+    const sourceResponse = await server!.inject({
+      method: "POST",
+      url: "/api/context-sources",
+      payload: { projectId, sourceType: "FILE", name: "Linked", locator: join("linked", "secret.md") }
+    });
+    const source = sourceResponse.json();
+    const response = await server!.inject({
+      method: "POST",
+      url: `/api/context-sources/${source.id}/sync`,
+      payload: { expectedRevision: source.revision }
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_ARGUMENT");
   });
 
   test("lists contiguous Context Item content versions with provenance", async () => {

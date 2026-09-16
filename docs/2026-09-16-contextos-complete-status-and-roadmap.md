@@ -292,7 +292,9 @@ frontend/styles.css
 - Evidence Snapshot immutability 全链路约束。
 - 正文或语义级 Snapshot compare。
 - Context Item 更深层 provenance 与历史版本恢复。
-- Context Source sync first pass。
+- Context Source 的本地 `FILE` sync first pass 已完成：项目根目录边界校验、内容哈希去重、Evidence Snapshot 写入/复用、Source 乐观锁回写及 Activity/Audit 已闭环。
+
+仍待后续：URL 抓取、目录递归、调度/重试和前端 sync UI。
 
 ### 6.3 Runtime / Jobs 深化
 
@@ -320,10 +322,9 @@ frontend/styles.css
 
 如果继续后端：
 
-1. Context Source sync first pass。
-2. Evidence DB/file 跨崩溃 recovery。
-3. Evidence Snapshot immutability audit。
-4. Context Item 历史版本恢复。
+1. Evidence DB/file 跨崩溃 recovery。
+2. Evidence Snapshot immutability audit。
+3. Context Item 历史版本恢复。
 
 如果转前端：
 

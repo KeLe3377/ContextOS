@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   ContextItemDto,
   ContextItemInput,
@@ -8,6 +11,7 @@ import type {
   ContextSourceInput,
   ContextSourcePatch,
   ContextSourceStatus,
+  ContextSourceSyncResult,
   EvidenceSnapshotCompareDto,
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
@@ -20,12 +24,18 @@ import type {
   SqliteContextSourceRepository,
   SqliteEvidenceSnapshotRepository
 } from "../../../infrastructure/src/sqlite/context-repositories.js";
+import type { SqliteProjectRepository } from "../../../infrastructure/src/sqlite/project-repository.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { newId } from "../../../shared/src/id.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 
 export class ContextSourceService {
-  constructor(private readonly sources: SqliteContextSourceRepository) {}
+  constructor(
+    private readonly sources: SqliteContextSourceRepository,
+    private readonly snapshots: SqliteEvidenceSnapshotRepository,
+    private readonly projects: SqliteProjectRepository,
+    private readonly evidenceStore: FileEvidenceStore
+  ) {}
 
   create(input: ContextSourceInput): ContextSourceDto {
     return this.sources.create(input, nowMs());
@@ -46,6 +56,104 @@ export class ContextSourceService {
   transition(id: string, action: "resume" | "pause" | "archive", expectedRevision: number): ContextSourceDto {
     const status: ContextSourceStatus = action === "resume" ? "ACTIVE" : action === "pause" ? "PAUSED" : "ARCHIVED";
     return this.sources.updateStatus(id, status, expectedRevision, nowMs());
+  }
+
+  sync(id: string, expectedRevision: number): ContextSourceSyncResult {
+    const source = this.sources.getByIdOrThrow(id);
+    if (source.revision !== expectedRevision) {
+      throw new ContextOsError("CONFLICT", "Context Source revision conflict", {
+        id,
+        expectedRevision,
+        currentRevision: source.revision
+      });
+    }
+    if (source.status !== "ACTIVE") {
+      throw new ContextOsError("CONFLICT", "Only active Context Sources can be synced", { id, status: source.status });
+    }
+    if (source.sourceType !== "FILE") {
+      throw new ContextOsError("INVALID_ARGUMENT", "Only FILE Context Sources can be synced", { id, sourceType: source.sourceType });
+    }
+
+    const project = this.projects.getByIdOrThrow(source.projectId);
+    const sourcePath = resolveSourceFile(project.rootPath, source.locator);
+    let contentText: string;
+    try {
+      if (!statSync(sourcePath).isFile()) {
+        throw new ContextOsError("INVALID_ARGUMENT", "Context Source locator must identify a file", { id, locator: source.locator });
+      }
+      contentText = readFileSync(sourcePath, "utf8");
+    } catch (error) {
+      if (error instanceof ContextOsError) throw error;
+      throw new ContextOsError("INVALID_ARGUMENT", "Context Source file could not be read", { id, locator: source.locator });
+    }
+
+    const contentHash = `sha256:${createHash("sha256").update(contentText, "utf8").digest("hex")}`;
+    const existing = this.snapshots.findByProjectAndContentHash(source.projectId, contentHash);
+    if (existing) {
+      return this.snapshots.completeSourceSync({
+        sourceId: id,
+        expectedRevision,
+        snapshotId: existing.id,
+        reused: true
+      }, nowMs());
+    }
+
+    const snapshotId = newId("ev");
+    const stored = this.evidenceStore.writeText({ snapshotId, projectId: source.projectId, contentText, contentHash });
+    try {
+      return this.snapshots.completeSourceSync({
+        sourceId: id,
+        expectedRevision,
+        snapshotId,
+        snapshotInput: {
+          projectId: source.projectId,
+          sourceId: id,
+          evidenceType: "FILE",
+          title: source.name,
+          uri: source.locator,
+          contentHash,
+          metadata: { sourceType: source.sourceType, locator: source.locator }
+        },
+        stored,
+        reused: false
+      }, nowMs());
+    } catch (error) {
+      try {
+        this.evidenceStore.remove(stored.storageRef);
+      } catch {
+        // Preserve the database failure that caused the rollback.
+      }
+      throw error;
+    }
+  }
+}
+
+function resolveSourceFile(rootPath: string, locator: string): string {
+  const resolvedRoot = resolve(rootPath);
+  const candidate = resolve(resolvedRoot, locator);
+  assertContained(resolvedRoot, candidate, locator);
+
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(resolvedRoot);
+  } catch {
+    throw new ContextOsError("INVALID_ARGUMENT", "Project root path could not be resolved", { rootPath });
+  }
+
+  let realCandidate: string;
+  try {
+    realCandidate = realpathSync(candidate);
+  } catch {
+    throw new ContextOsError("INVALID_ARGUMENT", "Context Source file does not exist", { locator });
+  }
+  assertContained(realRoot, realCandidate, locator);
+  return realCandidate;
+}
+
+function assertContained(rootPath: string, candidatePath: string, locator: string): void {
+  const relativePath = relative(rootPath, candidatePath);
+  if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw new ContextOsError("INVALID_ARGUMENT", "Context Source locator is outside the Project root", { locator });
   }
 }
 

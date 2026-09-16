@@ -11,6 +11,7 @@ import type {
   ContextSourceDto,
   ContextSourceInput,
   ContextSourcePatch,
+  ContextSourceSyncResult,
   ContextSourceStatus,
   ContextSourceType,
   EvidenceSnapshotDto,
@@ -173,6 +174,55 @@ export class SqliteEvidenceSnapshotRepository {
     const item = this.getById(id);
     if (!item) throw new ContextOsError("NOT_FOUND", "Evidence Snapshot not found", { id });
     return item;
+  }
+
+  findByProjectAndContentHash(projectId: string, contentHash: string): EvidenceSnapshotDto | null {
+    const row = this.db.prepare("SELECT * FROM evidence_snapshots WHERE project_id = ? AND content_hash = ?")
+      .get(projectId, contentHash) as EvidenceSnapshotRow | undefined;
+    return row ? mapEvidenceSnapshot(row) : null;
+  }
+
+  completeSourceSync(input: {
+    sourceId: string;
+    expectedRevision: number;
+    snapshotId: string;
+    snapshotInput?: EvidenceSnapshotInput;
+    stored?: StoredEvidence;
+    reused: boolean;
+  }, now: number): ContextSourceSyncResult {
+    const before = this.db.prepare("SELECT * FROM context_sources WHERE id = ?")
+      .get(input.sourceId) as ContextSourceRow | undefined;
+    if (!before) throw new ContextOsError("NOT_FOUND", "Context Source not found", { id: input.sourceId });
+
+    this.db.transaction(() => {
+      if (!input.reused) {
+        const snapshot = input.snapshotInput;
+        const contentHash = input.stored?.contentHash ?? snapshot?.contentHash;
+        if (!snapshot || !contentHash) {
+          throw new ContextOsError("INVALID_ARGUMENT", "New source sync snapshot requires content");
+        }
+        this.db.prepare("INSERT INTO evidence_snapshots (id, project_id, source_id, evidence_type, title, uri, content_text, content_hash, storage_ref, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(input.snapshotId, snapshot.projectId, input.sourceId, snapshot.evidenceType, snapshot.title, snapshot.uri ?? null, snapshot.contentText ?? null, contentHash, input.stored?.storageRef ?? null, input.stored?.sizeBytes ?? null, JSON.stringify(snapshot.metadata), now, now);
+      }
+
+      const update = this.db.prepare("UPDATE context_sources SET last_snapshot_id = ?, last_checked_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND status = 'ACTIVE'")
+        .run(input.snapshotId, now, now, input.sourceId, input.expectedRevision);
+      ensureChanged(update.changes, before, "Context Source", input.sourceId, input.expectedRevision);
+
+      const after = this.db.prepare("SELECT * FROM context_sources WHERE id = ?")
+        .get(input.sourceId) as ContextSourceRow;
+      const metadata = JSON.stringify({ snapshotId: input.snapshotId, reused: input.reused });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'CONTEXT_SOURCE', ?, 'CONTEXT_SOURCE_SYNCED', 'Context Source synced', ?, ?)")
+        .run(newId("act"), before.project_id, input.sourceId, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'CONTEXT_SOURCE', ?, 'SYNC', ?, ?, ?)")
+        .run(newId("audit"), before.project_id, input.sourceId, JSON.stringify(mapContextSource(before)), JSON.stringify(mapContextSource(after)), now);
+    })();
+
+    return {
+      source: mapContextSource(this.db.prepare("SELECT * FROM context_sources WHERE id = ?").get(input.sourceId) as ContextSourceRow),
+      snapshot: this.getByIdOrThrow(input.snapshotId),
+      reused: input.reused
+    };
   }
 }
 

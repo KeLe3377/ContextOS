@@ -99,8 +99,10 @@ export async function createDaemonServer(
     const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));
     const workItemService = new WorkItemService(new SqliteWorkItemRepository(sqlite.db));
     const reviewItemService = new ReviewItemService(reviewItemRepository);
-    const contextSourceService = new ContextSourceService(new SqliteContextSourceRepository(sqlite.db));
-    const evidenceSnapshotService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(sqlite.db), evidenceStore, reviewItemRepository);
+    const contextSourceRepository = new SqliteContextSourceRepository(sqlite.db);
+    const evidenceSnapshotRepository = new SqliteEvidenceSnapshotRepository(sqlite.db);
+    const contextSourceService = new ContextSourceService(contextSourceRepository, evidenceSnapshotRepository, projectRepository, evidenceStore);
+    const evidenceSnapshotService = new EvidenceSnapshotService(evidenceSnapshotRepository, evidenceStore, reviewItemRepository);
     const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
     const settingsService = new SettingsService(runtimeRepository);
     const agentAdapterService = new AgentAdapterService(adapterRegistry);

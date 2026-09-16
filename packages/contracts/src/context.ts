@@ -32,6 +32,8 @@ export const contextSourceDtoSchema = resourceMetaSchema.extend({
   archivedAt: z.string().nullable()
 });
 
+export const contextSourceSyncInputSchema = expectedRevisionSchema;
+
 export const evidenceTypeSchema = z.enum(["TEXT", "FILE", "DIRECTORY_LISTING", "URL", "COMMAND_OUTPUT", "AGENT_OUTPUT"]);
 
 export const evidenceSnapshotInputSchema = z.object({
@@ -59,6 +61,12 @@ export const evidenceSnapshotDtoSchema = z.object({
   metadata: z.record(z.unknown()),
   capturedAt: z.string(),
   createdAt: z.string()
+});
+
+export const contextSourceSyncResultSchema = z.object({
+  source: contextSourceDtoSchema,
+  snapshot: evidenceSnapshotDtoSchema,
+  reused: z.boolean()
 });
 
 export const evidenceSnapshotCompareInputSchema = z.object({
@@ -134,6 +142,8 @@ export type ContextSourceStatus = z.infer<typeof contextSourceStatusSchema>;
 export type ContextSourceInput = z.infer<typeof contextSourceInputSchema>;
 export type ContextSourcePatch = z.infer<typeof contextSourcePatchSchema>;
 export type ContextSourceDto = z.infer<typeof contextSourceDtoSchema>;
+export type ContextSourceSyncInput = z.infer<typeof contextSourceSyncInputSchema>;
+export type ContextSourceSyncResult = z.infer<typeof contextSourceSyncResultSchema>;
 
 export type EvidenceType = z.infer<typeof evidenceTypeSchema>;
 export type EvidenceSnapshotInput = z.infer<typeof evidenceSnapshotInputSchema>;

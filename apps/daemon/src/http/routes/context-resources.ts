@@ -7,6 +7,7 @@ import {
   contextItemPatchSchema,
   contextSourceInputSchema,
   contextSourcePatchSchema,
+  contextSourceSyncInputSchema,
   evidenceSnapshotCompareInputSchema,
   evidenceSnapshotInputSchema
 } from "../../../../../packages/contracts/src/context.js";
@@ -43,6 +44,11 @@ export async function registerContextResourceRoutes(
       return services.contextSources.transition(id, action, expectedRevision);
     });
   }
+  server.post("/api/context-sources/:id/sync", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const { expectedRevision } = contextSourceSyncInputSchema.parse(request.body);
+    return services.contextSources.sync(id, expectedRevision);
+  });
 
   server.get("/api/evidence-snapshots", async (request) => {
     const query = listWithProjectSchema.parse(request.query);
