@@ -56,4 +56,23 @@ describe("FileEvidenceStore", () => {
       failureCode: null
     });
   });
+
+  test("refuses to verify storage references outside the evidence root", async () => {
+    if (!tempDir) throw new Error("missing tempDir");
+    const content = "not evidence";
+    const expectedHash = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    await writeFile(join(tempDir, "outside.txt"), content, "utf8");
+
+    const store = new FileEvidenceStore(tempDir);
+    expect(store.verify({
+      storageRef: "outside.txt",
+      expectedHash,
+      expectedSizeBytes: Buffer.byteLength(content)
+    })).toMatchObject({
+      exists: false,
+      verified: false,
+      actualHash: null,
+      failureCode: "INVALID_STORAGE_REF"
+    });
+  });
 });

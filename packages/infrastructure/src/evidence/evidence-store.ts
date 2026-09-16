@@ -74,8 +74,23 @@ export class FileEvidenceStore {
       };
     }
 
+    const target = evidencePath(this.rootDir, input.storageRef);
+    if (!target) {
+      return {
+        storageRef: input.storageRef,
+        exists: false,
+        verified: false,
+        expectedHash: input.expectedHash,
+        actualHash: null,
+        expectedSizeBytes: input.expectedSizeBytes,
+        actualSizeBytes: null,
+        failureCode: "INVALID_STORAGE_REF",
+        failureMessage: "Evidence storage reference is outside the evidence root"
+      };
+    }
+
     try {
-      const bytes = readFileSync(join(this.rootDir, input.storageRef));
+      const bytes = readFileSync(target);
       const actualHash = hashBytes(bytes);
       const actualSizeBytes = bytes.byteLength;
       const hashMatches = actualHash === input.expectedHash;
@@ -166,6 +181,16 @@ function availableRecoveryPath(target: string): string {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function evidencePath(rootDir: string, storageRef: string): string | null {
+  const evidenceRoot = resolve(rootDir, "evidence");
+  const target = resolve(rootDir, storageRef);
+  const relativeTarget = relative(evidenceRoot, target);
+  if (!relativeTarget || relativeTarget === ".." || relativeTarget.startsWith(`..${sep}`) || isAbsolute(relativeTarget)) {
+    return null;
+  }
+  return target;
 }
 
 function hashBytes(bytes: Buffer): string {
