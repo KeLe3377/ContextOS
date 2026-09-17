@@ -231,6 +231,55 @@ describe("transcript import API", () => {
     }
   });
 
+  test("imports an explicit Codex transcript recorded from a parent workspace", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-parent-transcript-"));
+    const workspaceRoot = join(tempDir, "workspace");
+    const projectRoot = join(workspaceRoot, "ContextOS");
+    const sessionsDir = join(tempDir, "codex-sessions", "2026", "09", "17");
+    await Promise.all([mkdir(projectRoot, { recursive: true }), mkdir(sessionsDir, { recursive: true })]);
+    const externalSessionId = "codex-parent-workspace-session";
+    const transcriptPath = join(sessionsDir, `rollout-${externalSessionId}.jsonl`);
+    const rows = [
+      { type: "session_meta", payload: { id: externalSessionId, cwd: workspaceRoot } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "import this nested project conversation" }] } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "nested project conversation imported" }] } }
+    ];
+    await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+    process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+    process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["--version"]);
+    process.env.CONTEXTOS_CODEX_SESSIONS_DIR = join(tempDir, "codex-sessions");
+    const server = await createDaemonServer({
+      config: { host: "127.0.0.1", port: 0, dataDir: tempDir, databaseFile: join(tempDir, "contextos.sqlite") }
+    });
+    cleanupTasks.push(async () => {
+      await server.close();
+      await rm(tempDir, { recursive: true, force: true });
+    });
+    const projectResponse = await server.inject({ method: "POST", url: "/api/projects", payload: { name: "ContextOS", rootPath: projectRoot } });
+    expect(projectResponse.statusCode).toBe(201);
+    const sessionResponse = await server.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId: projectResponse.json().id, agentAdapterId: "codex", title: "Explicit parent import" }
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json();
+
+    const automatic = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(automatic.statusCode).toBe(404);
+
+    const explicit = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/import-transcript/auto`,
+      payload: { externalSessionId }
+    });
+    expect(explicit.statusCode, explicit.body).toBe(201);
+    expect(explicit.json().adapter.externalSessionId).toBe(externalSessionId);
+    expect(explicit.json().evidence.metadata).toMatchObject({ externalSessionId, adapterId: "codex" });
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.json().externalSessionId).toBe(externalSessionId);
+  });
+
   test("auto-discovers and binds a Claude Code transcript for the Project", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "contextos-claude-auto-transcript-"));
     const projectRoot = join(tempDir, "workspace");

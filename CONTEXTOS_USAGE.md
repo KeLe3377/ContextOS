@@ -68,12 +68,15 @@ Sessions 是目前最重要的页面。
 创建一个 ContextOS Session。常见填写：
 
 ```text
+Project: ContextOS · D:\project\ContextOS
 Title: ContextOS 前端测试
 Intent: 测试已有 Codex 会话导入和 Continue in Agent 闭环
 Agent: Codex
 ```
 
 创建后状态通常是 `CREATED`。
+
+如果列表里有多个 Project，一定先选对 Project。Session 的 transcript 导入、规则、Evidence 都会按这个 Project 边界归属；选到别的项目时，导入当前 ContextOS 对话会提示找不到 transcript。
 
 ### Import Existing Session
 
@@ -114,6 +117,8 @@ External session ID:
    - Resume Capsule 会更新。
 
 如果不填 External session ID，系统会尝试找当前 Project root 下最新的 transcript。
+
+如果 Codex Desktop 是从父目录打开的，例如 transcript metadata 里的 cwd 是 `D:\project`，而 ContextOS Project root 是 `D:\project\ContextOS`，请显式填写 External session ID。显式导入会允许这种父子目录匹配；不填 ID 的自动发现仍然只扫描 Project root 内的 transcript，避免误导入隔壁项目。
 
 ### Import Transcript
 
@@ -456,4 +461,3 @@ git diff --check
 Test Files  19 passed
 Tests       84 passed
 ```
-

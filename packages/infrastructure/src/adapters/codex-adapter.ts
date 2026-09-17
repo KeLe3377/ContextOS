@@ -95,7 +95,7 @@ export class CodexAdapter implements AgentAdapter {
     if (matches.length === 0) {
       throw new ContextOsError("NOT_FOUND", "Codex session to resume was not found", { externalSessionId });
     }
-    if (!matches.some((metadata) => isPathWithin(cwd, metadata.cwd))) {
+    if (!matches.some((metadata) => pathsOverlap(cwd, metadata.cwd))) {
       throw new ContextOsError("CONFLICT", "Codex session to resume belongs to a different Project", { externalSessionId });
     }
   }
@@ -114,8 +114,10 @@ export class CodexAdapter implements AgentAdapter {
     const matches: AgentTranscriptImportResult[] = [];
     for (const path of candidates) {
       const metadata = readSessionMetadata(path);
-      if (!metadata || !isPathWithin(input.cwd, metadata.cwd)) continue;
+      if (!metadata) continue;
       if (input.externalSessionId && metadata.id !== input.externalSessionId) continue;
+      const pathMatches = input.externalSessionId ? pathsOverlap(input.cwd, metadata.cwd) : isPathWithin(input.cwd, metadata.cwd);
+      if (!pathMatches) continue;
       const transcript = parseCodexTranscript(path, metadata.id);
       if (input.correlationText && !transcript.contentText.includes(input.correlationText)) continue;
       if (!input.correlationText) return transcript;
@@ -270,6 +272,10 @@ function isPathWithin(root: string, candidate: string): boolean {
   } catch {
     return false;
   }
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return isPathWithin(left, right) || isPathWithin(right, left);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

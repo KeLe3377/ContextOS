@@ -65,17 +65,21 @@ describe("CodexAdapter command resolution", () => {
     try {
       const sessionsDir = join(tempDir, "sessions");
       const projectRoot = join(tempDir, "project");
+      const nestedProjectRoot = join(projectRoot, "ContextOS");
       const outsideRoot = join(tempDir, "outside");
-      await Promise.all([mkdir(join(sessionsDir, "2026", "09", "16"), { recursive: true }), mkdir(projectRoot), mkdir(outsideRoot)]);
+      await Promise.all([mkdir(join(sessionsDir, "2026", "09", "16"), { recursive: true }), mkdir(nestedProjectRoot, { recursive: true }), mkdir(outsideRoot)]);
       const oldPath = join(sessionsDir, "2026", "09", "16", "rollout-old.jsonl");
       const latestPath = join(sessionsDir, "2026", "09", "16", "rollout-latest.jsonl");
+      const parentPath = join(sessionsDir, "2026", "09", "16", "rollout-parent.jsonl");
       const outsidePath = join(sessionsDir, "2026", "09", "16", "rollout-outside.jsonl");
       await writeCodexTranscript(oldPath, "codex-old", projectRoot, "old question", "old answer");
       await writeCodexTranscript(latestPath, "codex-latest", projectRoot, "new question", "new answer");
+      await writeCodexTranscript(parentPath, "codex-parent", projectRoot, "parent workspace question", "parent workspace answer");
       await writeCodexTranscript(outsidePath, "codex-outside", outsideRoot, "private question", "private answer");
       const baseTime = Date.now() / 1000;
       await utimes(oldPath, baseTime - 30, baseTime - 30);
       await utimes(latestPath, baseTime - 20, baseTime - 20);
+      await utimes(parentPath, baseTime - 25, baseTime - 25);
       await utimes(outsidePath, baseTime - 10, baseTime - 10);
 
       const adapter = new CodexAdapter(process.execPath, ["--version"], process.platform, sessionsDir);
@@ -97,6 +101,9 @@ describe("CodexAdapter command resolution", () => {
       const explicit = adapter.importTranscript({ cwd: projectRoot, externalSessionId: "codex-old" });
       expect(explicit.externalSessionId).toBe("codex-old");
       expect(explicit.contentText).toContain("old question");
+      const explicitFromParentWorkspace = adapter.importTranscript({ cwd: nestedProjectRoot, externalSessionId: "codex-parent" });
+      expect(explicitFromParentWorkspace.contentText).toContain("parent workspace question");
+      expect(() => adapter.importTranscript({ cwd: nestedProjectRoot })).toThrow("No Codex transcript was found");
       const correlated = adapter.importTranscript({ cwd: projectRoot, correlationText: "old question" });
       expect(correlated.externalSessionId).toBe("codex-old");
       expect(() => adapter.importTranscript({ cwd: projectRoot, correlationText: "missing marker" })).toThrow("No Codex transcript was found");
@@ -104,6 +111,7 @@ describe("CodexAdapter command resolution", () => {
       const supervisor = new ProcessSupervisor();
       expect(() => adapter.resume({ cwd: projectRoot, externalSessionId: "missing", prompt: "continue", supervisor })).toThrow("was not found");
       expect(() => adapter.resume({ cwd: outsideRoot, externalSessionId: "codex-latest", prompt: "continue", supervisor })).toThrow("different Project");
+      expect(() => adapter.resume({ cwd: nestedProjectRoot, externalSessionId: "codex-parent", prompt: "continue", supervisor })).not.toThrow();
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
