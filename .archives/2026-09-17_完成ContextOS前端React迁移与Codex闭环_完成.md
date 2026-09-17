@@ -260,4 +260,53 @@ Tests       82 passed (82)
 
 ---
 
+## 🔁 2026-09-17 追加：Projects / Sessions 测试残留清理入口
+
+用户在前端 Projects 表看到三个同 root 的 `ContextOS` 项目残留，询问：
+
+> 用户：“这个是之前测试的残留，现在project和session有编辑功能，能删除吗”
+
+实现结论：不做 hard delete；沿用后端既有 archive 语义，保护 Evidence / Session provenance。前端提供“删除感”的清理入口：归档后默认列表隐藏。
+
+### ✅ 本次完成
+
+- `Projects` 页面新增 `Archive project` 行操作。
+- `Sessions` 页面新增 `Archive session` 行操作。
+- 数据加载后默认过滤 `status === "ARCHIVED"` 或带 `archivedAt` 的 Project / Session。
+- `RUNNING` session 禁止归档，避免打断正在运行的 agent session。
+- 归档操作调用既有后端接口：
+  - `POST /api/projects/:id/archive`
+  - `POST /api/sessions/:id/archive`
+- 完成提交：
+  - `464e448 feat: add archive controls to frontend`
+
+### 🔍 验证
+
+```powershell
+npm run frontend:build
+npm test -- tests/integration/projects-api.test.ts tests/integration/core-resources-api.test.ts
+git diff --check
+```
+
+验证结果：
+
+- `frontend:build` 通过。
+- Projects / Sessions API 集成测试 10 个通过。
+- `git diff --check` 通过。
+- 提交后工作区干净；本地 `master` 领先远端 3 个提交。
+
+### 💡 关键决策补充
+
+- “删除测试残留”在 UI 上用 Archive 表达，不做物理删除。
+- Archived Project / Session 默认不进入主列表，减少测试数据噪音。
+- 如果以后需要审计或恢复，可继续依赖后端 archive / restore 模型，而不是破坏历史链路。
+
+### 📁 新增涉及文件
+
+- `frontend/src/App.tsx`
+
+> 助手：“可以删‘视图里的残留’了：我做成了 Archive，不做硬删除。”
+
+---
+
 *此文档由 conversation-archivist skill 自动生成*
