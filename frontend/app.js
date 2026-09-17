@@ -141,6 +141,17 @@ function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({ "&"
 function stripWrappingQuotes(value) { return String(value ?? "").trim().replace(/^["'](.+)["']$/, "$1"); }
 function badge(text, tone = "") { return `<span class="badge ${tone}">${esc(text)}</span>`; }
 function actionId(label) { return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
+function availableAdapters() { return state.data.adapters.filter(adapter => adapter.available); }
+function defaultAdapterId() {
+  const configured = state.data.settings?.defaultAdapterId;
+  const adapters = state.data.adapters;
+  if (configured && adapters.some(adapter => adapter.id === configured)) return configured;
+  return availableAdapters()[0]?.id || adapters[0]?.id || "codex";
+}
+function adapterOptions(selected = defaultAdapterId()) {
+  const adapters = state.data.adapters.length ? state.data.adapters : [{ id: "codex", displayName: "Codex", available: true }];
+  return adapters.map(adapter => `<option value="${esc(adapter.id)}" ${adapter.id === selected ? "selected" : ""} ${adapter.available ? "" : "disabled"}>${esc(adapter.displayName)}${adapter.available ? "" : " (unavailable)"}</option>`).join("");
+}
 const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "new-rule", "reset-changes", "save-changes"]);
 function button([ic, label, kind]) {
   const id = actionId(label);
@@ -270,8 +281,8 @@ function renderSettings() {
   const adapters = state.data.adapters;
   const connected = adapters.filter(a => a.available).length;
   return `${pageHeader(pages.settings)}<div class="stack">
-    ${panel("General", "tune", settings ? `<div class="setting-row"><div><div class="title-sm">Default adapter</div><div class="muted">Adapter used when a session does not specify one.</div></div><select id="setting-default-adapter"><option value="codex" ${(settings.defaultAdapterId || "codex") === "codex" ? "selected" : ""}>Codex</option></select></div><div class="setting-row"><div><div class="title-sm">Review gate</div><div class="muted">Require confirmation before destructive actions.</div></div><label class="toggle"><input id="setting-confirm-destructive" type="checkbox" ${settings.confirmDestructiveActions ? "checked" : ""} /><span>${settings.confirmDestructiveActions ? "Enabled" : "Disabled"}</span></label></div><div class="setting-row"><div><div class="title-sm">Launch at startup</div><div class="muted">Start the local daemon with the desktop session.</div></div><label class="toggle"><input id="setting-launch-startup" type="checkbox" ${settings.launchAtStartup ? "checked" : ""} /><span>${settings.launchAtStartup ? "Enabled" : "Disabled"}</span></label></div><div class="setting-row"><div><div class="title-sm">Data directory</div><div class="muted mono">${esc(settings.dataDirectory)}</div></div>${badge(`rev ${settings.revision}`)}</div>` : emptyNote("Settings unavailable."), "Workspace & Defaults")}
-    ${panel("Agent Adapters", "smart_toy", `<div class="setting-row"><div><div class="title-sm">Connected adapter</div><div class="muted">Codex is attached when discovery succeeds.</div></div>${badge(`${connected} connected`, connected ? "green" : "amber")}</div>${adapters.map(adapter => `<div class="setting-row"><div><div class="title-sm">${esc(adapter.displayName)}</div><div class="muted mono">${esc(adapter.version || adapter.error || adapter.command)}</div></div>${badge(adapter.available ? "Available" : "Unavailable", adapter.available ? "green" : "red")}</div>`).join("") || emptyNote("No adapters discovered.")}`)}
+    ${panel("General", "tune", settings ? `<div class="setting-row"><div><div class="title-sm">Default adapter</div><div class="muted">Adapter used when a session does not specify one.</div></div><select id="setting-default-adapter">${adapterOptions(defaultAdapterId())}</select></div><div class="setting-row"><div><div class="title-sm">Review gate</div><div class="muted">Require confirmation before destructive actions.</div></div><label class="toggle"><input id="setting-confirm-destructive" type="checkbox" ${settings.confirmDestructiveActions ? "checked" : ""} /><span>${settings.confirmDestructiveActions ? "Enabled" : "Disabled"}</span></label></div><div class="setting-row"><div><div class="title-sm">Launch at startup</div><div class="muted">Start the local daemon with the desktop session.</div></div><label class="toggle"><input id="setting-launch-startup" type="checkbox" ${settings.launchAtStartup ? "checked" : ""} /><span>${settings.launchAtStartup ? "Enabled" : "Disabled"}</span></label></div><div class="setting-row"><div><div class="title-sm">Data directory</div><div class="muted mono">${esc(settings.dataDirectory)}</div></div>${badge(`rev ${settings.revision}`)}</div>` : emptyNote("Settings unavailable."), "Workspace & Defaults")}
+    ${panel("Agent Adapters", "smart_toy", `<div class="setting-row"><div><div class="title-sm">Connected adapters</div><div class="muted">Codex and Claude Code are attached when discovery succeeds.</div></div>${badge(`${connected} connected`, connected ? "green" : "amber")}</div>${adapters.map(adapter => `<div class="setting-row"><div><div class="title-sm">${esc(adapter.displayName)}</div><div class="muted mono">${esc(adapter.version || adapter.error || adapter.command)}</div></div>${badge(adapter.available ? "Available" : "Unavailable", adapter.available ? "green" : "red")}</div>`).join("") || emptyNote("No adapters discovered.")}`)}
     ${panel("Storage & Privacy", "lock", `<div class="setting-row"><div><div class="title-sm">Evidence retention</div><div class="muted">Keep immutable source snapshots unless explicitly archived.</div></div>${badge("Retain indefinitely")}</div><div class="setting-row"><div><div class="title-sm">Secret redaction</div><div class="muted">Scrub credentials before indexing source material.</div></div>${badge("Enabled", "green")}</div><div class="setting-row"><div><div class="title-sm">Bridge mode</div><div class="muted">Local CLI and IPC integration for desktop agents.</div></div>${badge("CLI / IPC bridge", "blue")}</div>`)}
   </div>`;
 }
@@ -302,6 +313,7 @@ async function continueSession(sessionId) {
 }
 
 function openProjectDialog() {
+  const adapterIds = (availableAdapters().length ? availableAdapters() : state.data.adapters).map(adapter => adapter.id);
   openFormDialog({
     title: "Add Project",
     submitLabel: "Create Project",
@@ -314,7 +326,7 @@ function openProjectDialog() {
       rootPath: stripWrappingQuotes(values.get("rootPath")),
       description: values.get("description") || undefined,
       defaultRuleIds: [],
-      agentAdapterIds: ["codex"]
+      agentAdapterIds: adapterIds.length ? adapterIds : ["codex"]
     }), "Project created")
   });
 }
@@ -334,13 +346,13 @@ function openSessionDialog() {
       <label>Project<input class="field" value="${esc(project.name)}" disabled /></label>
       <label>Title<input class="field" name="title" required value="${esc(defaultTitle)}" /></label>
       <label>Intent<input class="field" name="intent" required placeholder="What should the agent help with?" /></label>
-      <label>Agent<select name="agentAdapterId"><option value="codex">Codex</option></select></label>`,
+      <label>Agent<select name="agentAdapterId">${adapterOptions(defaultAdapterId())}</select></label>`,
     onSubmit: values => runAction(async () => {
       state.page = "sessions";
       location.hash = "sessions";
       await sendJson("/api/sessions", "POST", {
         projectId: project.id,
-        agentAdapterId: values.get("agentAdapterId") || "codex",
+        agentAdapterId: values.get("agentAdapterId") || defaultAdapterId(),
         title: values.get("title"),
         intent: values.get("intent")
       });
@@ -407,13 +419,13 @@ function handleAction(action) {
       render();
       return;
     }
-    return runAction(() => continueSession(session?.id), "Session continued in Codex");
+    return runAction(() => continueSession(session?.id), "Session continued in Agent");
   }
   if (action === "save-changes") {
     const settings = state.data.settings;
     if (!settings) return;
     const payload = {
-      defaultAdapterId: document.getElementById("setting-default-adapter")?.value || "codex",
+      defaultAdapterId: document.getElementById("setting-default-adapter")?.value || defaultAdapterId(),
       confirmDestructiveActions: Boolean(document.getElementById("setting-confirm-destructive")?.checked),
       launchAtStartup: Boolean(document.getElementById("setting-launch-startup")?.checked),
       expectedRevision: settings.revision
@@ -427,7 +439,7 @@ function render() {
   document.getElementById("view").innerHTML = state.loading ? `${pageHeader(pages[state.page])}${emptyNote("Loading workspace data...")}` : renderers[state.page]();
   document.querySelectorAll("[data-nav]").forEach(btn => btn.addEventListener("click", () => { state.page = btn.dataset.nav; state.actionMessage = null; location.hash = state.page; render(); }));
   document.querySelectorAll("[data-action]").forEach(btn => btn.addEventListener("click", () => handleAction(btn.dataset.action)));
-  document.querySelectorAll("[data-session-continue]").forEach(btn => btn.addEventListener("click", () => runAction(() => continueSession(btn.dataset.sessionContinue), "Session continued in Codex")));
+  document.querySelectorAll("[data-session-continue]").forEach(btn => btn.addEventListener("click", () => runAction(() => continueSession(btn.dataset.sessionContinue), "Session continued in Agent")));
 }
 
 window.addEventListener("hashchange", () => {

@@ -165,6 +165,7 @@ first pass 已完成，仍有深层硬化空间。
 
 - Add Project。
 - New Session。
+- New Session / Settings 使用 `/api/agent-adapters` 的动态 adapter 列表，可选择 Codex 或 Claude Code。
 - Continue in Agent。
 - New Rule。
 - Settings。
