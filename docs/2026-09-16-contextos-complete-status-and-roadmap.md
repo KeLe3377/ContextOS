@@ -171,6 +171,7 @@ first pass 已完成，仍有深层硬化空间。
 - Sessions 页支持对单个 Session 自动发现导入 transcript，或手动粘贴 transcript，并在 Evidence 列表显示 adapter/parser/message/turn metadata。
 - Context 页支持创建 Context Source、同步 active Context Source，以及对 Evidence Snapshot 触发 verify。
 - New Rule。
+- Rules 页支持 validate、test、activate 和 disable rule。
 - Settings。
 - Session Context Package / Evidence / Resume Capsule 展示。
 

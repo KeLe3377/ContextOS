@@ -287,7 +287,14 @@ function renderContext() {
   </div><div class="span-4">${panel("Integrity Boundary", "verified", `<div class="metric-row"><span>Evidence snapshots</span><strong>${d.evidenceSnapshots.length}</strong></div><div class="metric-row"><span>Derived context items</span><strong>${d.contextItems.length}</strong></div><div class="metric-row"><span>Unlabeled derived items</span><strong>0</strong></div>`)}</div></div>`;
 }
 
-function renderRules() { return `${pageHeader(pages.rules)}${panel("Active Rule Set", "policy", rows(state.data.rules.map(rule => [esc(rule.title), rule.status, toneForStatus(rule.status), esc(rule.description || `version ${rule.currentVersionId || "-"}`)]), "No rules yet."), state.data.projects[0]?.name || "Workspace")}`; }
+function renderRules() {
+  return `${pageHeader(pages.rules)}${panel("Rule Set", "policy", table(["Rule", "Version", "State", "Action"], state.data.rules.map(rule => [
+    `<strong>${esc(rule.title)}</strong><div class='muted'>${esc(rule.description || "")}</div>`,
+    esc(rule.currentVersionId || "-"),
+    badge(rule.status, toneForStatus(rule.status)),
+    `<div class="row-actions"><button class="icon-btn table-action" data-rule-validate="${esc(rule.id)}" title="Validate rule" ${state.actionLoading ? "disabled" : ""}>${icon("rule")}</button><button class="icon-btn table-action" data-rule-test="${esc(rule.id)}" title="Test against session.continue" ${state.actionLoading ? "disabled" : ""}>${icon("science")}</button><button class="icon-btn table-action" data-rule-activate="${esc(rule.id)}" title="Activate rule" ${rule.status === "DRAFT" || rule.status === "DISABLED" ? "" : "disabled"}>${icon("toggle_on")}</button><button class="icon-btn table-action" data-rule-disable="${esc(rule.id)}" title="Disable rule" ${rule.status === "ACTIVE" ? "" : "disabled"}>${icon("toggle_off")}</button></div>`
+  ]), "No rules yet."), state.data.projects[0]?.name || "Workspace")}`;
+}
 
 function renderSettings() {
   const settings = state.data.settings;
@@ -359,6 +366,28 @@ async function syncActiveSources() {
 
 async function verifyEvidence(snapshotId) {
   await sendJson(`/api/evidence-snapshots/${snapshotId}/verify`, "POST", {});
+}
+
+function ruleById(ruleId) {
+  return state.data.rules.find(item => item.id === ruleId);
+}
+
+async function transitionRule(ruleId, action) {
+  const rule = ruleById(ruleId);
+  if (!rule) throw new Error("No rule is available");
+  await sendJson(`/api/rules/${rule.id}/${action}`, "POST", { expectedRevision: rule.revision });
+}
+
+async function validateRule(ruleId) {
+  await sendJson(`/api/rules/${ruleId}/validate`, "POST", {});
+}
+
+async function testRule(ruleId) {
+  await sendJson(`/api/rules/${ruleId}/test`, "POST", {
+    eventType: "session.continue",
+    resourceType: "SESSION",
+    data: {}
+  });
 }
 
 function openTranscriptDialog(sessionId) {
@@ -559,6 +588,10 @@ function render() {
   document.querySelectorAll("[data-session-import-manual]").forEach(btn => btn.addEventListener("click", () => openTranscriptDialog(btn.dataset.sessionImportManual)));
   document.querySelectorAll("[data-source-sync]").forEach(btn => btn.addEventListener("click", () => runAction(() => syncSource(btn.dataset.sourceSync), "Context source synced")));
   document.querySelectorAll("[data-evidence-verify]").forEach(btn => btn.addEventListener("click", () => runAction(() => verifyEvidence(btn.dataset.evidenceVerify), "Evidence verified")));
+  document.querySelectorAll("[data-rule-validate]").forEach(btn => btn.addEventListener("click", () => runAction(() => validateRule(btn.dataset.ruleValidate), "Rule validated")));
+  document.querySelectorAll("[data-rule-test]").forEach(btn => btn.addEventListener("click", () => runAction(() => testRule(btn.dataset.ruleTest), "Rule tested")));
+  document.querySelectorAll("[data-rule-activate]").forEach(btn => btn.addEventListener("click", () => runAction(() => transitionRule(btn.dataset.ruleActivate, "activate"), "Rule activated")));
+  document.querySelectorAll("[data-rule-disable]").forEach(btn => btn.addEventListener("click", () => runAction(() => transitionRule(btn.dataset.ruleDisable, "disable"), "Rule disabled")));
 }
 
 window.addEventListener("hashchange", () => {
