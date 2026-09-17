@@ -201,7 +201,7 @@ first pass 已完成，仍有深层硬化空间。
 完成 first pass。
 
 - `npm run start:local`。
-- `scripts/start-contextos.ps1`。
+- `scripts/start-contextos.ps1`，会构建 React 前端并打开 daemon 托管的 `http://127.0.0.1:4721/`。
 - `.env.example`。
 - README 补启动、测试、Codex/Claude Code adapter、transcript 边界。
 - daemon SIGINT/SIGTERM graceful shutdown。

@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { extname, resolve, sep } from "node:path";
 import cors from "@fastify/cors";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { ZodError } from "zod";
 import { ContextItemService, ContextSourceService, EvidenceSnapshotService } from "../../../packages/application/src/core/context-services.js";
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
@@ -167,6 +170,7 @@ export async function createDaemonServer(
     settings: settingsService,
     agentAdapters: agentAdapterService
   });
+    registerFrontendRoutes(server);
 
     server.setErrorHandler((error, request, reply) => {
     if (error instanceof ContextOsError) {
@@ -216,6 +220,49 @@ export async function createDaemonServer(
 
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+function registerFrontendRoutes(server: FastifyInstance): void {
+  const frontendRoot = resolve(process.cwd(), "frontend", "dist");
+  server.get("/", async (_request, reply) => sendFrontendFile(reply, frontendRoot, "index.html"));
+  server.get("/assets/*", async (request, reply) => {
+    const params = request.params as { "*": string };
+    return sendFrontendFile(reply, frontendRoot, "assets", params["*"]);
+  });
+}
+
+async function sendFrontendFile(reply: FastifyReply, root: string, ...segments: string[]): Promise<FastifyReply> {
+  const path = resolve(root, ...segments);
+  if (!isPathWithin(root, path)) {
+    return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Frontend asset not found" } });
+  }
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) throw new Error("Not a file");
+    return reply.type(contentType(path)).send(createReadStream(path));
+  } catch {
+    return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Frontend asset not found" } });
+  }
+}
+
+function isPathWithin(root: string, path: string): boolean {
+  const normalizedRoot = root.endsWith(sep) ? root : `${root}${sep}`;
+  return path === root || path.startsWith(normalizedRoot);
+}
+
+function contentType(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".html": return "text/html; charset=utf-8";
+    case ".js": return "text/javascript; charset=utf-8";
+    case ".css": return "text/css; charset=utf-8";
+    case ".svg": return "image/svg+xml";
+    case ".json": return "application/json; charset=utf-8";
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".ico": return "image/x-icon";
+    default: return "application/octet-stream";
+  }
 }
 
 

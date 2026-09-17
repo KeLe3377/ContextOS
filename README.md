@@ -144,7 +144,7 @@ npm run start:local
 
 ```text
 http://127.0.0.1:4721/api/health
-frontend/dist/index.html
+http://127.0.0.1:4721/
 ```
 
 默认数据目录是 `.contextos/`，数据库是 `.contextos/contextos.sqlite`。这些本地运行数据已经被 `.gitignore` 排除。
@@ -159,7 +159,7 @@ npm run dev
 
 ## 基本测试流程
 
-1. 运行 `npm run start:local`，或先执行 `npm run frontend:build` 后打开 `frontend/dist/index.html`。
+1. 运行 `npm run start:local`，打开 `http://127.0.0.1:4721/`。
 2. 在 Projects 创建或确认一个项目，Root path 使用不带外层引号的绝对路径，例如 `D:\project\ContextOS`。
 3. 在 Sessions 点击 `New Session`，填写 title 和 intent。
 4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。

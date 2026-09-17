@@ -64,7 +64,7 @@
 - React app 覆盖原有全部前端动作链路。
 - `frontend/styles.css` 保留并补充 React modal 样式。
 - 新增 npm scripts：`frontend:dev`、`frontend:typecheck`、`frontend:build`、`frontend:preview`、`build:all`。
-- `scripts/start-contextos.ps1` 改为先 `npm run frontend:build`，再打开 `frontend/dist/index.html`。
+- `scripts/start-contextos.ps1` 改为先 `npm run frontend:build`，再打开 daemon 托管的 `http://127.0.0.1:4721/`。
 - README 和 roadmap 文档已同步 React/Vite 现状。
 
 ### 6. 已提交并 push 的关键 commits
@@ -137,7 +137,7 @@ Tests       82 passed (82)
    npm run start:local
    ```
 
-2. 浏览器打开 `frontend/dist/index.html` 后测试 Codex 主链路：
+2. 浏览器打开 `http://127.0.0.1:4721/` 后测试 Codex 主链路：
    - Add Project，Root path 用 `D:\project\ContextOS`。
    - Add Context Source，建议先加一个 `FILE` source，比如 `README.md`。
    - Sync Sources。
@@ -171,7 +171,7 @@ Tests       82 passed (82)
 - 前端“先补操作链路，再迁 React”；最后用户明确要求“一步到位 React 做完”，于是迁移为 Vite + React + TypeScript。
 - React 迁移采用轻量 SPA：不引入路由库、不引入状态管理库、不引入复杂组件库，沿用原样式和信息架构。
 - `npm run build` 保持后端 TypeScript 构建；新增 `frontend:build` 和 `build:all`。
-- `start:local` 构建并打开 `frontend/dist/index.html`，保留本地文件打开方式。
+- `start:local` 构建前端并打开 daemon 托管的 `http://127.0.0.1:4721/`，避免 Chrome 从 `file://` 加载 Vite ES module 时白屏。
 
 ---
 
