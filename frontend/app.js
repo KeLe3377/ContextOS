@@ -118,16 +118,18 @@ async function loadData() {
 
 async function loadSessionDetails(session) {
   if (!session) return null;
-  const [contextPack, evidence, resumeCapsule] = await Promise.all([
+  const [contextPack, evidence, resumeCapsule, runtimeStatus] = await Promise.all([
     settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
     settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
-    settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`))
+    settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
+    settle(fetchJson(`/api/sessions/${session.id}/runtime-status`))
   ]);
   return {
     sessionId: session.id,
     contextPack: contextPack.ok ? contextPack.value : null,
     evidence: evidence.ok ? evidence.value.items : [],
-    resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null
+    resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
+    runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null
   };
 }
 
@@ -259,6 +261,7 @@ function renderSessions() {
     <div><span class="mono muted">EVIDENCE</span><strong>${details.evidence.length}</strong></div>
     <div><span class="mono muted">RESUME STATUS</span><strong>${esc(details.resumeCapsule?.status || "Not available")}</strong></div>
     <div class="detail-wide"><span class="mono muted">CONTEXT PACKAGE</span><strong>${esc(details.contextPack?.id || "Not generated")}</strong></div>
+    <div class="detail-wide"><span class="mono muted">RUNTIME</span><strong>${esc(details.runtimeStatus?.run?.status || "No active run")}</strong><div class="muted mono">${details.runtimeStatus?.process ? `pid ${details.runtimeStatus.process.pid} · managed ${details.runtimeStatus.process.managed} · running ${details.runtimeStatus.process.running}` : "No managed process"}</div></div>
     <div class="detail-wide"><span class="mono muted">NEXT ACTION</span><strong>${esc(details.resumeCapsule?.nextAction || "-")}</strong></div>
     ${evidenceList}
   </div>` : emptyNote("Continue a session to generate its context package and resume capsule.");
@@ -266,7 +269,7 @@ function renderSessions() {
     ${panel("Session Episodes", "terminal", table(["Session", "Agent", "Started", "Updated", "Status", "Action"], state.data.sessions.map(session => [
       `<strong>${esc(session.title || session.id)}</strong><div class='muted'>${esc(session.intent || "")}</div>`,
       esc(session.agentAdapterId), fmtDate(session.startedAt), fmtDate(session.updatedAt), badge(session.status, toneForStatus(session.status)),
-      `<div class="row-actions"><button class="icon-btn table-action" data-session-continue="${esc(session.id)}" title="Continue in Agent" ${canContinue(session.status) && !state.actionLoading ? "" : "disabled"}>${icon("play_arrow")}</button><button class="icon-btn table-action" data-session-import-auto="${esc(session.id)}" title="Auto import transcript" ${state.actionLoading ? "disabled" : ""}>${icon("manage_search")}</button><button class="icon-btn table-action" data-session-import-manual="${esc(session.id)}" title="Paste transcript" ${state.actionLoading ? "disabled" : ""}>${icon("edit_note")}</button></div>`
+      `<div class="row-actions"><button class="icon-btn table-action" data-session-continue="${esc(session.id)}" title="Continue in Agent" ${canContinue(session.status) && !state.actionLoading ? "" : "disabled"}>${icon("play_arrow")}</button><button class="icon-btn table-action" data-session-interrupt="${esc(session.id)}" title="Interrupt managed run" ${session.status === "RUNNING" && !state.actionLoading ? "" : "disabled"}>${icon("stop_circle")}</button><button class="icon-btn table-action" data-session-import-auto="${esc(session.id)}" title="Auto import transcript" ${state.actionLoading ? "disabled" : ""}>${icon("manage_search")}</button><button class="icon-btn table-action" data-session-import-manual="${esc(session.id)}" title="Paste transcript" ${state.actionLoading ? "disabled" : ""}>${icon("edit_note")}</button></div>`
     ]), "No sessions yet."))}
     ${panel("Latest Session Context", "inventory_2", detailBody, details ? details.sessionId : "No session")}
   </div>`;
@@ -330,6 +333,12 @@ async function importTranscriptAuto(sessionId) {
   const session = sessionById(sessionId);
   if (!session) throw new Error("No session is available for transcript import");
   await sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", {});
+}
+
+async function interruptSession(sessionId) {
+  const session = sessionById(sessionId);
+  if (!session) throw new Error("No session is available to interrupt");
+  await sendJson(`/api/sessions/${session.id}/interrupt`, "POST", { expectedRevision: session.revision });
 }
 
 function sourceById(sourceId) {
@@ -545,6 +554,7 @@ function render() {
   document.querySelectorAll("[data-nav]").forEach(btn => btn.addEventListener("click", () => { state.page = btn.dataset.nav; state.actionMessage = null; location.hash = state.page; render(); }));
   document.querySelectorAll("[data-action]").forEach(btn => btn.addEventListener("click", () => handleAction(btn.dataset.action)));
   document.querySelectorAll("[data-session-continue]").forEach(btn => btn.addEventListener("click", () => runAction(() => continueSession(btn.dataset.sessionContinue), "Session continued in Agent")));
+  document.querySelectorAll("[data-session-interrupt]").forEach(btn => btn.addEventListener("click", () => runAction(() => interruptSession(btn.dataset.sessionInterrupt), "Session interrupted")));
   document.querySelectorAll("[data-session-import-auto]").forEach(btn => btn.addEventListener("click", () => runAction(() => importTranscriptAuto(btn.dataset.sessionImportAuto), "Transcript auto-imported")));
   document.querySelectorAll("[data-session-import-manual]").forEach(btn => btn.addEventListener("click", () => openTranscriptDialog(btn.dataset.sessionImportManual)));
   document.querySelectorAll("[data-source-sync]").forEach(btn => btn.addEventListener("click", () => runAction(() => syncSource(btn.dataset.sourceSync), "Context source synced")));

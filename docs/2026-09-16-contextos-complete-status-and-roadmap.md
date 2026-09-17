@@ -167,6 +167,7 @@ first pass 已完成，仍有深层硬化空间。
 - New Session。
 - New Session / Settings 使用 `/api/agent-adapters` 的动态 adapter 列表，可选择 Codex 或 Claude Code。
 - Continue in Agent。
+- Sessions 页显示 latest Session runtime status，并支持中断 RUNNING 的受管 agent 进程。
 - Sessions 页支持对单个 Session 自动发现导入 transcript，或手动粘贴 transcript，并在 Evidence 列表显示 adapter/parser/message/turn metadata。
 - Context 页支持创建 Context Source、同步 active Context Source，以及对 Evidence Snapshot 触发 verify。
 - New Rule。
