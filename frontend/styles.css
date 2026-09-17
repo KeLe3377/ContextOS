@@ -398,6 +398,20 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
   background: var(--bg);
   color: var(--text-2);
 }
+.version-list {
+  display: grid;
+  gap: 8px;
+}
+.version-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+.version-row > div:first-child { min-width: 0; }
 
 @media (max-width: 980px) {
   .shell { padding-left: 0; }
@@ -411,4 +425,5 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
   .detail-grid > div, .detail-grid > div:nth-child(3) { border-right: 0; border-top: 1px solid var(--border); }
   .detail-grid > div:first-child { border-top: 0; }
   .detail-grid .detail-wide { grid-column: auto; }
+  .version-row { flex-direction: column; }
 }
