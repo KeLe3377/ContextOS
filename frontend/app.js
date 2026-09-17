@@ -25,7 +25,7 @@ const pages = {
   review: { title: "Review Inbox", subtitle: "Human decisions required before derived context or rules become active.", actions: [["rule", "Approve Selected", "primary"], ["close", "Reject"]] },
   decisions: { title: "Decisions", subtitle: "Durable choices, rationale, provenance, and version history.", actions: [["add", "Record Decision", "primary"], ["compare_arrows", "Compare Versions"]] },
   work: { title: "Work Items", subtitle: "Executable units of work with readiness signals and blocked dependencies.", actions: [["play_arrow", "Start Ready Item", "primary"], ["add_task", "Create Item"]] },
-  context: { title: "Context", subtitle: "Governed sources, immutable evidence snapshots, and derived context items.", actions: [["sync", "Sync Sources", "primary"], ["fact_check", "Review Derived Items"]] },
+  context: { title: "Context", subtitle: "Governed sources, immutable evidence snapshots, and derived context items.", actions: [["add", "Add Source", "primary"], ["sync", "Sync Sources"], ["fact_check", "Review Derived Items"]] },
   rules: { title: "Rules", subtitle: "Versioned governance instructions controlling automated agent behavior.", actions: [["add", "New Rule", "primary"], ["history", "Version History"]] },
   settings: { title: "Settings", subtitle: "Configure how ContextOS runs, connects to agents, and handles work context.", actions: [["restart_alt", "Reset changes"], ["check", "Save changes", "primary"]], narrow: true },
 };
@@ -152,7 +152,7 @@ function adapterOptions(selected = defaultAdapterId()) {
   const adapters = state.data.adapters.length ? state.data.adapters : [{ id: "codex", displayName: "Codex", available: true }];
   return adapters.map(adapter => `<option value="${esc(adapter.id)}" ${adapter.id === selected ? "selected" : ""} ${adapter.available ? "" : "disabled"}>${esc(adapter.displayName)}${adapter.available ? "" : " (unavailable)"}</option>`).join("");
 }
-const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-transcript", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-transcript", "add-source", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 function button([ic, label, kind]) {
   const id = actionId(label);
   const disabled = !enabledActions.has(id) || state.actionLoading;
@@ -452,6 +452,37 @@ function openRuleDialog() {
   });
 }
 
+function openContextSourceDialog() {
+  const project = state.data.projects[0];
+  if (!project) {
+    state.actionMessage = { text: "Create a project before adding context sources", error: true };
+    render();
+    return;
+  }
+  openFormDialog({
+    title: "Add Context Source",
+    submitLabel: "Create Source",
+    fields: `
+      <label>Project<input class="field" value="${esc(project.name)}" disabled /></label>
+      <label>Type<select name="sourceType"><option>FILE</option><option>DIRECTORY</option><option>URL</option><option>USER_NOTE</option><option>AGENT_OUTPUT</option></select></label>
+      <label>Name<input class="field" name="name" required placeholder="README, docs folder, design note..." /></label>
+      <label>Locator<input class="field mono" name="locator" required placeholder="README.md or docs/ or https://..." /></label>
+      <label>Description<input class="field" name="description" /></label>`,
+    onSubmit: values => runAction(async () => {
+      state.page = "context";
+      location.hash = "context";
+      await sendJson("/api/context-sources", "POST", {
+        projectId: project.id,
+        sourceType: values.get("sourceType"),
+        name: values.get("name"),
+        locator: stripWrappingQuotes(values.get("locator")),
+        description: values.get("description") || undefined,
+        metadata: {}
+      });
+    }, "Context source created")
+  });
+}
+
 function openFormDialog({ title, submitLabel, fields, onSubmit }) {
   document.getElementById("form-dialog")?.remove();
   const dialog = document.createElement("dialog");
@@ -475,6 +506,7 @@ function handleAction(action) {
   if (action === "add-project") return openProjectDialog();
   if (action === "new-session") return openSessionDialog();
   if (action === "new-rule") return openRuleDialog();
+  if (action === "add-source") return openContextSourceDialog();
   if (action === "sync-sources") return runAction(syncActiveSources, "Context sources synced");
   if (action === "continue-in-agent") {
     const session = state.data.sessions.find(item => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));

@@ -168,7 +168,7 @@ first pass 已完成，仍有深层硬化空间。
 - New Session / Settings 使用 `/api/agent-adapters` 的动态 adapter 列表，可选择 Codex 或 Claude Code。
 - Continue in Agent。
 - Sessions 页支持对单个 Session 自动发现导入 transcript，或手动粘贴 transcript，并在 Evidence 列表显示 adapter/parser/message/turn metadata。
-- Context 页支持同步 active Context Source，以及对 Evidence Snapshot 触发 verify。
+- Context 页支持创建 Context Source、同步 active Context Source，以及对 Evidence Snapshot 触发 verify。
 - New Rule。
 - Settings。
 - Session Context Package / Evidence / Resume Capsule 展示。
@@ -229,7 +229,7 @@ frontend/styles.css
 - 没有完整表单/详情页体验。
 - transcript import 已有 Sessions 页最小 UI；仍缺更完整的导入历史和冲突处理体验。
 - 没有 Evidence 内容查看/复制 handoff prompt 的完整交互。
-- Context Source sync 和 Evidence verify 已有最小操作入口；仍缺 source 创建/编辑的完整 UI。
+- Context Source 创建、sync 和 Evidence verify 已有最小操作入口；仍缺 source 编辑/暂停/归档的完整 UI。
 - 没有正式 loading/error/empty-state 设计系统。
 - 没有端到端浏览器自动化截图验收。
 
