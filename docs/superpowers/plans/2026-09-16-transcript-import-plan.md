@@ -187,8 +187,8 @@ Mark manual text transcript import as first-pass complete. Keep Codex file disco
 
 ```powershell
 npm run build
+npm run frontend:build
 npm test
-node --check frontend/app.js
 git diff --check
 ```
 

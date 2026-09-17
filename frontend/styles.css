@@ -328,6 +328,23 @@ dialog {
   box-shadow: 0 18px 50px rgb(15 23 42 / 18%);
 }
 dialog::backdrop { background: rgb(15 23 42 / 35%); }
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgb(15 23 42 / 35%);
+  padding: 16px;
+}
+.dialog-card {
+  width: min(460px, calc(100vw - 32px));
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgb(15 23 42 / 18%);
+}
 .dialog-form { display: flex; flex-direction: column; }
 .dialog-head, .dialog-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
 .dialog-head { border-bottom: 1px solid var(--border); }

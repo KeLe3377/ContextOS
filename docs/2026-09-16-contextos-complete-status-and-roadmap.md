@@ -57,8 +57,8 @@ tests/integration/evidence-store.test.ts
 
 ```powershell
 npm run build
+npm run frontend:build
 npm test
-node --check frontend/app.js
 ```
 
 ## 3. 已完成阶段
@@ -159,9 +159,9 @@ first pass 已完成，仍有深层硬化空间。
 - Continue queued 写 durable outbox event：`session.continue.queued`。
 - 当前只写 outbox，不派发；dispatcher 等真实消费者再做。
 
-### Phase I: Static Frontend Action Wiring
+### Phase I: React Frontend Action Wiring
 
-完成 first pass。
+完成 React/Vite first pass。
 
 - Add Project。
 - New Session。
@@ -174,6 +174,7 @@ first pass 已完成，仍有深层硬化空间。
 - Rules 页支持 validate、test、activate 和 disable rule。
 - Settings。
 - Session Context Package / Evidence / Resume Capsule 展示。
+- 前端已迁移为 React + TypeScript + Vite，源码位于 `frontend/src/App.tsx`，构建输出 `frontend/dist/`。
 
 ### Phase J: Adapter Contract Deepening
 
@@ -208,12 +209,14 @@ first pass 已完成，仍有深层硬化空间。
 
 ## 4. 前端现状与遗留
 
-当前前端仍是静态 HTML/CSS/JS：
+当前前端是 React + TypeScript + Vite SPA：
 
 ```text
 frontend/index.html
-frontend/app.js
+frontend/src/App.tsx
+frontend/src/main.tsx
 frontend/styles.css
+frontend/tsconfig.json
 ```
 
 已可做：
@@ -227,20 +230,19 @@ frontend/styles.css
 
 遗留：
 
-- 没有 React/Vite 正式工程。
-- 没有完整表单/详情页体验。
+- React/Vite 正式工程 first pass 已完成。
+- 关键表单和操作入口已迁移到 React modal/组件；仍缺更精细的详情页体验。
 - transcript import 已有 Sessions 页最小 UI；仍缺更完整的导入历史和冲突处理体验。
 - 没有 Evidence 内容查看/复制 handoff prompt 的完整交互。
 - Context Source 创建、sync 和 Evidence verify 已有最小操作入口；仍缺 source 编辑/暂停/归档的完整 UI。
-- 没有正式 loading/error/empty-state 设计系统。
+- loading/error/empty-state 仍是轻量 first pass，未形成完整设计系统。
 - 没有端到端浏览器自动化截图验收。
 
 建议后续前端顺序：
 
-1. 继续静态前端补最小操作体验，不立刻 React 迁移。
-2. 增加 Session detail：显示 handoff prompt 摘要和复制入口。
-3. 增加 Context evidence detail：查看 verify 状态、storageRef、metadata。
-4. 等 API DTO 稳定后，再迁移 React/Vite。
+1. 增加 Session detail：显示 handoff prompt 摘要和复制入口。
+2. 增加 Context evidence detail：查看 verify 状态、storageRef、metadata。
+3. 增加 Review Inbox 处理、Decision/Work Item 操作入口。
 
 ## 5. Adapter 现状与遗留
 
@@ -306,7 +308,7 @@ frontend/styles.css
 仍待后续：
 
 - 更完整的 message schema 和 tool event 结构化解析。
-- 前端 import UI。
+- 前端 import UI first pass 已完成；仍缺导入冲突/历史的完整体验。
 
 ### 6.2 Evidence / Context 深化
 
@@ -315,7 +317,7 @@ frontend/styles.css
 - Context Item 更深层 provenance 与历史版本恢复。
 - Context Source 的本地 `FILE` sync first pass 已完成：项目根目录边界校验、内容哈希去重、Evidence Snapshot 写入/复用、Source 乐观锁回写及 Activity/Audit 已闭环。
 
-仍待后续：URL 抓取、目录递归、调度/重试和前端 sync UI。
+仍待后续：URL 抓取、目录递归、调度/重试和 source 编辑/暂停/归档 UI。
 
 ### 6.3 Runtime / Jobs 深化
 
@@ -335,7 +337,7 @@ frontend/styles.css
 ## 7. 当前不要做的事
 
 - 不要新增 Jobs / Audit / Outbox 产品页。
-- 不要现在迁移 React，除非决定开始正式前端阶段。
+- React 迁移 first pass 已完成；不要引入新前端产品模块，除非明确进入对应阶段。
 - 不要现在加 Cursor，除非决定进入第三个 adapter 阶段。
 - 不要把 ContextOS 宣传成完整多 Agent 记忆系统。
 

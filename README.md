@@ -123,13 +123,13 @@ Overview 是唯一允许聚合多个对象的页面，但它只服务于“恢�
 - 可恢复后台 Job、lease、retry 和 outbox；
 - Claude Code、Codex、Cursor 统一 Agent Adapter。
 
-前端当前已有一个静态原型，位于：
+前端当前是 React + TypeScript + Vite 单页应用，源码位于：
 
 ```text
-frontend/index.html
+frontend/src/App.tsx
 ```
 
-这个原型用于确认信息架构、视觉密度和页面关系。后端稳定后，正式前端建议迁移为 React + TypeScript + Vite，并用真实 API 替换静态数据。
+它沿用原有信息架构和视觉密度，直接调用本地 daemon API。生产构建输出到 `frontend/dist/`。
 
 ## 本地启动
 
@@ -140,11 +140,11 @@ cd D:\project\ContextOS
 npm run start:local
 ```
 
-脚本会在缺少依赖时运行 `npm install`，启动本地 daemon，并打开：
+脚本会在缺少依赖时运行 `npm install`，构建 React 前端，启动本地 daemon，并打开：
 
 ```text
 http://127.0.0.1:4721/api/health
-frontend/index.html
+frontend/dist/index.html
 ```
 
 默认数据目录是 `.contextos/`，数据库是 `.contextos/contextos.sqlite`。这些本地运行数据已经被 `.gitignore` 排除。
@@ -153,12 +153,13 @@ frontend/index.html
 
 ```powershell
 npm install
+npm run frontend:build
 npm run dev
 ```
 
 ## 基本测试流程
 
-1. 打开 `frontend/index.html`。
+1. 运行 `npm run start:local`，或先执行 `npm run frontend:build` 后打开 `frontend/dist/index.html`。
 2. 在 Projects 创建或确认一个项目，Root path 使用不带外层引号的绝对路径，例如 `D:\project\ContextOS`。
 3. 在 Sessions 点击 `New Session`，填写 title 和 intent。
 4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。
@@ -187,7 +188,7 @@ Claude Code 可用 `CONTEXTOS_CLAUDE_COMMAND`、`CONTEXTOS_CLAUDE_ARGS`、`CONTE
 提交前建议运行：
 
 ```powershell
-node --check frontend/app.js
+npm run frontend:build
 npm run build
 npm test
 ```

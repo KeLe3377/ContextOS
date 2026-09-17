@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$frontendPath = Join-Path $repoRoot "frontend\index.html"
+$frontendPath = Join-Path $repoRoot "frontend\dist\index.html"
 $databaseFile = Join-Path $DataDir "contextos.sqlite"
 $healthUrl = "http://${HostName}:${Port}/api/health"
 
@@ -19,8 +19,10 @@ if (-not (Test-Path (Join-Path $repoRoot "node_modules"))) {
   npm install
 }
 
+npm run frontend:build
+
 if (-not (Test-Path $frontendPath)) {
-  throw "Frontend entry not found: $frontendPath"
+  throw "Frontend build output not found: $frontendPath"
 }
 
 $env:CONTEXTOS_HOST = $HostName

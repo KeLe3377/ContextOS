@@ -4,9 +4,9 @@
 
 **Goal:** Move ContextOS from the simplified end-to-end MVP to the original first-stage backend design without expanding product scope beyond the approved frontend pages.
 
-**Architecture:** Keep the current modular TypeScript daemon, SQLite persistence, static frontend integration, and Codex-first adapter. Fill the skipped reliability, provenance, lifecycle, and contract gaps in small increments, using targeted verification after implementation.
+**Architecture:** Keep the current modular TypeScript daemon, SQLite persistence, React/Vite frontend integration, and Codex-first adapter. Fill the skipped reliability, provenance, lifecycle, and contract gaps in small increments, using targeted verification after implementation.
 
-**Tech Stack:** TypeScript, Node.js, Fastify, SQLite, better-sqlite3, Zod, Vitest, static frontend for now. React/Vite migration remains later, after backend behavior is stable.
+**Tech Stack:** TypeScript, Node.js, Fastify, SQLite, better-sqlite3, Zod, Vitest, React, and Vite.
 
 ---
 
@@ -40,7 +40,7 @@ The remaining work is not to add pages. It is to make the loop reliable, inspect
 - Keep official pages aligned to: Overview, Projects, Sessions, Review Inbox, Decisions, Work Items, Context, Rules, Settings footer/shell behavior.
 - Keep ContextOS positioned as a local Agent Workspace and project-level governance container, not a general memory engine or chatbot.
 - Keep Codex and Claude Code as the first real adapters. Cursor remains deferred until the adapter contract and transcript/evidence loop are stable.
-- Keep frontend as the current static frontend until backend behavior is stable enough to justify React/Vite migration.
+- Keep the React/Vite frontend aligned to the existing approved pages; do not add new frontend product modules without explicit scope.
 - Verification is implementation-first: build/tests/startup checks after changes, not red-light test-first cycles.
 
 ## 3. Gap Map Against The Original Plan
@@ -143,12 +143,12 @@ Action: deepen Codex/Claude Code shared behavior first. Do not add Cursor until 
 
 ### Original Task 8: API Integration, Shutdown, Packaging
 
-Status: static frontend reads APIs.
+Status: React frontend reads APIs and drives the core local loop.
 
 Remaining gaps:
 
 - Overview aggregate endpoint is missing or incomplete.
-- Frontend action buttons are not fully wired.
+- Some secondary frontend action buttons remain placeholders, but the Codex-critical loop is wired.
 - Graceful shutdown is minimal.
 - Packaging/install docs are incomplete.
 - Full frontend API contract tests are missing.
@@ -346,13 +346,14 @@ Steps:
 
 Can be short: medium. Idempotency should be incremental per route group.
 
-### Phase I: Frontend Action Wiring Without New Pages - first pass complete
+### Phase I: Frontend Action Wiring Without New Pages - React first pass complete
 
-Purpose: let the existing static frontend operate the backend loop instead of only reading it.
+Purpose: let the React frontend operate the backend loop instead of only reading it.
 
 Files likely touched:
 
-- `frontend/app.js`
+- `frontend/src/App.tsx`
+- `frontend/src/main.tsx`
 - `frontend/index.html`
 - `frontend/styles.css`
 - Existing route files only if a needed endpoint is missing.
