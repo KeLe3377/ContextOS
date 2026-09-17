@@ -8,6 +8,7 @@ import { RuleService } from "../../../packages/application/src/core/rule-service
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
+import { ClaudeCodeAdapter } from "../../../packages/infrastructure/src/adapters/claude-code-adapter.js";
 import { CodexAdapter } from "../../../packages/infrastructure/src/adapters/codex-adapter.js";
 import { AgentAdapterRegistry } from "../../../packages/infrastructure/src/adapters/registry.js";
 import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
@@ -48,6 +49,7 @@ export type DaemonConfig = {
 export type CreateDaemonServerOptions = {
   config?: Partial<DaemonConfig>;
   agentAdapter?: AgentAdapter;
+  agentAdapters?: AgentAdapter[];
 };
 
 const packageVersion = "0.1.0";
@@ -96,8 +98,8 @@ export async function createDaemonServer(
     const evidenceIntegrityRecovery = evidenceSnapshotService.recoverStoredEvidence();
     const runtimeRepository = new SqliteRuntimeRepository(sqlite.db);
     const orphanContinuesRecovered = runtimeRepository.recoverOrphanRunningContinues(nowMs());
-    const agentAdapter = options.agentAdapter ?? new CodexAdapter();
-    const adapterRegistry = new AgentAdapterRegistry([agentAdapter]);
+    const agentAdapters = options.agentAdapters ?? (options.agentAdapter ? [options.agentAdapter] : [new CodexAdapter(), new ClaudeCodeAdapter()]);
+    const adapterRegistry = new AgentAdapterRegistry(agentAdapters);
     const continueSessionService = new ContinueSessionService(runtimeRepository, adapterRegistry, new ProcessSupervisor(), evidenceStore);
 
     const projectRepository = new SqliteProjectRepository(sqlite.db);

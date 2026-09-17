@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
+import { ClaudeCodeAdapter } from "../../packages/infrastructure/src/adapters/claude-code-adapter.js";
 import { CodexAdapter } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
 
 let cleanupTasks: Array<() => Promise<void>> = [];
@@ -37,6 +38,29 @@ describe("runtime APIs", () => {
       available: false,
       error: "Unsupported adapter"
     });
+  });
+
+  test("lists Codex and Claude Code adapters when both are registered", async () => {
+    const { server, tempDir } = await createTestServerWithAdapters((tempDir) => {
+      const codexSessionsDir = join(tempDir, "codex-sessions");
+      const claudeProjectsDir = join(tempDir, "claude-projects");
+      return [
+        new CodexAdapter(process.execPath, ["-e", ""], process.platform, codexSessionsDir),
+        new ClaudeCodeAdapter(process.execPath, ["-e", ""], process.platform, claudeProjectsDir)
+      ];
+    });
+
+    const adapters = await server.inject({ method: "GET", url: "/api/agent-adapters" });
+    expect(adapters.statusCode).toBe(200);
+    expect(adapters.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "codex", available: true }),
+      expect.objectContaining({ id: "claude-code", available: true, capabilities: expect.arrayContaining(["launch", "resume", "importTranscript"]) })
+    ]));
+
+    const claude = await server.inject({ method: "GET", url: "/api/agent-adapters/claude-code" });
+    expect(claude.statusCode).toBe(200);
+    expect(claude.json()).toMatchObject({ id: "claude-code", available: true });
+    expect(tempDir).toBeTruthy();
   });
 
   test("marks a short continue run completed after the process exits successfully", async () => {
@@ -628,6 +652,24 @@ async function createTestServer(args: string[] | ((tempDir: string) => string[])
   const launchArgs = Array.isArray(args) ? args : args(tempDir);
   const server = await createDaemonServer({
     agentAdapter: new CodexAdapter(process.execPath, launchArgs, process.platform, sessionsDir),
+    config: {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir: tempDir,
+      databaseFile: join(tempDir, "contextos.sqlite")
+    }
+  });
+  cleanupTasks.push(async () => {
+    await server.close();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+  return { server, tempDir };
+}
+
+async function createTestServerWithAdapters(createAdapters: (tempDir: string) => [CodexAdapter, ClaudeCodeAdapter]): Promise<{ server: FastifyInstance; tempDir: string }> {
+  const tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-adapters-"));
+  const server = await createDaemonServer({
+    agentAdapters: createAdapters(tempDir),
     config: {
       host: "127.0.0.1",
       port: 0,

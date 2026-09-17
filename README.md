@@ -172,7 +172,7 @@ npm run dev
 
 ## Codex Adapter
 
-当前 registry 只启用 Codex adapter。Windows 默认命令是 `codex.cmd`，非 Windows 默认命令是 `codex`。可以用环境变量覆盖：
+当前 registry 启用 Codex 和 Claude Code adapters；Cursor 尚未启用。Codex 在 Windows 默认命令是 `codex.cmd`，非 Windows 默认命令是 `codex`。可以用环境变量覆盖：
 
 ```powershell
 $env:CONTEXTOS_CODEX_COMMAND="codex.cmd"
@@ -180,7 +180,7 @@ $env:CONTEXTOS_CODEX_ARGS='["--help"]'
 npm run dev
 ```
 
-Codex adapter 已实现 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass，并通过共享 adapter contract tests。Claude Code 和 Cursor 尚未启用。
+Claude Code 可用 `CONTEXTOS_CLAUDE_COMMAND`、`CONTEXTOS_CLAUDE_ARGS`、`CONTEXTOS_CLAUDE_PROJECTS_DIR` 覆盖命令、参数和 transcript 目录。Codex 和 Claude Code adapters 均已实现 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass，并通过共享 adapter contract tests。
 
 ## 验证
 

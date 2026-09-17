@@ -4,7 +4,7 @@
 
 ## 1. 当前结论
 
-ContextOS 已完成 Codex-only 本地 MVP 的第一阶段闭环：
+ContextOS 已完成 Codex + Claude Code 本地 MVP 的第一阶段闭环：
 
 ```text
 Project
@@ -172,10 +172,10 @@ first pass 已完成，仍有深层硬化空间。
 
 ### Phase J: Adapter Contract Deepening
 
-完成 Codex-only first pass。
+完成 Codex + Claude Code first pass。
 
 - 新增 `AgentAdapter` contract。
-- 新增 Codex-only registry。
+- registry 默认启用 Codex 和 Claude Code。
 - Continue 通过 `session.agentAdapterId` 查 registry。
 - Codex capability contract：
   - `discover`
@@ -187,9 +187,8 @@ first pass 已完成，仍有深层硬化空间。
 
 当前边界：
 
-- Claude Code adapter 未实现。
 - Cursor adapter 未实现。
-- `inspectStatus` / `interrupt` / `importTranscript` 已有 Codex first pass 行为；已绑定 external session 的显式 UUID `resume` first pass 已完成。
+- `inspectStatus` / `interrupt` / `importTranscript` 已有 Codex 和 Claude Code first pass 行为；已绑定 external session 的显式 UUID `resume` first pass 已完成。
 
 ### Phase K: Packaging / Docs / Verification
 
@@ -198,7 +197,7 @@ first pass 已完成，仍有深层硬化空间。
 - `npm run start:local`。
 - `scripts/start-contextos.ps1`。
 - `.env.example`。
-- README 补启动、测试、Codex adapter、transcript 边界。
+- README 补启动、测试、Codex/Claude Code adapter、transcript 边界。
 - daemon SIGINT/SIGTERM graceful shutdown。
 - local startup smoke 已通过。
 
@@ -240,19 +239,22 @@ frontend/styles.css
 
 ## 5. Adapter 现状与遗留
 
-当前只有 Codex adapter 真实启用。
+当前真实启用 Codex 和 Claude Code adapters。
 
 已可做：
 
 - `discover` Codex CLI。
+- `discover` Claude Code CLI。
 - Windows `codex.cmd` 处理。
 - launch Codex CLI。
+- launch Claude Code CLI。
 - non-interactive output capture。
 - 通过 registry 查询 adapter。
-- inspect 受当前 daemon 管理的 Codex 进程。
+- inspect 受当前 daemon 管理的 Codex / Claude Code 进程。
 - interrupt 受管进程树，并将 Session / Job / Run / attempt 原子记录为 `PAUSED` / `CANCELED`。
 - Codex transcript 文件自动发现与 adapter `importTranscript` first pass。
 - Codex transcript role/turn 解析 first pass：保留 user/assistant 正文，并输出 role counts、turn count、消息序号范围到 adapter response 和 Evidence metadata。
+- Claude Code transcript 文件自动发现与 adapter `importTranscript` first pass：按 Project root 隔离，解析 `sessionId` / `cwd` 和 user/assistant 正文。
 - 共享 adapter contract test harness，覆盖可用/不可用 discovery、launch/resume metadata、transcript normalization、stdout/stderr/exit、inspect 和 interrupt。
 - 首次 Codex launch 会把 ContextOS handoff prompt 作为初始 prompt，并在退出后用唯一 Session marker 自动绑定产生的 Codex UUID。
 - 已绑定 Session 的 Codex resume：Project 归属校验、增量 Context Package prompt、每次恢复独立 Job/Run、明确失败码且不静默降级为新会话。
@@ -261,14 +263,13 @@ frontend/styles.css
 
 遗留：
 
-- Claude Code adapter。
 - Cursor adapter。
 - adapter fixtures 仍需随新增 adapter 扩展。
 
 建议后续 Adapter 顺序：
 
 1. 完善 Codex tool event schema 和更细粒度增量事件模型。
-2. 最后才加 Claude Code / Cursor，并复用 shared contract tests。
+2. 最后才加 Cursor，并复用 shared contract tests。
 
 ## 6. 后端遗留路线
 
@@ -329,7 +330,7 @@ frontend/styles.css
 
 - 不要新增 Jobs / Audit / Outbox 产品页。
 - 不要现在迁移 React，除非决定开始正式前端阶段。
-- 不要在 Codex import 稳定前加 Claude/Cursor。
+- 不要现在加 Cursor，除非决定进入第三个 adapter 阶段。
 - 不要把 ContextOS 宣传成完整多 Agent 记忆系统。
 
 ## 8. 推荐下一步
@@ -345,4 +346,4 @@ frontend/styles.css
 如果转 Adapter：
 
 1. Codex tool event schema / 增量事件模型。
-2. Claude Code / Cursor adapter 复用 shared contract tests。
+2. Cursor adapter 复用 shared contract tests。

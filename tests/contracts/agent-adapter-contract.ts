@@ -8,6 +8,7 @@ export type AgentAdapterContractFixture = {
   completedAdapter: AgentAdapter;
   unavailableAdapter: AgentAdapter;
   capabilities: AgentCapability[];
+  expectedResumeArgs?: string[];
   cwd: string;
   externalSessionId: string;
   cleanup(): Promise<void>;
@@ -70,7 +71,7 @@ export function runAgentAdapterContract(
         mode: "queued-job",
         operation: "resume",
         externalSessionId: fixture.externalSessionId,
-        args: expect.arrayContaining(["resume", fixture.externalSessionId, "continue"])
+        args: expect.arrayContaining(fixture.expectedResumeArgs ?? ["resume", fixture.externalSessionId, "continue"])
       });
     });
 
