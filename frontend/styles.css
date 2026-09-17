@@ -34,7 +34,16 @@ button, input, select { font: inherit; }
 textarea { font: inherit; resize: vertical; }
 button { cursor: pointer; }
 .mono { font-family: "IBM Plex Mono", monospace; }
-.material-symbols-outlined { font-size: 18px; line-height: 1; font-variation-settings: "FILL" 0, "wght" 500; }
+.app-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 .shell { min-height: 100vh; padding-left: 244px; }
 .sidebar {
@@ -160,7 +169,7 @@ button { cursor: pointer; }
   padding: 0 30px;
   color: var(--text);
 }
-.search .material-symbols-outlined { position: absolute; left: 9px; top: 7px; color: var(--quiet); font-size: 16px; }
+.search .app-icon { position: absolute; left: 9px; top: 7px; color: var(--quiet); width: 16px; height: 16px; }
 .icon-btn {
   width: 32px;
   height: 32px;
@@ -218,7 +227,7 @@ h2, h3, p { margin: 0; }
 .btn:disabled, .icon-btn:disabled { cursor: not-allowed; opacity: .45; }
 .btn:disabled:hover, .icon-btn:disabled:hover { background: inherit; color: inherit; }
 .table-action { border-color: var(--border); }
-.row-actions { display: inline-flex; align-items: center; gap: 4px; }
+.row-actions { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .action-notice { margin-top: 8px; font-size: 12px; font-weight: 600; }
 .action-notice.success { color: var(--green); }
 .action-notice.error { color: var(--red); }
@@ -287,9 +296,25 @@ h2, h3, p { margin: 0; }
 }
 .kpi-value { font-size: 22px; line-height: 28px; font-weight: 700; color: var(--text); }
 .kpi-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 10px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+th, td {
+  text-align: left;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
 th { color: var(--muted); font-size: 11px; font-weight: 700; background: var(--bg); text-transform: uppercase; letter-spacing: .04em; }
+th:last-child, td:last-child { width: 116px; }
 tbody tr:hover { background: #fbfdff; }
 .split { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .progress { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }

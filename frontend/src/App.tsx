@@ -104,8 +104,67 @@ async function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | 
   }
 }
 
+const iconPaths: Record<string, ReactNode> = {
+  account_tree: <><path d="M6 4v5h12V4H6Z" /><path d="M6 15v5h5v-5H6Z" /><path d="M13 15v5h5v-5h-5Z" /><path d="M12 9v3M8.5 12h7M8.5 12v3M15.5 12v3" /></>,
+  add: <path d="M12 5v14M5 12h14" />,
+  add_task: <><path d="M5 12l4 4L19 6" /><path d="M5 20h14" /></>,
+  archive: <><path d="M4 7h16M6 7v13h12V7M9 11h6" /><path d="M5 4h14v3H5z" /></>,
+  article: <><path d="M7 4h8l4 4v12H7z" /><path d="M15 4v4h4M10 12h6M10 16h6M10 8h2" /></>,
+  block: <><circle cx="12" cy="12" r="8" /><path d="M7 7l10 10" /></>,
+  cancel: <><circle cx="12" cy="12" r="8" /><path d="M9 9l6 6M15 9l-6 6" /></>,
+  check: <path d="M5 12l4 4L19 6" />,
+  check_box: <><path d="M5 5h14v14H5z" /><path d="M8 12l3 3 5-7" /></>,
+  check_circle: <><circle cx="12" cy="12" r="8" /><path d="M8 12l3 3 5-6" /></>,
+  close: <path d="M7 7l10 10M17 7 7 17" />,
+  compare_arrows: <><path d="M7 7h11M15 4l3 3-3 3M17 17H6M9 14l-3 3 3 3" /></>,
+  content_copy: <><path d="M8 8h11v12H8z" /><path d="M5 16V4h11" /></>,
+  create_new_folder: <><path d="M3 7h7l2 2h9v10H3z" /><path d="M15 11v6M12 14h6" /></>,
+  dashboard: <><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" /></>,
+  database: <><ellipse cx="12" cy="6" rx="7" ry="3" /><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" /></>,
+  download: <><path d="M12 4v11M8 11l4 4 4-4" /><path d="M5 20h14" /></>,
+  edit_note: <><path d="M5 6h10M5 10h8M5 14h6" /><path d="M14 19l5-5 2 2-5 5h-2z" /></>,
+  fact_check: <><path d="M4 5h16v14H4z" /><path d="M8 9h5M8 14h4M15 14l2 2 4-5" /></>,
+  folder_open: <path d="M3 8h7l2 2h9l-2 9H4zM3 8V6h7l2 2" />,
+  folder_managed: <><path d="M3 8h7l2 2h9l-2 9H4zM3 8V6h7l2 2" /><path d="M14 15l2 2 4-5" /></>,
+  gavel: <><path d="M13 5l6 6M11 7l6 6M5 19l6-6" /><path d="M9 5l10 10-3 3L6 8z" /></>,
+  hub: <><circle cx="12" cy="12" r="3" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="20" r="2" /><path d="M7 7l3 3M17 7l-3 3M12 15v3" /></>,
+  inbox: <><path d="M4 5h16l-2 14H6z" /><path d="M4 13h5l2 3h2l2-3h5" /></>,
+  inventory_2: <><path d="M4 7h16v13H4z" /><path d="M4 7l3-4h10l3 4M9 11h6" /></>,
+  link: <><path d="M10 7l1-1a4 4 0 0 1 6 6l-1 1M14 17l-1 1a4 4 0 0 1-6-6l1-1M9 15l6-6" /></>,
+  lock: <><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+  manage_search: <><circle cx="10" cy="10" r="5" /><path d="M14 14l5 5M4 20h7" /></>,
+  pause_circle: <><circle cx="12" cy="12" r="8" /><path d="M10 9v6M14 9v6" /></>,
+  play_arrow: <path d="M8 5v14l11-7z" />,
+  playlist_add_check: <><path d="M4 7h9M4 12h8M4 17h6" /><path d="M14 15l2 2 4-5" /></>,
+  policy: <><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z" /><path d="M9 12l2 2 4-5" /></>,
+  publish: <><path d="M12 19V5M8 9l4-4 4 4" /><path d="M5 19h14" /></>,
+  rate_review: <><path d="M4 5h16v11H8l-4 4z" /><path d="M8 9h8M8 13h5" /></>,
+  refresh: <><path d="M19 8a7 7 0 1 0 1 5" /><path d="M19 4v4h-4" /></>,
+  restart_alt: <><path d="M18 9a6 6 0 1 1-2-4" /><path d="M18 4v5h-5" /></>,
+  rule: <><path d="M6 4h12v16H6z" /><path d="M9 8h6M9 12h6M9 16h3" /></>,
+  science: <><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3" /><path d="M8 16h8" /></>,
+  search: <><circle cx="10" cy="10" r="5" /><path d="M14 14l5 5" /></>,
+  settings: <><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></>,
+  smart_toy: <><rect x="5" y="8" width="14" height="10" rx="2" /><path d="M12 8V4M9 13h.01M15 13h.01M9 18v2M15 18v2" /></>,
+  stop_circle: <><circle cx="12" cy="12" r="8" /><path d="M9 9h6v6H9z" /></>,
+  sync: <><path d="M18 8a6 6 0 0 0-10-2L6 8" /><path d="M6 4v4h4M6 16a6 6 0 0 0 10 2l2-2" /><path d="M18 20v-4h-4" /></>,
+  task_alt: <><circle cx="12" cy="12" r="8" /><path d="M8 12l3 3 5-6" /></>,
+  terminal: <><path d="M4 5h16v14H4z" /><path d="M7 9l3 3-3 3M12 15h5" /></>,
+  toggle_off: <><rect x="4" y="7" width="16" height="10" rx="5" /><circle cx="9" cy="12" r="3" /></>,
+  toggle_on: <><rect x="4" y="7" width="16" height="10" rx="5" /><circle cx="15" cy="12" r="3" /></>,
+  tune: <><path d="M4 7h10M18 7h2M4 12h2M10 12h10M4 17h7M15 17h5" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="12" r="2" /><circle cx="13" cy="17" r="2" /></>,
+  undo: <><path d="M9 7H4v5" /><path d="M4 12a8 8 0 1 0 2-5" /></>,
+  upload_file: <><path d="M7 4h8l4 4v12H7z" /><path d="M15 4v4h4M12 17V10M9 13l3-3 3 3" /></>,
+  verified: <><path d="M12 3l3 2 4 .5.5 4 2.5 2.5-2.5 2.5-.5 4-4 .5-3 2-3-2-4-.5-.5-4L2 12l2.5-2.5.5-4 4-.5z" /><path d="M8 12l3 3 5-6" /></>,
+  visibility: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="3" /></>
+};
+
 function icon(name: string) {
-  return <span className="material-symbols-outlined">{name}</span>;
+  return (
+    <svg className="app-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {iconPaths[name] || <circle cx="12" cy="12" r="7" />}
+    </svg>
+  );
 }
 
 function actionId(label: string) {
@@ -168,10 +227,12 @@ function Panel({ title, iconName, children, meta = "" }: { title: string; iconNa
 function Table({ headers, rows, empty = "No records yet." }: { headers: string[]; rows: ReactNode[][]; empty?: string }) {
   if (!rows.length) return <EmptyNote>{empty}</EmptyNote>;
   return (
-    <table>
-      <thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
-      <tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody>
-    </table>
+    <div className="table-scroll">
+      <table>
+        <thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
+        <tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody>
+      </table>
+    </div>
   );
 }
 
