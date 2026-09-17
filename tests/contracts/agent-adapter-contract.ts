@@ -83,10 +83,18 @@ export function runAgentAdapterContract(
         contentText: expect.any(String),
         parserVersion: expect.any(String),
         messageCount: expect.any(Number),
+        roleCounts: { user: expect.any(Number), assistant: expect.any(Number) },
+        turnCount: expect.any(Number),
+        messageOrdinalStart: expect.any(Number),
+        messageOrdinalEnd: expect.any(Number),
         truncated: expect.any(Boolean)
       });
       expect(discovered.contentText.length).toBeGreaterThan(0);
       expect(discovered.messageCount).toBeGreaterThan(0);
+      expect(discovered.messageCount).toBe(discovered.roleCounts.user + discovered.roleCounts.assistant);
+      expect(discovered.turnCount).toBe(discovered.roleCounts.user);
+      expect(discovered.messageOrdinalStart).toBeGreaterThan(0);
+      expect(discovered.messageOrdinalEnd).toBeGreaterThanOrEqual(discovered.messageOrdinalStart);
       expect(Number.isNaN(Date.parse(discovered.sourceUpdatedAt))).toBe(false);
     });
 

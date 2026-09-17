@@ -180,6 +180,10 @@ describe("transcript import API", () => {
       externalSessionId,
       parserVersion: "codex-jsonl.v1",
       messageCount: 2,
+      roleCounts: { user: 1, assistant: 1 },
+      turnCount: 1,
+      messageOrdinalStart: 1,
+      messageOrdinalEnd: 2,
       truncated: false,
       reused: false
     });
@@ -188,7 +192,12 @@ describe("transcript import API", () => {
       stream: "imported-transcript",
       adapterId: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v1"
+      parserVersion: "codex-jsonl.v1",
+      messageCount: 2,
+      roleCounts: { user: 1, assistant: 1 },
+      turnCount: 1,
+      messageOrdinalStart: 1,
+      messageOrdinalEnd: 2
     });
     await expect(readFile(join(tempDir, result.evidence.storageRef), "utf8")).resolves.toBe(
       "USER:\npreserve the API decision\n\nASSISTANT:\nthe decision is preserved"

@@ -194,6 +194,10 @@ export class ContinueSessionService {
             parserVersion: imported.parserVersion,
             sourceUpdatedAt: imported.sourceUpdatedAt,
             messageCount: imported.messageCount,
+            roleCounts: imported.roleCounts,
+            turnCount: imported.turnCount,
+            messageOrdinalStart: imported.messageOrdinalStart,
+            messageOrdinalEnd: imported.messageOrdinalEnd,
             transcriptTruncated: imported.truncated
           }
         });
@@ -205,6 +209,10 @@ export class ContinueSessionService {
         parserVersion: imported.parserVersion,
         sourceUpdatedAt: imported.sourceUpdatedAt,
         messageCount: imported.messageCount,
+        roleCounts: imported.roleCounts,
+        turnCount: imported.turnCount,
+        messageOrdinalStart: imported.messageOrdinalStart,
+        messageOrdinalEnd: imported.messageOrdinalEnd,
         truncated: imported.truncated,
         reused: Boolean(existing)
       }

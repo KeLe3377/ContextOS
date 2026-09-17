@@ -24,6 +24,13 @@ export type AgentTranscriptImportResult = {
   sourceUpdatedAt: string;
   parserVersion: string;
   messageCount: number;
+  roleCounts: {
+    user: number;
+    assistant: number;
+  };
+  turnCount: number;
+  messageOrdinalStart: number;
+  messageOrdinalEnd: number;
   truncated: boolean;
 };
 

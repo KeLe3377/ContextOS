@@ -140,6 +140,7 @@ export function defaultCodexSessionsDir(): string {
 }
 
 type CodexSessionMetadata = { id: string; cwd: string };
+type CodexTranscriptMessage = { role: "user" | "assistant"; text: string; ordinal: number };
 
 function readSessionMetadata(path: string): CodexSessionMetadata | null {
   const line = readFirstLine(path);
@@ -158,7 +159,8 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
   if (file.size > 50 * 1024 * 1024) {
     throw new ContextOsError("INVALID_ARGUMENT", "Codex transcript exceeds the 50 MB import limit", { externalSessionId });
   }
-  const messages: string[] = [];
+  const messages: CodexTranscriptMessage[] = [];
+  let ordinal = 0;
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     if (!line) continue;
     try {
@@ -168,12 +170,13 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
       };
       const payload = row.payload;
       if (row.type !== "response_item" || payload?.type !== "message" || !["user", "assistant"].includes(payload.role ?? "")) continue;
+      ordinal += 1;
       const text = (payload.content ?? [])
         .filter((item) => item.type === "input_text" || item.type === "output_text")
         .map((item) => item.text ?? "")
         .join("\n")
         .trim();
-      if (text) messages.push(`${payload.role!.toUpperCase()}:\n${text}`);
+      if (text) messages.push({ role: payload.role as "user" | "assistant", text, ordinal });
     } catch {
       // A crash can leave one partial JSONL record; valid records remain importable.
     }
@@ -188,23 +191,40 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
   let oversizedMessageTruncated = false;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    const addedLength = message.length + (selected.length ? separator.length : 0);
+    const formatted = formatTranscriptMessage(message);
+    const addedLength = formatted.length + (selected.length ? separator.length : 0);
     if (length + addedLength > 1_000_000) break;
-    selected.unshift(message);
+    selected.unshift(formatted);
     length += addedLength;
   }
   if (selected.length === 0) {
-    selected.push(messages.at(-1)!.slice(-1_000_000));
+    const latest = messages.at(-1)!;
+    selected.push(formatTranscriptMessage({ ...latest, text: latest.text.slice(-1_000_000) }));
     oversizedMessageTruncated = true;
   }
+  const selectedMessages = oversizedMessageTruncated
+    ? [messages.at(-1)!]
+    : messages.slice(messages.length - selected.length);
+  const roleCounts = selectedMessages.reduce((counts, message) => {
+    counts[message.role] += 1;
+    return counts;
+  }, { user: 0, assistant: 0 });
   return {
     externalSessionId,
     contentText: selected.join(separator),
     sourceUpdatedAt: file.mtime.toISOString(),
     parserVersion: "codex-jsonl.v1",
     messageCount: selected.length,
+    roleCounts,
+    turnCount: roleCounts.user,
+    messageOrdinalStart: selectedMessages[0]!.ordinal,
+    messageOrdinalEnd: selectedMessages.at(-1)!.ordinal,
     truncated: oversizedMessageTruncated || selected.length < messages.length
   };
+}
+
+function formatTranscriptMessage(message: Pick<CodexTranscriptMessage, "role" | "text">): string {
+  return `${message.role.toUpperCase()}:\n${message.text}`;
 }
 
 function listJsonlFiles(root: string): string[] {

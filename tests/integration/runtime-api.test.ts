@@ -137,7 +137,13 @@ describe("runtime APIs", () => {
     expect(importedTranscripts).toHaveLength(1);
     expect(importedTranscripts[0]).toMatchObject({
       title: "Codex transcript after launch",
-      metadata: expect.objectContaining({ externalSessionId })
+      metadata: expect.objectContaining({
+        externalSessionId,
+        roleCounts: { user: 1, assistant: 1 },
+        turnCount: 1,
+        messageOrdinalStart: 1,
+        messageOrdinalEnd: 2
+      })
     });
 
     const completed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });

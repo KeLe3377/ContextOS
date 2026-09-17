@@ -58,6 +58,10 @@ describe("CodexAdapter command resolution", () => {
         contentText: "USER:\nnew question\n\nASSISTANT:\nnew answer",
         parserVersion: "codex-jsonl.v1",
         messageCount: 2,
+        roleCounts: { user: 1, assistant: 1 },
+        turnCount: 1,
+        messageOrdinalStart: 1,
+        messageOrdinalEnd: 2,
         truncated: false
       });
       expect(latest.contentText).not.toContain("developer instructions");

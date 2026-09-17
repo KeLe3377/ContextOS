@@ -71,6 +71,13 @@ export type AdapterTranscriptImportResult = TranscriptImportResult & {
     parserVersion: string;
     sourceUpdatedAt: string;
     messageCount: number;
+    roleCounts: {
+      user: number;
+      assistant: number;
+    };
+    turnCount: number;
+    messageOrdinalStart: number;
+    messageOrdinalEnd: number;
     truncated: boolean;
     reused: boolean;
   };
