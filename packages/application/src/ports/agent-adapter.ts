@@ -7,6 +7,11 @@ export type AgentLaunchInput = {
   onExit?: (exit: ProcessExitInfo) => void;
 };
 
+export type AgentResumeInput = AgentLaunchInput & {
+  externalSessionId: string;
+  prompt: string;
+};
+
 export type AgentLaunchResult = {
   pid: number;
   launch: AgentLaunchInfoDto;
@@ -26,7 +31,9 @@ export interface AgentAdapter {
   readonly displayName: string;
   discover(): AgentAdapterStatusDto;
   buildLaunchInfo(input: { cwd: string }): AgentLaunchInfoDto;
+  buildResumeInfo(input: { cwd: string; externalSessionId: string; prompt: string }): AgentLaunchInfoDto;
   launch(input: AgentLaunchInput): AgentLaunchResult;
+  resume(input: AgentResumeInput): AgentLaunchResult;
   inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus;
   interrupt(input: { pid: number; supervisor: ProcessSupervisor }): boolean;
   importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult;

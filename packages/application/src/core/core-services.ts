@@ -106,7 +106,8 @@ export class SessionService {
     const status: SessionStatus = action === "continue" ? "RUNNING" : action === "review" ? "PAUSED" : "ARCHIVED";
     const session = this.sessions.updateStatus(id, status, expectedRevision, nowMs());
     if (action !== "continue" || !this.continueSession) return session;
-    return { ...session, ...this.continueSession.continue(session) };
+    const runtime = this.continueSession.continue(session);
+    return { ...this.sessions.getByIdOrThrow(id), ...runtime };
   }
 
   private assertProjectAcceptsSessions(projectId: string): void {

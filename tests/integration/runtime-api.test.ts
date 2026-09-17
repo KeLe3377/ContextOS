@@ -1,19 +1,16 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
-
-const originalCommand = process.env.CONTEXTOS_CODEX_COMMAND;
-const originalArgs = process.env.CONTEXTOS_CODEX_ARGS;
+import { CodexAdapter } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
 
 let cleanupTasks: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   for (const cleanup of cleanupTasks.splice(0).reverse()) await cleanup();
-  restoreEnv();
 });
 
 describe("runtime APIs", () => {
@@ -30,6 +27,7 @@ describe("runtime APIs", () => {
     expect(adapters.json().items[0].id).toBe("codex");
     expect(adapters.json().items[0].available).toBe(true);
     expect(adapters.json().items[0].capabilities).toContain("launch");
+    expect(adapters.json().items[0].capabilities).toContain("resume");
     expect(adapters.json().items[0].capabilities).toContain("importTranscript");
 
     const unsupported = await server.inject({ method: "GET", url: "/api/agent-adapters/claude-code" });
@@ -92,6 +90,103 @@ describe("runtime APIs", () => {
     const failed = await waitForSessionStatus(server, session.id, "FAILED");
     expect(failed.status).toBe("FAILED");
     expect(failed.completedAt).toBeTruthy();
+  });
+
+  test("resumes the bound Codex session with an incremental context prompt", async () => {
+    const externalSessionId = "codex-resume-session";
+    const projectRoot = "D:/project/ContextOS";
+    const { server, tempDir } = await createTestServer(
+      ["-e", "console.log(JSON.stringify(process.argv.slice(1)))"],
+      async (tempDir) => {
+        const sessionsDir = join(tempDir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        const rows = [
+          { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
+          { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "resume me" }] } },
+          { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "ready" }] } }
+        ];
+        await writeFile(join(sessionsDir, "rollout-resume.jsonl"), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.json().externalSessionId).toBe(externalSessionId);
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json()).toMatchObject({
+      launch: { operation: "resume", externalSessionId },
+      job: { payload: { launchInfo: { operation: "resume", externalSessionId } } }
+    });
+    expect(continued.json().launch.args).toEqual(expect.arrayContaining(["resume", externalSessionId]));
+    expect(continued.json().launch.args.at(-1)).toContain("Continue this ContextOS session");
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+    const completed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const resumedAgain = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: completed.json().revision }
+    });
+    expect(resumedAgain.statusCode).toBe(200);
+    expect(resumedAgain.json()).toMatchObject({
+      launch: { operation: "resume", externalSessionId },
+      run: { sessionId: session.id }
+    });
+    expect(resumedAgain.json().run.id).not.toBe(continued.json().run.id);
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const runs = db.prepare("SELECT id FROM session_runs WHERE session_id = ? ORDER BY created_at, id").all(session.id) as Array<{ id: string }>;
+      expect(runs.map((run) => run.id)).toEqual(expect.arrayContaining([continued.json().run.id, resumedAgain.json().run.id]));
+      expect(runs).toHaveLength(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("fails resume without launching a new session when the bound Codex session is missing", async () => {
+    const externalSessionId = "codex-missing-resume-session";
+    const projectRoot = "D:/project/ContextOS";
+    let transcriptPath = "";
+    const { server } = await createTestServer(
+      ["-e", "process.exit(0)"],
+      async (tempDir) => {
+        const sessionsDir = join(tempDir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        transcriptPath = join(sessionsDir, "rollout-missing-resume.jsonl");
+        const rows = [
+          { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
+          { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "bind me" }] } }
+        ];
+        await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+    await rm(transcriptPath, { force: true });
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json()).toMatchObject({
+      status: "FAILED",
+      launch: { operation: "resume", externalSessionId },
+      job: { status: "FAILED" },
+      run: { status: "FAILED", failureCode: "RESUME_SESSION_NOT_FOUND" }
+    });
+    expect((continued.json().run as { pid: number | null }).pid).toBeNull();
   });
 
   test("inspects and interrupts a managed continue run without exit callback rollback", async () => {
@@ -268,13 +363,12 @@ describe("runtime APIs", () => {
   });
 });
 
-async function createTestServer(args: string[]): Promise<{ server: FastifyInstance; tempDir: string }> {
-  restoreEnv();
-  process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
-  process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(args);
-
+async function createTestServer(args: string[], configure?: (tempDir: string) => Promise<void>): Promise<{ server: FastifyInstance; tempDir: string }> {
   const tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-"));
+  await configure?.(tempDir);
+  const sessionsDir = join(tempDir, "codex-sessions");
   const server = await createDaemonServer({
+    agentAdapter: new CodexAdapter(process.execPath, args, process.platform, sessionsDir),
     config: {
       host: "127.0.0.1",
       port: 0,
@@ -318,16 +412,6 @@ async function waitForSessionStatus(server: FastifyInstance, sessionId: string, 
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Session did not reach ${status}; latest=${JSON.stringify(latest)}`);
-}
-
-function restoreEnv(): void {
-  setEnv("CONTEXTOS_CODEX_COMMAND", originalCommand);
-  setEnv("CONTEXTOS_CODEX_ARGS", originalArgs);
-}
-
-function setEnv(key: string, value: string | undefined): void {
-  if (value === undefined) delete process.env[key];
-  else process.env[key] = value;
 }
 
 

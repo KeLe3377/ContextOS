@@ -67,7 +67,10 @@ export class ContinueSessionService {
     this.recordHandoffEvidence({ session, rootPath, contextPackage });
     const agentAdapter = this.adapters.getOrThrow(session.agentAdapterId);
     const adapter = agentAdapter.discover();
-    const launch = agentAdapter.buildLaunchInfo({ cwd: rootPath });
+    const resumePrompt = formatResumePrompt({ session, contextPackage });
+    const launch = session.externalSessionId
+      ? agentAdapter.buildResumeInfo({ cwd: rootPath, externalSessionId: session.externalSessionId, prompt: resumePrompt })
+      : agentAdapter.buildLaunchInfo({ cwd: rootPath });
     const created = this.runtime.createContinueSessionJob({
       sessionId: session.id,
       projectId: session.projectId,
@@ -88,19 +91,18 @@ export class ContinueSessionService {
     }
 
     try {
-      const launched = agentAdapter.launch({
-        cwd: rootPath,
-        supervisor: this.supervisor,
-        onExit: (exit) => this.markProcessExit({ session, jobId: created.job.id, runId: created.run.id, exit })
-      });
+      const onExit = (exit: ProcessExitInfo) => this.markProcessExit({ session, jobId: created.job.id, runId: created.run.id, exit });
+      const launched = session.externalSessionId
+        ? agentAdapter.resume({ cwd: rootPath, externalSessionId: session.externalSessionId, prompt: resumePrompt, supervisor: this.supervisor, onExit })
+        : agentAdapter.launch({ cwd: rootPath, supervisor: this.supervisor, onExit });
       const running = this.runtime.markContinueRunning({ jobId: created.job.id, runId: created.run.id, pid: launched.pid }, nowMs());
       return { ...running, adapter, launch: launched.launch };
     } catch (error) {
       const failed = this.runtime.markContinueFailed({
         jobId: created.job.id,
         runId: created.run.id,
-        failureCode: "LAUNCH_FAILED",
-        failureMessage: error instanceof Error ? error.message : "Codex launch failed"
+        failureCode: continueFailureCode(session, error),
+        failureMessage: error instanceof Error ? error.message : `Codex ${launch.operation} failed`
       }, nowMs());
       return { ...failed, adapter, launch };
     }
@@ -337,12 +339,21 @@ function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; con
   const evidenceSnapshots = input.contextPackage.evidenceSnapshots.length
     ? input.contextPackage.evidenceSnapshots.map((snapshot) => `- ${snapshot.title} (${snapshot.selectionReason}, ${snapshot.contentHash ?? "no hash"})`).join("\n")
     : "- No source evidence snapshots selected.";
+  const sessionBoundary = input.session.externalSessionId
+    ? [
+        "You were resumed from ContextOS using an existing Codex conversation.",
+        `Codex Session ID: ${input.session.externalSessionId}`,
+        "This handoff adds the latest governed ContextOS context to that conversation."
+      ]
+    : [
+        "You were launched from ContextOS for a managed agent session.",
+        "No existing Codex conversation is bound yet; use this handoff as the session boundary."
+      ];
 
   return [
     "# ContextOS Handoff",
     "",
-    "You were launched from ContextOS for a managed agent session.",
-    "The current Codex GUI conversation is not automatically included yet; use this handoff as the session boundary.",
+    ...sessionBoundary,
     "",
     `Session ID: ${input.session.id}`,
     `Project ID: ${input.session.projectId}`,
@@ -363,4 +374,24 @@ function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; con
     "- If this task depends on prior GUI conversation, ask the user to paste or import that transcript.",
     ""
   ].join("\n");
+}
+
+function formatResumePrompt(input: { session: SessionDto; contextPackage: ContextPackageDto }): string {
+  const contextItems = input.contextPackage.contextItems
+    .map((item) => `- ${item.title} (${item.selectionReason}, rev ${item.revision ?? "n/a"})`)
+    .join("\n") || "- No active context items.";
+  return [
+    "Continue this ContextOS session using the existing Codex conversation.",
+    `Intent: ${input.session.intent ?? "Continue the session."}`,
+    `Context Package ID: ${input.contextPackage.id}`,
+    "Current active context:",
+    contextItems
+  ].join("\n");
+}
+
+function continueFailureCode(session: SessionDto, error: unknown): string {
+  if (!session.externalSessionId) return "LAUNCH_FAILED";
+  if (error instanceof ContextOsError && error.code === "NOT_FOUND") return "RESUME_SESSION_NOT_FOUND";
+  if (error instanceof ContextOsError && error.code === "CONFLICT") return "RESUME_PROJECT_MISMATCH";
+  return "RESUME_LAUNCH_FAILED";
 }

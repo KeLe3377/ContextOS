@@ -187,7 +187,7 @@ first pass 已完成，仍有深层硬化空间。
 
 - Claude Code adapter 未实现。
 - Cursor adapter 未实现。
-- `inspectStatus` / `interrupt` / `importTranscript` 已有 Codex first pass 行为；`resume` 尚无完整行为。
+- `inspectStatus` / `interrupt` / `importTranscript` 已有 Codex first pass 行为；已绑定 external session 的显式 UUID `resume` first pass 已完成。
 
 ### Phase K: Packaging / Docs / Verification
 
@@ -250,18 +250,19 @@ frontend/styles.css
 - inspect 受当前 daemon 管理的 Codex 进程。
 - interrupt 受管进程树，并将 Session / Job / Run / attempt 原子记录为 `PAUSED` / `CANCELED`。
 - Codex transcript 文件自动发现与 adapter `importTranscript` first pass。
-- 共享 adapter contract test harness，覆盖可用/不可用 discovery、launch metadata、transcript normalization、stdout/stderr/exit、inspect 和 interrupt。
+- 共享 adapter contract test harness，覆盖可用/不可用 discovery、launch/resume metadata、transcript normalization、stdout/stderr/exit、inspect 和 interrupt。
+- 已绑定 Session 的 Codex resume：Project 归属校验、增量 Context Package prompt、每次恢复独立 Job/Run、明确失败码且不静默降级为新会话。
 
 遗留：
 
-- Codex resume 的深层语义。
+- 首次 launch 后自动关联 Codex UUID，以及 resume 结束后的 transcript 自动回收。
 - Claude Code adapter。
 - Cursor adapter。
 - adapter fixtures 仍需随新增 adapter 扩展。
 
 建议后续 Adapter 顺序：
 
-1. 定义 Codex resume 深层语义。
+1. 完成首次 launch 的确定性 Codex UUID 绑定和运行后 transcript 回收。
 2. 最后才加 Claude Code / Cursor，并复用 shared contract tests。
 
 ## 6. 后端遗留路线
@@ -325,7 +326,7 @@ frontend/styles.css
 
 ## 8. 推荐下一步
 
-如果继续后端：定义 Codex resume 深层语义，或按前端集成反馈补齐 Context/Evidence API。
+如果继续后端：完成 Codex session identity 自动绑定和运行后 transcript 回收，或按前端集成反馈补齐 Context/Evidence API。
 
 如果转前端：
 
@@ -335,5 +336,5 @@ frontend/styles.css
 
 如果转 Adapter：
 
-1. Codex resume 深层语义。
+1. Codex session identity 自动绑定和运行后 transcript 回收。
 2. Claude Code / Cursor adapter 复用 shared contract tests。

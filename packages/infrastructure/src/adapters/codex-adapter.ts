@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { AgentAdapter, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
+import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
@@ -43,7 +43,7 @@ export class CodexAdapter implements AgentAdapter {
       command: this.command,
       version: !result.error && result.status === 0 ? output || null : null,
       error: result.error ? result.error.message : result.status === 0 ? null : output || `Exited with status ${result.status}`,
-      capabilities: ["discover", "launch", "inspectStatus", "interrupt", "importTranscript"]
+      capabilities: ["discover", "launch", "resume", "inspectStatus", "interrupt", "importTranscript"]
     };
   }
 
@@ -53,15 +53,51 @@ export class CodexAdapter implements AgentAdapter {
       command: this.command,
       args: this.launchArgs,
       cwd: input.cwd,
-      mode: "queued-job"
+      mode: "queued-job",
+      operation: "launch",
+      externalSessionId: null
     };
   }
 
-  launch(input: { cwd: string; supervisor: ProcessSupervisor; onExit?: (exit: ProcessExitInfo) => void }): { pid: number; launch: AgentLaunchInfoDto } {
+  buildResumeInfo(input: { cwd: string; externalSessionId: string; prompt: string }): AgentLaunchInfoDto {
+    return {
+      adapterId: this.id,
+      command: this.command,
+      args: [...this.launchArgs, "resume", input.externalSessionId, input.prompt],
+      cwd: input.cwd,
+      mode: "queued-job",
+      operation: "resume",
+      externalSessionId: input.externalSessionId
+    };
+  }
+
+  launch(input: AgentLaunchInput): AgentLaunchResult {
     const launch = this.buildLaunchInfo(input);
+    return this.start(launch, input.supervisor, input.onExit);
+  }
+
+  resume(input: AgentResumeInput): AgentLaunchResult {
+    this.assertResumeTarget(input.cwd, input.externalSessionId);
+    const launch = this.buildResumeInfo(input);
+    return this.start(launch, input.supervisor, input.onExit);
+  }
+
+  private start(launch: AgentLaunchInfoDto, supervisor: ProcessSupervisor, onExit?: (exit: ProcessExitInfo) => void): AgentLaunchResult {
     const processCommand = resolveProcessCommand(launch.command, launch.args, this.platform);
-    const process = input.supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, onExit: input.onExit });
+    const process = supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, onExit });
     return { pid: process.pid, launch };
+  }
+
+  private assertResumeTarget(cwd: string, externalSessionId: string): void {
+    const matches = listJsonlFiles(this.sessionsDir)
+      .map((path) => readSessionMetadata(path))
+      .filter((metadata): metadata is CodexSessionMetadata => metadata?.id === externalSessionId);
+    if (matches.length === 0) {
+      throw new ContextOsError("NOT_FOUND", "Codex session to resume was not found", { externalSessionId });
+    }
+    if (!matches.some((metadata) => isPathWithin(cwd, metadata.cwd))) {
+      throw new ContextOsError("CONFLICT", "Codex session to resume belongs to a different Project", { externalSessionId });
+    }
   }
 
   inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus {

@@ -168,6 +168,8 @@ npm run dev
 
 运行中的 Codex Session 可通过 `GET /api/sessions/:id/runtime-status` 查询当前 Run 和受管进程状态，并通过 `POST /api/sessions/:id/interrupt`（请求体包含 `expectedRevision`）终止进程树。中断后 Session 进入 `PAUSED`，Job 和 Run 记录为 `CANCELED`。
 
+`Continue in Agent` 会根据 Session 是否已绑定 `externalSessionId` 自动选择行为：未绑定时启动新 Codex 会话；已绑定时使用明确 UUID 执行 `codex resume`，校验该会话属于当前 Project，并为每次恢复创建新的 Job 和 Run。当前仍需先通过 transcript 自动导入绑定首次启动产生的 Codex UUID，resume 结束后的 transcript 也尚未自动回收。
+
 ## Codex Adapter
 
 当前 registry 只启用 Codex adapter。Windows 默认命令是 `codex.cmd`，非 Windows 默认命令是 `codex`。可以用环境变量覆盖：
@@ -178,7 +180,7 @@ $env:CONTEXTOS_CODEX_ARGS='["--help"]'
 npm run dev
 ```
 
-Codex adapter 已实现 `discover`、`launch`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass，并通过共享 adapter contract tests；`resume` 仍是预留能力，尚未对外宣称支持。Claude Code 和 Cursor 尚未启用。
+Codex adapter 已实现 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass，并通过共享 adapter contract tests。Claude Code 和 Cursor 尚未启用。
 
 ## 验证
 

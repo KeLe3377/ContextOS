@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
+import { CodexAdapter } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
 
 let server: FastifyInstance | undefined;
 let tempDir: string | undefined;
@@ -13,6 +14,7 @@ let projectId: string;
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "contextos-core-"));
   server = await createDaemonServer({
+    agentAdapter: new CodexAdapter(process.execPath, ["-e", ""], process.platform, join(tempDir, "codex-sessions")),
     config: {
       host: "127.0.0.1",
       port: 0,

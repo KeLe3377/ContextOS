@@ -82,6 +82,8 @@ export type AgentLaunchInfoDto = {
   args: string[];
   cwd: string;
   mode: "manual-launch" | "queued-job";
+  operation: "launch" | "resume";
+  externalSessionId: string | null;
 };
 
 export type SessionRuntimeStatusDto = {

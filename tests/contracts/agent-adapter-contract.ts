@@ -60,7 +60,17 @@ export function runAgentAdapterContract(
         adapterId: fixture.adapter.id,
         cwd: fixture.cwd,
         mode: "queued-job",
+        operation: "launch",
+        externalSessionId: null,
         args: expect.any(Array)
+      });
+      expect(fixture.adapter.buildResumeInfo({ cwd: fixture.cwd, externalSessionId: fixture.externalSessionId, prompt: "continue" })).toMatchObject({
+        adapterId: fixture.adapter.id,
+        cwd: fixture.cwd,
+        mode: "queued-job",
+        operation: "resume",
+        externalSessionId: fixture.externalSessionId,
+        args: expect.arrayContaining(["resume", fixture.externalSessionId, "continue"])
       });
     });
 
@@ -110,6 +120,31 @@ export function runAgentAdapterContract(
         expect(fixture.adapter.interrupt({ pid, supervisor })).toBe(true);
         await withTimeout(exited, 2_000, `${name} process did not exit after interrupt`);
         expect(fixture.adapter.inspectStatus({ pid, supervisor })).toEqual({ pid, managed: false, running: false });
+      } finally {
+        if (pid !== null && supervisor.inspect(pid).running) fixture.adapter.interrupt({ pid, supervisor });
+      }
+    });
+
+    test("resumes an explicit external session through the supervisor", async () => {
+      const supervisor = new ProcessSupervisor();
+      let pid: number | null = null;
+      let resolveExit: ((exit: ProcessExitInfo) => void) | undefined;
+      const exited = new Promise<ProcessExitInfo>((resolve) => {
+        resolveExit = resolve;
+      });
+      try {
+        const resumed = fixture.adapter.resume({
+          cwd: fixture.cwd,
+          externalSessionId: fixture.externalSessionId,
+          prompt: "continue",
+          supervisor,
+          onExit: (exit) => resolveExit?.(exit)
+        });
+        pid = resumed.pid;
+        expect(resumed.launch).toMatchObject({ operation: "resume", externalSessionId: fixture.externalSessionId });
+        expect(fixture.adapter.inspectStatus({ pid, supervisor })).toEqual({ pid, managed: true, running: true });
+        expect(fixture.adapter.interrupt({ pid, supervisor })).toBe(true);
+        await withTimeout(exited, 2_000, `${name} resumed process did not exit after interrupt`);
       } finally {
         if (pid !== null && supervisor.inspect(pid).running) fixture.adapter.interrupt({ pid, supervisor });
       }

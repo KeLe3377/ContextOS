@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { CodexAdapter, defaultCodexCommand, resolveProcessCommand, shouldLaunchWithShell } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
+import { ProcessSupervisor } from "../../packages/infrastructure/src/process-supervisor.js";
 
 describe("CodexAdapter command resolution", () => {
   test("uses the Windows command shim by default", () => {
@@ -66,6 +67,9 @@ describe("CodexAdapter command resolution", () => {
       expect(explicit.externalSessionId).toBe("codex-old");
       expect(explicit.contentText).toContain("old question");
       expect(() => adapter.importTranscript({ cwd: projectRoot, externalSessionId: "codex-outside" })).toThrow("Codex transcript was not found");
+      const supervisor = new ProcessSupervisor();
+      expect(() => adapter.resume({ cwd: projectRoot, externalSessionId: "missing", prompt: "continue", supervisor })).toThrow("was not found");
+      expect(() => adapter.resume({ cwd: outsideRoot, externalSessionId: "codex-latest", prompt: "continue", supervisor })).toThrow("different Project");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
