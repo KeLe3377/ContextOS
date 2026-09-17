@@ -133,6 +133,8 @@ frontend/src/App.tsx
 
 ## 本地启动
 
+日常使用说明见根目录 [`CONTEXTOS_USAGE.md`](CONTEXTOS_USAGE.md)。它覆盖 Sessions、已有 Codex 会话导入、Context、Rules、常见故障和推荐流程。
+
 Windows 上推荐使用一键脚本：
 
 ```powershell

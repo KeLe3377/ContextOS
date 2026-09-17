@@ -4,7 +4,7 @@ const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:
 
 type AnyRecord = Record<string, any>;
 type PageId = "overview" | "projects" | "sessions" | "review" | "decisions" | "work" | "context" | "rules" | "settings";
-type ModalKind = null | "project" | "session" | "rule" | "transcript" | "source";
+type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "source";
 
 type PageDef = {
   title: string;
@@ -45,7 +45,7 @@ const navGroups: Array<{ label: string; items: Array<[PageId, string, string]> }
 const pages: Record<PageId, PageDef> = {
   overview: { title: "Overview", subtitle: "Workspace status, pending governance, and the next executable work.", actions: [["refresh", "Refresh Context"]] },
   projects: { title: "Projects", subtitle: "Governed workspace boundaries and their active context policies.", actions: [["create_new_folder", "Add Project", "primary"], ["tune", "Edit Defaults"]] },
-  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["add", "New Session", "primary"], ["play_arrow", "Continue in Agent"], ["upload_file", "Import Transcript"], ["download", "Export Capsule"]] },
+  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["add", "New Session", "primary"], ["play_arrow", "Continue in Agent"], ["hub", "Import Existing Session"], ["upload_file", "Import Transcript"], ["download", "Export Capsule"]] },
   review: { title: "Review Inbox", subtitle: "Human decisions required before derived context or rules become active.", actions: [["rule", "Approve Selected", "primary"], ["close", "Reject"]] },
   decisions: { title: "Decisions", subtitle: "Durable choices, rationale, provenance, and version history.", actions: [["add", "Record Decision", "primary"], ["compare_arrows", "Compare Versions"]] },
   work: { title: "Work Items", subtitle: "Executable units of work with readiness signals and blocked dependencies.", actions: [["play_arrow", "Start Ready Item", "primary"], ["add_task", "Create Item"]] },
@@ -54,7 +54,7 @@ const pages: Record<PageId, PageDef> = {
   settings: { title: "Settings", subtitle: "Configure how ContextOS runs, connects to agents, and handles work context.", actions: [["restart_alt", "Reset changes"], ["check", "Save changes", "primary"]], narrow: true }
 };
 
-const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-transcript", "add-source", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-existing-session", "import-transcript", "add-source", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 
 function emptyData(): WorkspaceData {
   return {
@@ -304,10 +304,10 @@ export function App() {
     window.setTimeout(() => void loadData(), 500);
   }, [loadData, sessionById]);
 
-  const importTranscriptAuto = useCallback(async (sessionId: string) => {
+  const importTranscriptAuto = useCallback(async (sessionId: string, input: AnyRecord = {}) => {
     const session = sessionById(sessionId);
     if (!session) throw new Error("No session is available for transcript import");
-    await sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", {});
+    await sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", input);
   }, [sessionById]);
 
   const interruptSession = useCallback(async (sessionId: string) => {
@@ -353,6 +353,11 @@ export function App() {
       const session = data.sessions[0];
       if (!session) return setActionMessage({ text: "Create a session before importing a transcript", error: true });
       return setModal({ kind: "transcript", sessionId: session.id });
+    }
+    if (action === "import-existing-session") {
+      const session = data.sessions[0];
+      if (!session) return setActionMessage({ text: "Create a ContextOS session before importing an existing agent session", error: true });
+      return setModal({ kind: "existingTranscript", sessionId: session.id });
     }
     if (action === "save-changes" && data.settings) {
       const select = document.getElementById("setting-default-adapter") as HTMLSelectElement | null;
@@ -498,7 +503,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
         <div className="row-actions">
           <button className="icon-btn table-action" title="Continue in Agent" disabled={!canContinue(session.status) || actionLoading} onClick={() => runAction(() => continueSession(session.id), "Session continued in Agent")}>{icon("play_arrow")}</button>
           <button className="icon-btn table-action" title="Interrupt managed run" disabled={session.status !== "RUNNING" || actionLoading} onClick={() => runAction(() => interruptSession(session.id), "Session interrupted")}>{icon("stop_circle")}</button>
-          <button className="icon-btn table-action" title="Auto import transcript" disabled={actionLoading} onClick={() => runAction(() => importTranscriptAuto(session.id), "Transcript auto-imported")}>{icon("manage_search")}</button>
+          <button className="icon-btn table-action" title="Import existing agent session" disabled={actionLoading} onClick={() => setModal({ kind: "existingTranscript", sessionId: session.id })}>{icon("manage_search")}</button>
           <button className="icon-btn table-action" title="Paste transcript" disabled={actionLoading} onClick={() => setModal({ kind: "transcript", sessionId: session.id })}>{icon("edit_note")}</button>
           <button className="icon-btn table-action" title="Archive session" disabled={session.status === "RUNNING" || actionLoading} onClick={() => runAction(() => archiveSession(session.id), "Session archived")}>{icon("archive")}</button>
         </div>
@@ -509,6 +514,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           <div><span className="mono muted">EVIDENCE</span><strong>{details.evidence.length}</strong></div>
           <div><span className="mono muted">RESUME STATUS</span><strong>{details.resumeCapsule?.status || "Not available"}</strong></div>
           <div className="detail-wide"><span className="mono muted">CONTEXT PACKAGE</span><strong>{details.contextPack?.id || "Not generated"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">EXTERNAL AGENT SESSION</span><strong>{data.sessions.find((session: AnyRecord) => session.id === details.sessionId)?.externalSessionId || "Not bound"}</strong></div>
           <div className="detail-wide"><span className="mono muted">RUNTIME</span><strong>{details.runtimeStatus?.run?.status || "No active run"}</strong><div className="muted mono">{details.runtimeStatus?.process ? `pid ${details.runtimeStatus.process.pid} · managed ${details.runtimeStatus.process.managed} · running ${details.runtimeStatus.process.running}` : "No managed process"}</div></div>
           <div className="detail-wide"><span className="mono muted">NEXT ACTION</span><strong>{details.resumeCapsule?.nextAction || "-"}</strong></div>
           {details.evidence.length ? <div className="detail-wide"><span className="mono muted">EVIDENCE SNAPSHOTS</span><div className="stack compact">{details.evidence.slice(0, 6).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><Badge text={item.evidenceType} tone="blue" /></div>)}</div></div> : null}
@@ -587,14 +593,21 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
     if (kind === "transcript") {
       void runAction(() => sendJson(`/api/sessions/${session.id}/import-transcript`, "POST", { contentText: values.get("contentText"), title: values.get("title") || undefined, summary: values.get("summary") || undefined }), "Transcript imported");
     }
+    if (kind === "existingTranscript") {
+      void runAction(() => sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", {
+        externalSessionId: String(values.get("externalSessionId") || "").trim() || undefined,
+        title: values.get("title") || undefined,
+        summary: values.get("summary") || undefined
+      }), "Existing agent session imported");
+    }
     if (kind === "source") {
       void runAction(() => sendJson("/api/context-sources", "POST", { projectId: project.id, sourceType: values.get("sourceType"), name: values.get("name"), locator: stripWrappingQuotes(values.get("locator")), description: values.get("description") || undefined, metadata: {} }), "Context source created");
     }
   };
 
   if (!modal.kind) return null;
-  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : "Import Transcript";
-  const submitLabel = modal.kind === "project" ? "Create Project" : modal.kind === "session" ? "Create Session" : modal.kind === "rule" ? "Create Rule" : modal.kind === "source" ? "Create Source" : "Import Transcript";
+  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : "Import Transcript";
+  const submitLabel = modal.kind === "project" ? "Create Project" : modal.kind === "session" ? "Create Session" : modal.kind === "rule" ? "Create Rule" : modal.kind === "source" ? "Create Source" : modal.kind === "existingTranscript" ? "Import Existing Session" : "Import Transcript";
   return (
     <div className="dialog-backdrop">
       <form className="dialog-form dialog-card" onSubmit={submit}>
@@ -605,6 +618,7 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
           {modal.kind === "rule" ? <><label>Rule title<input className="field" name="title" required /></label><label>Description<input className="field" name="description" /></label><label>Enforcement<select name="enforcementMode" defaultValue="REQUIRE_REVIEW"><option>REQUIRE_REVIEW</option><option>BLOCK</option><option>WARNING</option><option>ADVISORY</option></select></label><label>Reason<input className="field" name="reason" required /></label></> : null}
           {modal.kind === "source" ? <><label>Project<input className="field" value={project?.name || ""} disabled /></label><label>Type<select name="sourceType" defaultValue="FILE"><option>FILE</option><option>DIRECTORY</option><option>URL</option><option>USER_NOTE</option><option>AGENT_OUTPUT</option></select></label><label>Name<input className="field" name="name" required placeholder="README, docs folder, design note..." /></label><label>Locator<input className="field mono" name="locator" required placeholder="README.md or docs/ or https://..." /></label><label>Description<input className="field" name="description" /></label></> : null}
           {modal.kind === "transcript" ? <><label>Session<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>Title<input className="field" name="title" defaultValue="Imported transcript" /></label><label>Summary<input className="field" name="summary" placeholder="What should the resume capsule remember?" /></label><label>Transcript text<textarea className="field" name="contentText" required rows={9} placeholder="Paste Codex transcript or the important conversation excerpt" /></label></> : null}
+          {modal.kind === "existingTranscript" ? <><label>ContextOS session<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>External session ID<input className="field mono" name="externalSessionId" placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><label>Title<input className="field" name="title" defaultValue={`Imported ${session?.agentAdapterId || "agent"} transcript`} /></label><label>Summary<input className="field" name="summary" placeholder="What should the resume capsule remember?" /></label></> : null}
         </div>
         <div className="dialog-actions"><button type="button" className="btn" onClick={close}>Cancel</button><button type="submit" className="btn primary">{submitLabel}</button></div>
       </form>
