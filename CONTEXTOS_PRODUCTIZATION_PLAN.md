@@ -352,6 +352,7 @@ Completed follow-up on 2026-09-17:
 - Added Session detail actions for opening/copying linked evidence and copying bound external/context package IDs.
 - Added `PATCH /api/sessions/:id/resume-capsule` with revision conflict protection, preserving run/evidence history.
 - Added frontend Edit Capsule flow backed by the new API.
+- Added explicit Session transcript sync: `POST /api/sessions/:id/sync-transcript`, Sessions page action, detail/table sync buttons, and sync freshness metadata.
 - Verified with `npm run build:all`, targeted Session tests, `npm test`, and `git diff --check`.
 
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

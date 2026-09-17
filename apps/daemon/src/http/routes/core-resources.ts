@@ -46,6 +46,12 @@ export async function registerCoreResourceRoutes(
     reply.code(201);
     return result;
   });
+  server.post("/api/sessions/:id/sync-transcript", async (request, reply) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const result = services.sessions.importAdapterTranscript(id, adapterTranscriptImportInputSchema.parse(request.body ?? {}));
+    reply.code(201);
+    return result;
+  });
   server.patch("/api/sessions/:id", async (request) => services.sessions.patch(paramsWithIdSchema.parse(request.params).id, sessionPatchSchema.parse(request.body)));
   server.post("/api/sessions/:id/interrupt", async (request) => {
     const { id } = paramsWithIdSchema.parse(request.params);

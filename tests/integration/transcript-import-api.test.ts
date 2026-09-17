@@ -276,6 +276,62 @@ describe("transcript import API", () => {
     }
   });
 
+  test("syncs updated bound Codex transcript as new evidence and reuses unchanged content", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-sync-transcript-"));
+    const projectRoot = join(tempDir, "workspace");
+    const sessionsDir = join(tempDir, "codex-sessions", "2026", "09", "17");
+    await Promise.all([mkdir(projectRoot), mkdir(sessionsDir, { recursive: true })]);
+    const externalSessionId = "codex-bound-sync";
+    const transcriptPath = join(sessionsDir, `rollout-${externalSessionId}.jsonl`);
+    const writeTranscript = async (messages: string[]) => {
+      const rows = [
+        { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
+        ...messages.flatMap((message, index) => [
+          { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `user ${index + 1}: ${message}` }] } },
+          { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `assistant ${index + 1}: ${message}` }] } }
+        ])
+      ];
+      await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+    };
+    await writeTranscript(["initial"]);
+    process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+    process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["--version"]);
+    process.env.CONTEXTOS_CODEX_SESSIONS_DIR = join(tempDir, "codex-sessions");
+    const server = await createDaemonServer({
+      config: { host: "127.0.0.1", port: 0, dataDir: tempDir, databaseFile: join(tempDir, "contextos.sqlite") }
+    });
+    cleanupTasks.push(async () => {
+      await server.close();
+      await rm(tempDir, { recursive: true, force: true });
+    });
+    const projectResponse = await server.inject({ method: "POST", url: "/api/projects", payload: { name: "Sync transcript", rootPath: projectRoot } });
+    const project = projectResponse.json();
+    const sessionResponse = await server.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId: project.id, agentAdapterId: "codex", title: "Bound sync" }
+    });
+    const session = sessionResponse.json();
+
+    const first = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: { externalSessionId } });
+    expect(first.statusCode, first.body).toBe(201);
+    expect(first.json().adapter).toMatchObject({ externalSessionId, reused: false, messageCount: 2 });
+
+    await writeTranscript(["initial", "new decision"]);
+    const changed = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/sync-transcript`, payload: {} });
+    expect(changed.statusCode, changed.body).toBe(201);
+    expect(changed.json().adapter).toMatchObject({ externalSessionId, reused: false, messageCount: 4, messageOrdinalEnd: 4 });
+    expect(changed.json().evidence.id).not.toBe(first.json().evidence.id);
+
+    const repeated = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/sync-transcript`, payload: {} });
+    expect(repeated.statusCode, repeated.body).toBe(201);
+    expect(repeated.json().adapter.reused).toBe(true);
+    expect(repeated.json().evidence.id).toBe(changed.json().evidence.id);
+
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    expect(evidence.json().items.filter((item: { metadata: { externalSessionId?: string } }) => item.metadata.externalSessionId === externalSessionId)).toHaveLength(2);
+  });
+
   test("imports an explicit Codex transcript recorded from a parent workspace", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "contextos-parent-transcript-"));
     const workspaceRoot = join(tempDir, "workspace");
