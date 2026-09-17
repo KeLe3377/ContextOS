@@ -152,7 +152,7 @@ function adapterOptions(selected = defaultAdapterId()) {
   const adapters = state.data.adapters.length ? state.data.adapters : [{ id: "codex", displayName: "Codex", available: true }];
   return adapters.map(adapter => `<option value="${esc(adapter.id)}" ${adapter.id === selected ? "selected" : ""} ${adapter.available ? "" : "disabled"}>${esc(adapter.displayName)}${adapter.available ? "" : " (unavailable)"}</option>`).join("");
 }
-const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-transcript", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-transcript", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 function button([ic, label, kind]) {
   const id = actionId(label);
   const disabled = !enabledActions.has(id) || state.actionLoading;
@@ -278,7 +278,10 @@ function renderWork() { return `${pageHeader(pages.work)}${panel("Execution Read
 
 function renderContext() {
   const d = state.data;
-  return `${pageHeader(pages.context)}<div class="grid cols-12"><div class="span-8">${panel("Sources", "database", table(["Source", "Type", "Last sync", "Snapshots", "State"], d.contextSources.map(source => [`<strong>${esc(source.name)}</strong><div class='muted mono'>${esc(source.locator)}</div>`, esc(source.sourceType), fmtDate(source.lastCheckedAt), esc(source.lastSnapshotId || "-"), badge(source.status, toneForStatus(source.status))]), "No context sources yet."))}</div><div class="span-4">${panel("Integrity Boundary", "verified", `<div class="metric-row"><span>Evidence snapshots</span><strong>${d.evidenceSnapshots.length}</strong></div><div class="metric-row"><span>Derived context items</span><strong>${d.contextItems.length}</strong></div><div class="metric-row"><span>Unlabeled derived items</span><strong>0</strong></div>`)}</div></div>`;
+  return `${pageHeader(pages.context)}<div class="grid cols-12"><div class="span-8 stack">
+    ${panel("Sources", "database", table(["Source", "Type", "Last sync", "Snapshots", "State", "Action"], d.contextSources.map(source => [`<strong>${esc(source.name)}</strong><div class='muted mono'>${esc(source.locator)}</div>`, esc(source.sourceType), fmtDate(source.lastCheckedAt), esc(source.lastSnapshotId || "-"), badge(source.status, toneForStatus(source.status)), `<button class="icon-btn table-action" data-source-sync="${esc(source.id)}" title="Sync source" ${source.status === "ACTIVE" && !state.actionLoading ? "" : "disabled"}>${icon("sync")}</button>`]), "No context sources yet."))}
+    ${panel("Evidence Snapshots", "fact_check", table(["Evidence", "Type", "Captured", "Storage", "Action"], d.evidenceSnapshots.slice(0, 12).map(snapshot => [`<strong>${esc(snapshot.title)}</strong><div class='muted mono'>${esc(snapshot.contentHash || "-")}</div>`, badge(snapshot.evidenceType, "blue"), fmtDate(snapshot.capturedAt), `<span class='mono'>${esc(snapshot.storageRef || "-")}</span>`, `<button class="icon-btn table-action" data-evidence-verify="${esc(snapshot.id)}" title="Verify evidence" ${state.actionLoading ? "disabled" : ""}>${icon("verified")}</button>`]), "No evidence snapshots yet."))}
+  </div><div class="span-4">${panel("Integrity Boundary", "verified", `<div class="metric-row"><span>Evidence snapshots</span><strong>${d.evidenceSnapshots.length}</strong></div><div class="metric-row"><span>Derived context items</span><strong>${d.contextItems.length}</strong></div><div class="metric-row"><span>Unlabeled derived items</span><strong>0</strong></div>`)}</div></div>`;
 }
 
 function renderRules() { return `${pageHeader(pages.rules)}${panel("Active Rule Set", "policy", rows(state.data.rules.map(rule => [esc(rule.title), rule.status, toneForStatus(rule.status), esc(rule.description || `version ${rule.currentVersionId || "-"}`)]), "No rules yet."), state.data.projects[0]?.name || "Workspace")}`; }
@@ -327,6 +330,26 @@ async function importTranscriptAuto(sessionId) {
   const session = sessionById(sessionId);
   if (!session) throw new Error("No session is available for transcript import");
   await sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", {});
+}
+
+function sourceById(sourceId) {
+  return state.data.contextSources.find(item => item.id === sourceId);
+}
+
+async function syncSource(sourceId) {
+  const source = sourceById(sourceId);
+  if (!source) throw new Error("No context source is available to sync");
+  await sendJson(`/api/context-sources/${source.id}/sync`, "POST", { expectedRevision: source.revision });
+}
+
+async function syncActiveSources() {
+  const sources = state.data.contextSources.filter(source => source.status === "ACTIVE");
+  if (!sources.length) throw new Error("No active context sources are available to sync");
+  for (const source of sources) await syncSource(source.id);
+}
+
+async function verifyEvidence(snapshotId) {
+  await sendJson(`/api/evidence-snapshots/${snapshotId}/verify`, "POST", {});
 }
 
 function openTranscriptDialog(sessionId) {
@@ -452,6 +475,7 @@ function handleAction(action) {
   if (action === "add-project") return openProjectDialog();
   if (action === "new-session") return openSessionDialog();
   if (action === "new-rule") return openRuleDialog();
+  if (action === "sync-sources") return runAction(syncActiveSources, "Context sources synced");
   if (action === "continue-in-agent") {
     const session = state.data.sessions.find(item => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
     if (!session) {
@@ -491,6 +515,8 @@ function render() {
   document.querySelectorAll("[data-session-continue]").forEach(btn => btn.addEventListener("click", () => runAction(() => continueSession(btn.dataset.sessionContinue), "Session continued in Agent")));
   document.querySelectorAll("[data-session-import-auto]").forEach(btn => btn.addEventListener("click", () => runAction(() => importTranscriptAuto(btn.dataset.sessionImportAuto), "Transcript auto-imported")));
   document.querySelectorAll("[data-session-import-manual]").forEach(btn => btn.addEventListener("click", () => openTranscriptDialog(btn.dataset.sessionImportManual)));
+  document.querySelectorAll("[data-source-sync]").forEach(btn => btn.addEventListener("click", () => runAction(() => syncSource(btn.dataset.sourceSync), "Context source synced")));
+  document.querySelectorAll("[data-evidence-verify]").forEach(btn => btn.addEventListener("click", () => runAction(() => verifyEvidence(btn.dataset.evidenceVerify), "Evidence verified")));
 }
 
 window.addEventListener("hashchange", () => {
