@@ -63,6 +63,20 @@ export const evidenceSnapshotDtoSchema = z.object({
   createdAt: z.string()
 });
 
+export const evidenceSnapshotContentDtoSchema = z.object({
+  snapshotId: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  evidenceType: evidenceTypeSchema,
+  contentText: z.string(),
+  contentHash: z.string(),
+  storageRef: z.string().nullable(),
+  sizeBytes: z.number().int().nullable(),
+  returnedChars: z.number().int().nonnegative(),
+  totalChars: z.number().int().nonnegative(),
+  truncated: z.boolean()
+});
+
 export const contextSourceSyncResultSchema = z.object({
   source: contextSourceDtoSchema,
   snapshot: evidenceSnapshotDtoSchema,
@@ -179,6 +193,7 @@ export type ContextSourceSyncResult = z.infer<typeof contextSourceSyncResultSche
 export type EvidenceType = z.infer<typeof evidenceTypeSchema>;
 export type EvidenceSnapshotInput = z.infer<typeof evidenceSnapshotInputSchema>;
 export type EvidenceSnapshotDto = z.infer<typeof evidenceSnapshotDtoSchema>;
+export type EvidenceSnapshotContentDto = z.infer<typeof evidenceSnapshotContentDtoSchema>;
 export type EvidenceSnapshotCompareInput = z.infer<typeof evidenceSnapshotCompareInputSchema>;
 export type EvidenceSnapshotCompareDto = z.infer<typeof evidenceSnapshotCompareDtoSchema>;
 export type EvidenceSnapshotContentCompareInput = z.infer<typeof evidenceSnapshotContentCompareInputSchema>;

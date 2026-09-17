@@ -16,6 +16,7 @@ import type {
   ContextSourceSyncResult,
   EvidenceSnapshotCompareDto,
   EvidenceSnapshotContentCompareDto,
+  EvidenceSnapshotContentDto,
   EvidenceSnapshotDto,
   EvidenceSnapshotInput
 } from "../../../contracts/src/context.js";
@@ -182,6 +183,25 @@ export class EvidenceSnapshotService {
     return this.snapshots.getByIdOrThrow(id);
   }
 
+  content(id: string, maxChars: number): EvidenceSnapshotContentDto {
+    const snapshot = this.snapshots.getByIdOrThrow(id);
+    const contentText = this.readSnapshotContent(snapshot);
+    const returnedText = contentText.slice(0, maxChars);
+    return {
+      snapshotId: snapshot.id,
+      projectId: snapshot.projectId,
+      title: snapshot.title,
+      evidenceType: snapshot.evidenceType,
+      contentText: returnedText,
+      contentHash: snapshot.contentHash,
+      storageRef: snapshot.storageRef,
+      sizeBytes: snapshot.sizeBytes,
+      returnedChars: returnedText.length,
+      totalChars: contentText.length,
+      truncated: returnedText.length < contentText.length
+    };
+  }
+
   verify(id: string): EvidenceVerification & { reviewItem: ReviewItemDto | null } {
     const snapshot = this.snapshots.getByIdOrThrow(id);
     if (!this.evidenceStore) {
@@ -288,7 +308,15 @@ export class EvidenceSnapshotService {
 
   private readSnapshotContent(snapshot: EvidenceSnapshotDto): string {
     if (!snapshot.storageRef) {
-      if (snapshot.contentText !== null) return snapshot.contentText;
+      if (snapshot.contentText !== null) {
+        const bytes = Buffer.from(snapshot.contentText, "utf8");
+        const actualHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+        const sizeMatches = snapshot.sizeBytes === null || bytes.byteLength === snapshot.sizeBytes;
+        if (actualHash !== snapshot.contentHash || !sizeMatches) {
+          throw new ContextOsError("CONFLICT", "Evidence content failed integrity verification", { failureCode: "CONTENT_MISMATCH" });
+        }
+        return snapshot.contentText;
+      }
       throw new ContextOsError("INVALID_ARGUMENT", "Evidence Snapshot has no comparable text content", { id: snapshot.id });
     }
     if (!this.evidenceStore) {

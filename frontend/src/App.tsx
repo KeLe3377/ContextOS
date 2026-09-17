@@ -120,6 +120,15 @@ function linesValue(value: FormDataEntryValue | null) {
   return String(value ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
+function prettyJson(value: unknown) {
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function copyText(value: string | null | undefined) {
+  if (!value) return;
+  void navigator.clipboard?.writeText(value);
+}
+
 function isArchived(item: AnyRecord) {
   return item.status === "ARCHIVED" || Boolean(item.archivedAt);
 }
@@ -193,6 +202,7 @@ export function App() {
   const [data, setData] = useState<WorkspaceData>(() => emptyData());
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string }>({ kind: null });
+  const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
 
   const availableAdapters = useCallback(() => data.adapters.filter((adapter) => adapter.available), [data.adapters]);
   const defaultAdapterId = useCallback(() => {
@@ -336,6 +346,15 @@ export function App() {
   }, [data.contextSources, syncSource]);
 
   const verifyEvidence = useCallback((snapshotId: string) => sendJson(`/api/evidence-snapshots/${snapshotId}/verify`, "POST", {}), []);
+  const openEvidenceDetail = useCallback(async (snapshot: AnyRecord) => {
+    setEvidenceDetail({ snapshot, content: null, loading: true, error: null });
+    try {
+      const content = await fetchJson(`/api/evidence-snapshots/${snapshot.id}/content?maxChars=50000`);
+      setEvidenceDetail({ snapshot, content, loading: false, error: null });
+    } catch (detailError) {
+      setEvidenceDetail({ snapshot, content: null, loading: false, error: detailError instanceof Error ? detailError.message : "Evidence content unavailable" });
+    }
+  }, []);
   const validateRule = useCallback((ruleId: string) => sendJson(`/api/rules/${ruleId}/validate`, "POST", {}), []);
   const testRule = useCallback((ruleId: string) => sendJson(`/api/rules/${ruleId}/test`, "POST", { eventType: "session.continue", resourceType: "SESSION", data: {} }), []);
   const transitionRule = useCallback(async (ruleId: string, action: string) => {
@@ -419,7 +438,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, interruptSession, syncSource, verifyEvidence, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, sessionDetails };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, interruptSession, syncSource, verifyEvidence, openEvidenceDetail, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, sessionDetails };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -473,6 +492,7 @@ export function App() {
         adapterList={adapterList}
         runAction={runAction}
       />
+      <EvidenceDetail detail={evidenceDetail} onClose={() => setEvidenceDetail(null)} />
     </>
   );
 }
@@ -613,12 +633,12 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function ContextPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, syncSource, verifyEvidence } = props;
+  const { data, header, actionLoading, runAction, syncSource, verifyEvidence, openEvidenceDetail } = props;
   return (
     <>{header}<div className="grid cols-12"><div className="span-8 stack">
       <Panel title="Sources" iconName="database"><Table headers={["Source", "Type", "Last sync", "Snapshots", "State", "Action"]} rows={data.contextSources.map((source: AnyRecord) => [<><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <button className="icon-btn table-action" title="Sync source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "Context source synced")}>{icon("sync")}</button>])} empty="No context sources yet." /></Panel>
-      <Panel title="Evidence Snapshots" iconName="fact_check"><Table headers={["Evidence", "Type", "Captured", "Storage", "Action"]} rows={data.evidenceSnapshots.slice(0, 12).map((snapshot: AnyRecord) => [<><strong>{snapshot.title}</strong><div className="muted mono">{snapshot.contentHash || "-"}</div></>, <Badge text={snapshot.evidenceType} tone="blue" />, fmtDate(snapshot.capturedAt), <span className="mono">{snapshot.storageRef || "-"}</span>, <button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button>])} empty="No evidence snapshots yet." /></Panel>
-    </div><div className="span-4"><Panel title="Integrity Boundary" iconName="verified"><div className="metric-row"><span>Evidence snapshots</span><strong>{data.evidenceSnapshots.length}</strong></div><div className="metric-row"><span>Derived context items</span><strong>{data.contextItems.length}</strong></div><div className="metric-row"><span>Unlabeled derived items</span><strong>0</strong></div></Panel></div></div></>
+      <Panel title="Evidence Snapshots" iconName="fact_check"><Table headers={["Evidence", "Type", "Captured", "Storage", "Action"]} rows={data.evidenceSnapshots.slice(0, 12).map((snapshot: AnyRecord) => [<><strong>{snapshot.title}</strong><div className="muted mono">{snapshot.contentHash || "-"}</div></>, <Badge text={snapshot.evidenceType} tone="blue" />, fmtDate(snapshot.capturedAt), <span className="mono">{snapshot.storageRef || "-"}</span>, <div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${snapshot.id}\n${snapshot.storageRef || ""}\n${snapshot.contentHash}`)}>{icon("content_copy")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div>])} empty="No evidence snapshots yet." /></Panel>
+    </div><div className="span-4 stack"><Panel title="Integrity Boundary" iconName="verified"><div className="metric-row"><span>Evidence snapshots</span><strong>{data.evidenceSnapshots.length}</strong></div><div className="metric-row"><span>Derived context items</span><strong>{data.contextItems.length}</strong></div><div className="metric-row"><span>Stored evidence</span><strong>{data.evidenceSnapshots.filter((item: AnyRecord) => item.storageRef).length}</strong></div></Panel><Panel title="Context Items" iconName="inventory_2"><Rows rows={data.contextItems.slice(0, 6).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), `${item.itemType} · ${item.confidence}`])} empty="No context items yet." /></Panel></div></div></>
   );
 }
 
@@ -644,6 +664,43 @@ function SettingsPage(props: AnyRecord & { header: ReactNode }) {
       <Panel title="Agent Adapters" iconName="smart_toy"><div className="setting-row"><div><div className="title-sm">Connected adapters</div><div className="muted">Codex and Claude Code are attached when discovery succeeds.</div></div><Badge text={`${connected} connected`} tone={connected ? "green" : "amber"} /></div>{data.adapters.length ? data.adapters.map((adapter: AnyRecord) => <div className="setting-row" key={adapter.id}><div><div className="title-sm">{adapter.displayName}</div><div className="muted mono">{adapter.version || adapter.error || adapter.command}</div></div><Badge text={adapter.available ? "Available" : "Unavailable"} tone={adapter.available ? "green" : "red"} /></div>) : <EmptyNote>No adapters discovered.</EmptyNote>}</Panel>
       <Panel title="Storage & Privacy" iconName="lock"><div className="setting-row"><div><div className="title-sm">Evidence retention</div><div className="muted">Keep immutable source snapshots unless explicitly archived.</div></div><Badge text="Retain indefinitely" /></div><div className="setting-row"><div><div className="title-sm">Secret redaction</div><div className="muted">Scrub credentials before indexing source material.</div></div><Badge text="Enabled" tone="green" /></div><div className="setting-row"><div><div className="title-sm">Bridge mode</div><div className="muted">Local CLI and IPC integration for desktop agents.</div></div><Badge text="CLI / IPC bridge" tone="blue" /></div></Panel>
     </div></>
+  );
+}
+
+function EvidenceDetail({ detail, onClose }: { detail: { snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null; onClose: () => void }) {
+  if (!detail) return null;
+  const { snapshot, content, loading, error } = detail;
+  const reference = [snapshot.id, snapshot.storageRef, snapshot.contentHash].filter(Boolean).join("\n");
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-card evidence-detail">
+        <div className="dialog-head"><h2>{snapshot.title}</h2><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>{icon("close")}</button></div>
+        <div className="dialog-fields">
+          <div className="detail-grid compact-detail">
+            <div><span className="mono muted">TYPE</span><strong>{snapshot.evidenceType}</strong></div>
+            <div><span className="mono muted">SIZE</span><strong>{snapshot.sizeBytes ?? "-"}</strong></div>
+            <div><span className="mono muted">CAPTURED</span><strong>{fmtDate(snapshot.capturedAt)}</strong></div>
+            <div className="detail-wide"><span className="mono muted">STORAGE</span><strong className="mono">{snapshot.storageRef || "inline"}</strong></div>
+            <div className="detail-wide"><span className="mono muted">HASH</span><strong className="mono evidence-hash">{snapshot.contentHash}</strong></div>
+          </div>
+          <div className="row-actions">
+            <button type="button" className="btn" onClick={() => copyText(reference)}>{icon("content_copy")}<span>Copy Reference</span></button>
+            <button type="button" className="btn" disabled={!content?.contentText} onClick={() => copyText(content?.contentText)}>{icon("article")}<span>Copy Content</span></button>
+          </div>
+          {loading ? <EmptyNote>Loading verified evidence content...</EmptyNote> : null}
+          {error ? <EmptyNote>{error}</EmptyNote> : null}
+          {content ? <>
+            <div className="split muted mono"><span>{content.returnedChars} / {content.totalChars} chars</span><span>{content.truncated ? "truncated" : "complete"}</span></div>
+            <pre className="evidence-content">{content.contentText}</pre>
+          </> : null}
+          <div>
+            <div className="title-sm">Metadata</div>
+            <pre className="evidence-metadata">{prettyJson(snapshot.metadata)}</pre>
+          </div>
+        </div>
+        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
   );
 }
 

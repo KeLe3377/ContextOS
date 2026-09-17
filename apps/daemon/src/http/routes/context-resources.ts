@@ -20,6 +20,9 @@ const listWithProjectSchema = listQuerySchema.extend({
   projectId: z.string().optional(),
   sourceId: z.string().optional()
 });
+const contentQuerySchema = z.object({
+  maxChars: z.coerce.number().int().min(100).max(200_000).default(50_000)
+});
 
 export async function registerContextResourceRoutes(
   server: FastifyInstance,
@@ -63,6 +66,11 @@ export async function registerContextResourceRoutes(
     return services.evidenceSnapshots.create(evidenceSnapshotInputSchema.parse(request.body));
   });
   server.get("/api/evidence-snapshots/:id", async (request) => services.evidenceSnapshots.get(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/evidence-snapshots/:id/content", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const { maxChars } = contentQuerySchema.parse(request.query);
+    return services.evidenceSnapshots.content(id, maxChars);
+  });
   server.post("/api/evidence-snapshots/:id/verify", async (request) => services.evidenceSnapshots.verify(paramsWithIdSchema.parse(request.params).id));
   server.post("/api/evidence-snapshots/:id/compare", async (request) => {
     const { id } = paramsWithIdSchema.parse(request.params);

@@ -93,6 +93,43 @@ describe("context resource APIs", () => {
       failureCode: null
     });
 
+    const content = await server!.inject({ method: "GET", url: `/api/evidence-snapshots/${snapshot.id}/content?maxChars=100` });
+    expect(content.statusCode).toBe(200);
+    expect(content.json()).toMatchObject({
+      snapshotId: snapshot.id,
+      projectId,
+      title: "Backend plan excerpt",
+      evidenceType: "TEXT",
+      contentText,
+      contentHash: expectedHash,
+      storageRef: snapshot.storageRef,
+      sizeBytes: Buffer.byteLength(contentText, "utf8"),
+      returnedChars: contentText.length,
+      totalChars: contentText.length,
+      truncated: false
+    });
+
+    const longText = "x".repeat(120);
+    const longSnapshotResponse = await server!.inject({
+      method: "POST",
+      url: "/api/evidence-snapshots",
+      payload: {
+        projectId,
+        evidenceType: "TEXT",
+        title: "Long evidence",
+        contentText: longText
+      }
+    });
+    expect(longSnapshotResponse.statusCode).toBe(201);
+    const truncatedContent = await server!.inject({ method: "GET", url: `/api/evidence-snapshots/${longSnapshotResponse.json().id}/content?maxChars=100` });
+    expect(truncatedContent.statusCode).toBe(200);
+    expect(truncatedContent.json()).toMatchObject({
+      contentText: "x".repeat(100),
+      returnedChars: 100,
+      totalChars: 120,
+      truncated: true
+    });
+
     const refreshedSource = await server!.inject({ method: "GET", url: `/api/context-sources/${source.id}` });
     expect(refreshedSource.json().lastSnapshotId).toBe(snapshot.id);
 
