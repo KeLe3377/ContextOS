@@ -281,6 +281,7 @@ export function App() {
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string }>({ kind: null });
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
+  const [evidenceCompare, setEvidenceCompare] = useState<{ base: AnyRecord; other: AnyRecord; metadata: AnyRecord | null; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [contextItemDetail, setContextItemDetail] = useState<{ item: AnyRecord; versions: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const preferredSessionIdRef = useRef<string | null>(null);
   const preferredContextSourceIdRef = useRef<string | null>(null);
@@ -499,6 +500,21 @@ export function App() {
       setEvidenceDetail({ snapshot, content: null, loading: false, error: detailError instanceof Error ? detailError.message : "Evidence content unavailable" });
     }
   }, []);
+  const openEvidenceCompare = useCallback(async (base: AnyRecord, other: AnyRecord) => {
+    setEvidenceCompare({ base, other, metadata: null, content: null, loading: true, error: null });
+    const [metadata, content] = await Promise.all([
+      settle(sendJson(`/api/evidence-snapshots/${base.id}/compare`, "POST", { otherSnapshotId: other.id })),
+      settle(sendJson(`/api/evidence-snapshots/${base.id}/compare-content`, "POST", { otherSnapshotId: other.id, maxChars: 50000 }))
+    ]);
+    setEvidenceCompare({
+      base,
+      other,
+      metadata: metadata.ok ? metadata.value : null,
+      content: content.ok ? content.value : null,
+      loading: false,
+      error: metadata.ok && content.ok ? null : [metadata.ok ? null : metadata.error.message, content.ok ? null : content.error.message].filter(Boolean).join("; ")
+    });
+  }, []);
   const transitionContextItem = useCallback(async (itemId: string, action: string) => {
     const item = data.contextItems.find((entry) => entry.id === itemId);
     if (!item) throw new Error("No context item is available");
@@ -614,7 +630,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -670,6 +686,7 @@ export function App() {
         runAction={runAction}
       />
       <EvidenceDetail detail={evidenceDetail} onClose={() => setEvidenceDetail(null)} />
+      <EvidenceCompare detail={evidenceCompare} onClose={() => setEvidenceCompare(null)} />
       <ContextItemDetail detail={contextItemDetail} actionLoading={actionLoading} runAction={runAction} restoreContextItemVersion={restoreContextItemVersion} onClose={() => setContextItemDetail(null)} />
     </>
   );
@@ -847,7 +864,7 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function ContextPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, selectedContextSourceId, selectContextSource, actionLoading, runAction, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail } = props;
+  const { data, header, selectedContextSourceId, selectContextSource, actionLoading, runAction, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail } = props;
   const selectedSource = data.contextSources.find((source: AnyRecord) => source.id === selectedContextSourceId) || data.contextSources[0];
   const sourceSnapshots = selectedSource ? data.evidenceSnapshots.filter((snapshot: AnyRecord) => snapshot.sourceId === selectedSource.id) : [];
   const sourceSnapshotIds = new Set(sourceSnapshots.map((snapshot: AnyRecord) => snapshot.id));
@@ -883,7 +900,7 @@ function ContextPage(props: AnyRecord & { header: ReactNode }) {
           <div className="metric-row"><span>Evidence snapshots</span><strong>{sourceSnapshots.length}</strong></div>
           <div className="metric-row"><span>Derived context items</span><strong>{sourceItems.length}</strong></div>
           <div className="metric-row"><span>Latest snapshot</span><strong className="mono">{latestSnapshot?.id || "-"}</strong></div>
-          {sourceSnapshots.length ? <div className="stack compact source-linked-list">{sourceSnapshots.slice(0, 5).map((snapshot: AnyRecord) => <div className="metric-row evidence-row" key={snapshot.id}><div className="evidence-row-main"><div className="title-sm">{snapshot.title}</div><div className="muted mono">{fmtDate(snapshot.capturedAt)} · {snapshot.contentHash}</div></div><div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div></div>)}</div> : <EmptyNote>No snapshots captured for this source yet.</EmptyNote>}
+          {sourceSnapshots.length ? <div className="stack compact source-linked-list">{sourceSnapshots.slice(0, 5).map((snapshot: AnyRecord) => <div className="metric-row evidence-row" key={snapshot.id}><div className="evidence-row-main"><div className="title-sm">{snapshot.title}</div><div className="muted mono">{fmtDate(snapshot.capturedAt)} · {snapshot.contentHash}</div></div><div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Compare with latest snapshot" disabled={!latestSnapshot || latestSnapshot.id === snapshot.id || actionLoading} onClick={() => latestSnapshot ? void openEvidenceCompare(snapshot, latestSnapshot) : undefined}>{icon("compare_arrows")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div></div>)}</div> : <EmptyNote>No snapshots captured for this source yet.</EmptyNote>}
         </div> : <EmptyNote>No source selected.</EmptyNote>}
       </Panel>
       <Panel title="Derived Context Items" iconName="inventory_2" meta={selectedSource ? `${sourceItems.length} linked` : ""}><Table headers={["Item", "State", "Action"]} rows={(selectedSource ? sourceItems : data.contextItems).slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence} · {item.sourceSnapshotId || "manual"}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View versions" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Activate item" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "Context item activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="Mark stale" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "Context item marked stale")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="Archive item" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "Context item archived")}>{icon("archive")}</button></div>])} empty={selectedSource ? "No context items derive from this source yet." : "No context items yet."} /></Panel>
@@ -946,6 +963,43 @@ function EvidenceDetail({ detail, onClose }: { detail: { snapshot: AnyRecord; co
             <div className="title-sm">Metadata</div>
             <pre className="evidence-metadata">{prettyJson(snapshot.metadata)}</pre>
           </div>
+        </div>
+        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+function EvidenceCompare({ detail, onClose }: { detail: { base: AnyRecord; other: AnyRecord; metadata: AnyRecord | null; content: AnyRecord | null; loading: boolean; error: string | null } | null; onClose: () => void }) {
+  if (!detail) return null;
+  const { base, other, metadata, content, loading, error } = detail;
+  const fields = metadata?.fields || {};
+  const changes = content?.changes || [];
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-card evidence-detail">
+        <div className="dialog-head"><h2>Compare Evidence Snapshots</h2><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>{icon("close")}</button></div>
+        <div className="dialog-fields">
+          <div className="detail-grid compact-detail">
+            <div><span className="mono muted">BASE</span><strong>{base.title}</strong></div>
+            <div><span className="mono muted">OTHER</span><strong>{other.title}</strong></div>
+            <div><span className="mono muted">RESULT</span><strong>{content ? (content.identical ? "Identical" : "Changed") : metadata ? (metadata.identical ? "Identical metadata" : "Changed metadata") : "-"}</strong></div>
+            <div className="detail-wide"><span className="mono muted">BASE ID</span><strong className="mono">{base.id}</strong></div>
+            <div className="detail-wide"><span className="mono muted">OTHER ID</span><strong className="mono">{other.id}</strong></div>
+          </div>
+          {loading ? <EmptyNote>Comparing verified evidence content...</EmptyNote> : null}
+          {error ? <EmptyNote>{error}</EmptyNote> : null}
+          {metadata ? <div className="compare-grid">
+            {["contentHash", "sizeBytes", "evidenceType", "sourceId"].map((field) => <div className="compare-field" key={field}><div className="split"><strong>{field}</strong><Badge text={fields[field]?.same ? "same" : "changed"} tone={fields[field]?.same ? "green" : "amber"} /></div><div className="muted mono">{String(fields[field]?.base ?? "-")}</div><div className="muted mono">{String(fields[field]?.other ?? "-")}</div></div>)}
+          </div> : null}
+          {content ? <div className="compare-summary">
+            <div className="metric-row"><span>Added lines</span><strong>{content.addedLines}</strong></div>
+            <div className="metric-row"><span>Removed lines</span><strong>{content.removedLines}</strong></div>
+            <div className="metric-row"><span>Output</span><strong>{content.truncated ? "truncated" : "complete"}</strong></div>
+          </div> : null}
+          {changes.length ? <div className="version-list">
+            {changes.map((change: AnyRecord, index: number) => <div className={`compare-change ${change.kind === "ADDED" ? "added" : "removed"}`} key={`${change.kind}-${index}`}><div className="split"><strong>{change.kind}</strong><span className="muted mono">base {change.baseStartLine} · other {change.otherStartLine} · {change.lineCount} lines</span></div><pre className="evidence-content compare-content">{change.text}</pre></div>)}
+          </div> : !loading && content ? <EmptyNote>No content differences.</EmptyNote> : null}
         </div>
         <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>Done</button></div>
       </div>

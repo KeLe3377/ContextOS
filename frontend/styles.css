@@ -450,6 +450,33 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
   padding: 12px;
 }
 .version-row > div:first-child { min-width: 0; }
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.compare-field,
+.compare-change {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  min-width: 0;
+}
+.compare-field .mono {
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+.compare-summary {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.compare-change.added { border-color: #bbf7d0; background: var(--green-bg); }
+.compare-change.removed { border-color: #fecaca; background: var(--red-bg); }
+.compare-content {
+  margin-top: 8px;
+  max-height: 180px;
+}
 
 @media (max-width: 980px) {
   .shell { padding-left: 0; }
@@ -463,5 +490,6 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
   .detail-grid > div, .detail-grid > div:nth-child(3) { border-right: 0; border-top: 1px solid var(--border); }
   .detail-grid > div:first-child { border-top: 0; }
   .detail-grid .detail-wide { grid-column: auto; }
+  .compare-grid { grid-template-columns: 1fr; }
   .version-row { flex-direction: column; }
 }

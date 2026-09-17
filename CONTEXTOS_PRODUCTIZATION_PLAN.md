@@ -360,6 +360,7 @@ Phase 3 first increment completed on 2026-09-17:
 - Added selected Context Source workspace on the Context page.
 - Linked Sources to latest Evidence, source snapshot history, and derived Context Items.
 - Added source-level Sync/Pause/Resume/Archive and evidence open/verify actions inside the selected-source workflow.
+- Added Evidence compare UI for comparing a Source snapshot against the latest snapshot using existing metadata/content compare APIs.
 - Verified with `npm run build:all`, `npm test`, and `git diff --check`.
 
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
