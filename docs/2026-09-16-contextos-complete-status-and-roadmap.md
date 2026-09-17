@@ -20,7 +20,7 @@ Project
 
 如果按“本地优先 Codex workspace loop”定义，当前版本已经可运行、可测试、可展示。
 
-如果按最初完整设计定义，ContextOS 还没有完成多 Agent、Codex transcript 实时采集、正式前端、完整 scheduler/outbox dispatcher、深层 provenance/versioning 等产品能力。
+如果按最初完整设计定义，ContextOS 还没有完成多 Agent、正式前端、完整 scheduler/outbox dispatcher、深层 provenance/versioning 等产品能力。
 
 ## 2. 当前代码状态
 
@@ -124,7 +124,8 @@ first pass 已完成，仍有深层硬化空间。
 
 - 已支持按 Project root 自动发现并显式导入本机 Codex transcript，首次导入后绑定 external session ID。
 - 已绑定 Session 的 resume 进程退出后会 best-effort 自动回收同一 Codex transcript，按内容 hash 去重，并在回收失败时保留已落库 lifecycle 状态。
-- 不会后台轮询或实时采集未绑定 Codex CLI 后续 transcript。
+- 受管 Codex 进程运行期间会 best-effort 轮询 transcript，内容变化时导入新的 Evidence；进程退出后仍有 final reconcile 兜底。
+- 不会采集非 ContextOS 受管的外部 Codex CLI 后续 transcript。
 
 ### Phase F: Core Resource Lifecycle
 
@@ -256,6 +257,7 @@ frontend/styles.css
 - 首次 Codex launch 会把 ContextOS handoff prompt 作为初始 prompt，并在退出后用唯一 Session marker 自动绑定产生的 Codex UUID。
 - 已绑定 Session 的 Codex resume：Project 归属校验、增量 Context Package prompt、每次恢复独立 Job/Run、明确失败码且不静默降级为新会话。
 - 已绑定 Session 的 resume 退出后自动回收 Codex transcript：内容变化写新 Evidence，未变化复用 Evidence，失败只记录 Activity/Audit。
+- 运行中 transcript bridge first pass：受管 Codex 进程运行期间轮询同一 transcript，按内容 hash 去重写 Evidence。
 
 遗留：
 
@@ -265,7 +267,7 @@ frontend/styles.css
 
 建议后续 Adapter 顺序：
 
-1. 完成 Codex transcript 实时 bridge。
+1. 完善 Codex tool event schema 和更细粒度增量事件模型。
 2. 最后才加 Claude Code / Cursor，并复用 shared contract tests。
 
 ## 6. 后端遗留路线
@@ -291,11 +293,11 @@ frontend/styles.css
 - 记录 role counts、turn count、message ordinal 范围，供后续 UI 和 resume 逻辑使用。
 - Session 绑定 external session ID；重复导入未变化内容时复用 Evidence。
 - 首次 launch 后使用 handoff prompt 中的 `Session ID` marker 确定性匹配新 transcript 并自动绑定 Codex UUID；匹配不到或匹配不唯一时不会猜测绑定。
+- 受管进程运行期间会启动 lightweight transcript bridge，找不到 transcript 时安静跳过，内容变化时导入 Evidence，退出后 final reconcile 兜底。
 - 已绑定 Session 的 resume 退出后自动复用这套导入逻辑完成 transcript 回收；失败时记录 `TRANSCRIPT_RECONCILE_FAILED` Activity/Audit，不回滚 Run/Job 状态。
 
 仍待后续：
 
-- 实时 transcript bridge。
 - 更完整的 message schema 和 tool event 结构化解析。
 - 前端 import UI。
 
@@ -332,7 +334,7 @@ frontend/styles.css
 
 ## 8. 推荐下一步
 
-如果继续后端：完成 Codex transcript 实时 bridge，或按前端集成反馈补齐 Context/Evidence API。
+如果继续后端：完善 Codex tool event schema / 增量事件模型，或按前端集成反馈补齐 Context/Evidence API。
 
 如果转前端：
 
@@ -342,5 +344,5 @@ frontend/styles.css
 
 如果转 Adapter：
 
-1. Codex transcript 实时 bridge。
+1. Codex tool event schema / 增量事件模型。
 2. Claude Code / Cursor adapter 复用 shared contract tests。

@@ -164,7 +164,7 @@ npm run dev
 4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。
 5. 回到 Sessions 页面刷新，可以在 Latest Session Context 里看到 Context Package ID 和 `ContextOS handoff prompt` evidence。
 
-当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定 Codex session ID，后续只读取同一会话。Codex transcript 解析会保留 user/assistant 正文，并在 Evidence metadata 中记录 role counts、turn count 和消息序号范围。它不会后台实时采集后续消息，也没有自动轮询。
+当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定 Codex session ID，后续只读取同一会话。Codex transcript 解析会保留 user/assistant 正文，并在 Evidence metadata 中记录 role counts、turn count 和消息序号范围。受管 Codex 进程运行期间会 best-effort 轮询同一 transcript，内容变化时导入新的 Evidence；进程退出后仍会 final reconcile 兜底。
 
 运行中的 Codex Session 可通过 `GET /api/sessions/:id/runtime-status` 查询当前 Run 和受管进程状态，并通过 `POST /api/sessions/:id/interrupt`（请求体包含 `expectedRevision`）终止进程树。中断后 Session 进入 `PAUSED`，Job 和 Run 记录为 `CANCELED`。
 

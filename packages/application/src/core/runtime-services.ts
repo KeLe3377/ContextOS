@@ -54,6 +54,8 @@ export class AgentAdapterService {
 }
 
 export class ContinueSessionService {
+  private readonly transcriptBridgeTimers = new Map<string, NodeJS.Timeout>();
+
   constructor(
     private readonly runtime: SqliteRuntimeRepository,
     private readonly adapters: AgentAdapterRegistry,
@@ -97,6 +99,7 @@ export class ContinueSessionService {
         ? agentAdapter.resume({ cwd: rootPath, externalSessionId: session.externalSessionId, prompt: resumePrompt, supervisor: this.supervisor, onExit })
         : agentAdapter.launch({ cwd: rootPath, prompt: handoffPrompt, supervisor: this.supervisor, onExit });
       const running = this.runtime.markContinueRunning({ jobId: created.job.id, runId: created.run.id, pid: launched.pid }, nowMs());
+      this.startTranscriptBridge({ session, runId: created.run.id, pid: launched.pid });
       return { ...running, adapter, launch: launched.launch };
     } catch (error) {
       const failed = this.runtime.markContinueFailed({
@@ -256,6 +259,7 @@ export class ContinueSessionService {
 
   private markProcessExit(input: { session: SessionDto; jobId: string; runId: string; exit: ProcessExitInfo }): void {
     try {
+      this.stopTranscriptBridge(input.runId);
       if (!this.runtime.isSessionRunRunning(input.runId)) return;
       const evidenceIds = this.recordProcessOutputEvidence(input);
       const status: SessionStatus = input.exit.code === 0 ? "COMPLETED" : "FAILED";
@@ -277,6 +281,40 @@ export class ContinueSessionService {
       this.reconcileTranscriptAfterExit(input.session, input.runId, status, evidenceIds, summary, nextAction);
     } catch {
       // Phase A keeps lifecycle observation best-effort; Phase B startup recovery reconciles missed exits.
+    }
+  }
+
+  private startTranscriptBridge(input: { session: SessionDto; runId: string; pid: number }): void {
+    this.stopTranscriptBridge(input.runId);
+    const timer = setInterval(() => {
+      const process = this.adapters.getOrThrow(input.session.agentAdapterId).inspectStatus({ pid: input.pid, supervisor: this.supervisor });
+      if (!process.managed || !process.running || !this.runtime.isSessionRunRunning(input.runId)) {
+        this.stopTranscriptBridge(input.runId);
+        return;
+      }
+      this.reconcileTranscriptDuringRun(input.session);
+    }, 500);
+    timer.unref?.();
+    this.transcriptBridgeTimers.set(input.runId, timer);
+  }
+
+  private stopTranscriptBridge(runId: string): void {
+    const timer = this.transcriptBridgeTimers.get(runId);
+    if (!timer) return;
+    clearInterval(timer);
+    this.transcriptBridgeTimers.delete(runId);
+  }
+
+  private reconcileTranscriptDuringRun(session: SessionDto): void {
+    try {
+      this.importAdapterTranscriptInternal(session, {
+        externalSessionId: session.externalSessionId ?? undefined,
+        correlationText: session.externalSessionId ? undefined : launchCorrelationText(session),
+        title: "Codex transcript during run",
+        summary: "Captured Codex transcript while managed run is running."
+      });
+    } catch {
+      // During-run bridge is opportunistic; process lifecycle and final reconciliation remain authoritative.
     }
   }
 

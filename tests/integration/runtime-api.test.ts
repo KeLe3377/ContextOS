@@ -167,6 +167,57 @@ describe("runtime APIs", () => {
     }
   });
 
+  test("imports Codex transcript evidence while the managed run is still running", async () => {
+    const externalSessionId = "codex-live-bridge";
+    const { server } = await createTestServer((tempDir) => {
+      const sessionsDir = join(tempDir, "codex-sessions");
+      const transcriptPath = join(sessionsDir, "rollout-live-bridge.jsonl");
+      const script = [
+        "const fs = require('node:fs')",
+        `const sessionsDir = ${JSON.stringify(sessionsDir)}`,
+        `const transcriptPath = ${JSON.stringify(transcriptPath)}`,
+        `const externalSessionId = ${JSON.stringify(externalSessionId)}`,
+        "const prompt = process.argv[1] || ''",
+        "fs.mkdirSync(sessionsDir, { recursive: true })",
+        "const rows = [",
+        "  { type: 'session_meta', payload: { id: externalSessionId, cwd: 'D:/project/ContextOS' } },",
+        "  { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } },",
+        "  { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'live bridge captured' }] } }",
+        "]",
+        "fs.writeFileSync(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join('\\n')}\\n`, 'utf8')",
+        "setTimeout(() => process.exit(0), 1500)"
+      ].join("\n");
+      return ["-e", script];
+    });
+    const session = await createSession(server);
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json().status).toBe("RUNNING");
+
+    const liveEvidence = await waitForImportedTranscriptCount(server, session.id, 1);
+    expect(liveEvidence[0]).toMatchObject({
+      title: "Codex transcript during run",
+      metadata: expect.objectContaining({
+        externalSessionId,
+        roleCounts: { user: 1, assistant: 1 }
+      })
+    });
+    const liveSession = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(liveSession.json()).toMatchObject({
+      status: "RUNNING",
+      externalSessionId
+    });
+
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+    const finalEvidence = await getImportedTranscripts(server, session.id);
+    expect(finalEvidence).toHaveLength(1);
+  });
+
   test("resumes the bound Codex session with an incremental context prompt", async () => {
     const externalSessionId = "codex-resume-session";
     const projectRoot = "D:/project/ContextOS";
@@ -646,6 +697,22 @@ async function waitForSessionStatus(server: FastifyInstance, sessionId: string, 
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Session did not reach ${status}; latest=${JSON.stringify(latest)}`);
+}
+
+async function waitForImportedTranscriptCount(server: FastifyInstance, sessionId: string, count: number): Promise<Array<{ id: string; title: string; metadata: Record<string, unknown> }>> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const imported = await getImportedTranscripts(server, sessionId);
+    if (imported.length >= count) return imported;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Session did not import ${count} transcript evidence item(s)`);
+}
+
+async function getImportedTranscripts(server: FastifyInstance, sessionId: string): Promise<Array<{ id: string; title: string; metadata: Record<string, unknown> }>> {
+  const evidence = await server.inject({ method: "GET", url: `/api/sessions/${sessionId}/evidence` });
+  expect(evidence.statusCode).toBe(200);
+  return evidence.json().items.filter((item: { metadata: { stream?: string } }) => item.metadata.stream === "imported-transcript");
 }
 
 
