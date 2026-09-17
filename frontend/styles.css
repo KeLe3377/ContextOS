@@ -31,6 +31,7 @@ body {
   line-height: 1.45;
 }
 button, input, select { font: inherit; }
+textarea { font: inherit; resize: vertical; }
 button { cursor: pointer; }
 .mono { font-family: "IBM Plex Mono", monospace; }
 .material-symbols-outlined { font-size: 18px; line-height: 1; font-variation-settings: "FILL" 0, "wght" 500; }
@@ -217,6 +218,7 @@ h2, h3, p { margin: 0; }
 .btn:disabled, .icon-btn:disabled { cursor: not-allowed; opacity: .45; }
 .btn:disabled:hover, .icon-btn:disabled:hover { background: inherit; color: inherit; }
 .table-action { border-color: var(--border); }
+.row-actions { display: inline-flex; align-items: center; gap: 4px; }
 .action-notice { margin-top: 8px; font-size: 12px; font-weight: 600; }
 .action-notice.success { color: var(--green); }
 .action-notice.error { color: var(--red); }
@@ -255,6 +257,7 @@ h2, h3, p { margin: 0; }
   border-top: 1px solid var(--border);
 }
 .metric-row:first-child, .setting-row:first-child, .list-row:first-child { border-top: 0; }
+.evidence-row { align-items: flex-start; }
 .list-row:hover, .setting-row:hover { background: #fbfdff; }
 .title-sm { font-weight: 700; }
 .muted { color: var(--muted); }

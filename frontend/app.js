@@ -21,7 +21,7 @@ const navGroups = [
 const pages = {
   overview: { title: "Overview", subtitle: "Workspace status, pending governance, and the next executable work.", actions: [["refresh", "Refresh Context"]] },
   projects: { title: "Projects", subtitle: "Governed workspace boundaries and their active context policies.", actions: [["create_new_folder", "Add Project", "primary"], ["tune", "Edit Defaults"]] },
-  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["add", "New Session", "primary"], ["play_arrow", "Continue in Agent"], ["download", "Export Capsule"]] },
+  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["add", "New Session", "primary"], ["play_arrow", "Continue in Agent"], ["upload_file", "Import Transcript"], ["download", "Export Capsule"]] },
   review: { title: "Review Inbox", subtitle: "Human decisions required before derived context or rules become active.", actions: [["rule", "Approve Selected", "primary"], ["close", "Reject"]] },
   decisions: { title: "Decisions", subtitle: "Durable choices, rationale, provenance, and version history.", actions: [["add", "Record Decision", "primary"], ["compare_arrows", "Compare Versions"]] },
   work: { title: "Work Items", subtitle: "Executable units of work with readiness signals and blocked dependencies.", actions: [["play_arrow", "Start Ready Item", "primary"], ["add_task", "Create Item"]] },
@@ -152,7 +152,7 @@ function adapterOptions(selected = defaultAdapterId()) {
   const adapters = state.data.adapters.length ? state.data.adapters : [{ id: "codex", displayName: "Codex", available: true }];
   return adapters.map(adapter => `<option value="${esc(adapter.id)}" ${adapter.id === selected ? "selected" : ""} ${adapter.available ? "" : "disabled"}>${esc(adapter.displayName)}${adapter.available ? "" : " (unavailable)"}</option>`).join("");
 }
-const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "continue-in-agent", "import-transcript", "new-rule", "reset-changes", "save-changes"]);
 function button([ic, label, kind]) {
   const id = actionId(label);
   const disabled = !enabledActions.has(id) || state.actionLoading;
@@ -244,8 +244,15 @@ function renderProjects() {
 function renderSessions() {
   const details = state.sessionDetails;
   const canContinue = status => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
+  const evidenceMeta = item => [
+    item.metadata?.adapterId ? `adapter ${item.metadata.adapterId}` : null,
+    item.metadata?.externalSessionId ? `external ${item.metadata.externalSessionId}` : null,
+    item.metadata?.parserVersion ? item.metadata.parserVersion : null,
+    item.metadata?.messageCount ? `${item.metadata.messageCount} messages` : null,
+    item.metadata?.turnCount ? `${item.metadata.turnCount} turns` : null
+  ].filter(Boolean).join(" · ");
   const evidenceList = details?.evidence.length
-    ? `<div class="detail-wide"><span class="mono muted">EVIDENCE SNAPSHOTS</span><div class="stack compact">${details.evidence.slice(0, 4).map(item => `<div class="metric-row"><span>${esc(item.title)}</span>${badge(item.evidenceType, "blue")}</div>`).join("")}</div></div>`
+    ? `<div class="detail-wide"><span class="mono muted">EVIDENCE SNAPSHOTS</span><div class="stack compact">${details.evidence.slice(0, 6).map(item => `<div class="metric-row evidence-row"><div><div class="title-sm">${esc(item.title)}</div><div class="muted mono">${esc(evidenceMeta(item) || item.storageRef || item.id)}</div></div>${badge(item.evidenceType, "blue")}</div>`).join("")}</div></div>`
     : "";
   const detailBody = details ? `<div class="detail-grid">
     <div><span class="mono muted">CONTEXT ITEMS</span><strong>${details.contextPack?.contextItems?.length ?? 0}</strong></div>
@@ -259,7 +266,7 @@ function renderSessions() {
     ${panel("Session Episodes", "terminal", table(["Session", "Agent", "Started", "Updated", "Status", "Action"], state.data.sessions.map(session => [
       `<strong>${esc(session.title || session.id)}</strong><div class='muted'>${esc(session.intent || "")}</div>`,
       esc(session.agentAdapterId), fmtDate(session.startedAt), fmtDate(session.updatedAt), badge(session.status, toneForStatus(session.status)),
-      `<button class="icon-btn table-action" data-session-continue="${esc(session.id)}" title="Continue in Agent" ${canContinue(session.status) && !state.actionLoading ? "" : "disabled"}>${icon("play_arrow")}</button>`
+      `<div class="row-actions"><button class="icon-btn table-action" data-session-continue="${esc(session.id)}" title="Continue in Agent" ${canContinue(session.status) && !state.actionLoading ? "" : "disabled"}>${icon("play_arrow")}</button><button class="icon-btn table-action" data-session-import-auto="${esc(session.id)}" title="Auto import transcript" ${state.actionLoading ? "disabled" : ""}>${icon("manage_search")}</button><button class="icon-btn table-action" data-session-import-manual="${esc(session.id)}" title="Paste transcript" ${state.actionLoading ? "disabled" : ""}>${icon("edit_note")}</button></div>`
     ]), "No sessions yet."))}
     ${panel("Latest Session Context", "inventory_2", detailBody, details ? details.sessionId : "No session")}
   </div>`;
@@ -310,6 +317,39 @@ async function continueSession(sessionId) {
   if (!session) throw new Error("No session is available to continue");
   await sendJson(`/api/sessions/${session.id}/continue`, "POST", { expectedRevision: session.revision });
   setTimeout(loadData, 500);
+}
+
+function sessionById(sessionId) {
+  return state.data.sessions.find(item => item.id === sessionId);
+}
+
+async function importTranscriptAuto(sessionId) {
+  const session = sessionById(sessionId);
+  if (!session) throw new Error("No session is available for transcript import");
+  await sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", {});
+}
+
+function openTranscriptDialog(sessionId) {
+  const session = sessionById(sessionId);
+  if (!session) {
+    state.actionMessage = { text: "Create a session before importing a transcript", error: true };
+    render();
+    return;
+  }
+  openFormDialog({
+    title: "Import Transcript",
+    submitLabel: "Import Transcript",
+    fields: `
+      <label>Session<input class="field mono" value="${esc(session.title || session.id)}" disabled /></label>
+      <label>Title<input class="field" name="title" value="Imported transcript" /></label>
+      <label>Summary<input class="field" name="summary" placeholder="What should the resume capsule remember?" /></label>
+      <label>Transcript text<textarea class="field" name="contentText" required rows="9" placeholder="Paste Codex transcript or the important conversation excerpt"></textarea></label>`,
+    onSubmit: values => runAction(() => sendJson(`/api/sessions/${session.id}/import-transcript`, "POST", {
+      contentText: values.get("contentText"),
+      title: values.get("title") || undefined,
+      summary: values.get("summary") || undefined
+    }), "Transcript imported")
+  });
 }
 
 function openProjectDialog() {
@@ -421,6 +461,15 @@ function handleAction(action) {
     }
     return runAction(() => continueSession(session?.id), "Session continued in Agent");
   }
+  if (action === "import-transcript") {
+    const session = state.data.sessions[0];
+    if (!session) {
+      state.actionMessage = { text: "Create a session before importing a transcript", error: true };
+      render();
+      return;
+    }
+    return openTranscriptDialog(session.id);
+  }
   if (action === "save-changes") {
     const settings = state.data.settings;
     if (!settings) return;
@@ -440,6 +489,8 @@ function render() {
   document.querySelectorAll("[data-nav]").forEach(btn => btn.addEventListener("click", () => { state.page = btn.dataset.nav; state.actionMessage = null; location.hash = state.page; render(); }));
   document.querySelectorAll("[data-action]").forEach(btn => btn.addEventListener("click", () => handleAction(btn.dataset.action)));
   document.querySelectorAll("[data-session-continue]").forEach(btn => btn.addEventListener("click", () => runAction(() => continueSession(btn.dataset.sessionContinue), "Session continued in Agent")));
+  document.querySelectorAll("[data-session-import-auto]").forEach(btn => btn.addEventListener("click", () => runAction(() => importTranscriptAuto(btn.dataset.sessionImportAuto), "Transcript auto-imported")));
+  document.querySelectorAll("[data-session-import-manual]").forEach(btn => btn.addEventListener("click", () => openTranscriptDialog(btn.dataset.sessionImportManual)));
 }
 
 window.addEventListener("hashchange", () => {
