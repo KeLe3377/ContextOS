@@ -116,6 +116,10 @@ function stripWrappingQuotes(value: FormDataEntryValue | null) {
   return String(value ?? "").trim().replace(/^["'](.+)["']$/, "$1");
 }
 
+function isArchived(item: AnyRecord) {
+  return item.status === "ARCHIVED" || Boolean(item.archivedAt);
+}
+
 function fmtDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "-";
 }
@@ -238,6 +242,8 @@ export function App() {
         failures.push(`${key}: ${result.error.message}`);
       }
     }
+    next.projects = next.projects.filter((project) => !isArchived(project));
+    next.sessions = next.sessions.filter((session) => !isArchived(session));
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
     setSessionDetails(await loadSessionDetails(next.sessions[0]));
@@ -274,9 +280,22 @@ export function App() {
     }
   }, [loadData]);
 
+  const projectById = useCallback((projectId: string) => data.projects.find((item) => item.id === projectId), [data.projects]);
   const sessionById = useCallback((sessionId: string) => data.sessions.find((item) => item.id === sessionId), [data.sessions]);
   const sourceById = useCallback((sourceId: string) => data.contextSources.find((item) => item.id === sourceId), [data.contextSources]);
   const ruleById = useCallback((ruleId: string) => data.rules.find((item) => item.id === ruleId), [data.rules]);
+
+  const archiveProject = useCallback(async (projectId: string) => {
+    const project = projectById(projectId);
+    if (!project) throw new Error("No project is available to archive");
+    await sendJson(`/api/projects/${project.id}/archive`, "POST", { expectedRevision: project.revision });
+  }, [projectById]);
+
+  const archiveSession = useCallback(async (sessionId: string) => {
+    const session = sessionById(sessionId);
+    if (!session) throw new Error("No session is available to archive");
+    await sendJson(`/api/sessions/${session.id}/archive`, "POST", { expectedRevision: session.revision });
+  }, [sessionById]);
 
   const continueSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
@@ -356,10 +375,10 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, continueSession, importTranscriptAuto, interruptSession, syncSource, verifyEvidence, validateRule, testRule, transitionRule, setModal, defaultAdapterId, adapterList, sessionDetails };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, interruptSession, syncSource, verifyEvidence, validateRule, testRule, transitionRule, setModal, defaultAdapterId, adapterList, sessionDetails };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
-      case "projects": return <ProjectsPage data={data} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
+      case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "sessions": return <SessionsPage {...props} header={<PageHeader pageDef={pages.sessions} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "review": return <ReviewPage data={data} header={<PageHeader pageDef={pages.review} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "decisions": return <DecisionsPage data={data} header={<PageHeader pageDef={pages.decisions} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -459,12 +478,13 @@ function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode
   );
 }
 
-function ProjectsPage({ data, header }: { data: WorkspaceData; header: ReactNode }) {
-  return <>{header}<Panel title="Project Register" iconName="folder_open"><Table headers={["Project", "Boundary", "Rules", "Health", "Activity"]} rows={data.projects.map((project) => [<><strong>{project.name}</strong><div className="muted">{project.description || "Agent workspace"}</div></>, <span className="mono">{project.rootPath}</span>, <Badge text={`${project.defaultRuleIds?.length || 0} defaults`} tone="blue" />, <Badge text={project.status} tone={toneForStatus(project.status)} />, `rev ${project.revision}`])} empty="No projects yet." /></Panel></>;
+function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
+  const { data, header, actionLoading, runAction, archiveProject } = props;
+  return <>{header}<Panel title="Project Register" iconName="folder_open"><Table headers={["Project", "Boundary", "Rules", "Health", "Activity", "Action"]} rows={data.projects.map((project: AnyRecord) => [<><strong>{project.name}</strong><div className="muted">{project.description || "Agent workspace"}</div></>, <span className="mono">{project.rootPath}</span>, <Badge text={`${project.defaultRuleIds?.length || 0} defaults`} tone="blue" />, <Badge text={project.status} tone={toneForStatus(project.status)} />, `rev ${project.revision}`, <button className="icon-btn table-action" title="Archive project" disabled={actionLoading} onClick={() => runAction(() => archiveProject(project.id), "Project archived")}>{icon("archive")}</button>])} empty="No projects yet." /></Panel></>;
 }
 
 function SessionsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, sessionDetails: details, actionLoading, runAction, continueSession, importTranscriptAuto, interruptSession, setModal } = props;
+  const { data, header, sessionDetails: details, actionLoading, runAction, archiveSession, continueSession, importTranscriptAuto, interruptSession, setModal } = props;
   const canContinue = (status: string) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
   const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `adapter ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `external ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} messages` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} turns` : null].filter(Boolean).join(" · ");
   return (
@@ -480,6 +500,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           <button className="icon-btn table-action" title="Interrupt managed run" disabled={session.status !== "RUNNING" || actionLoading} onClick={() => runAction(() => interruptSession(session.id), "Session interrupted")}>{icon("stop_circle")}</button>
           <button className="icon-btn table-action" title="Auto import transcript" disabled={actionLoading} onClick={() => runAction(() => importTranscriptAuto(session.id), "Transcript auto-imported")}>{icon("manage_search")}</button>
           <button className="icon-btn table-action" title="Paste transcript" disabled={actionLoading} onClick={() => setModal({ kind: "transcript", sessionId: session.id })}>{icon("edit_note")}</button>
+          <button className="icon-btn table-action" title="Archive session" disabled={session.status === "RUNNING" || actionLoading} onClick={() => runAction(() => archiveSession(session.id), "Session archived")}>{icon("archive")}</button>
         </div>
       ])} empty="No sessions yet." /></Panel>
       <Panel title="Latest Session Context" iconName="inventory_2" meta={details ? details.sessionId : "No session"}>
