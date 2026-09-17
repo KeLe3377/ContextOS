@@ -276,12 +276,14 @@ export function App() {
   const [actionMessage, setActionMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [data, setData] = useState<WorkspaceData>(() => emptyData());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedContextSourceId, setSelectedContextSourceId] = useState<string | null>(null);
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string }>({ kind: null });
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [contextItemDetail, setContextItemDetail] = useState<{ item: AnyRecord; versions: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const preferredSessionIdRef = useRef<string | null>(null);
+  const preferredContextSourceIdRef = useRef<string | null>(null);
 
   const availableAdapters = useCallback(() => data.adapters.filter((adapter) => adapter.available), [data.adapters]);
   const defaultAdapterId = useCallback(() => {
@@ -337,11 +339,16 @@ export function App() {
     }
     next.projects = next.projects.filter((project) => !isArchived(project));
     next.sessions = next.sessions.filter((session) => !isArchived(session));
+    next.contextSources = next.contextSources.filter((source) => !isArchived(source));
+    next.contextItems = next.contextItems.filter((item) => !isArchived(item));
     const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
+    const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
     preferredSessionIdRef.current = selectedSession?.id || null;
+    preferredContextSourceIdRef.current = selectedContextSource?.id || null;
     setSelectedSessionId(selectedSession?.id || null);
+    setSelectedContextSourceId(selectedContextSource?.id || null);
     setSessionDetailsLoading(Boolean(selectedSession));
     setSessionDetails(await loadSessionDetails(selectedSession));
     setSessionDetailsLoading(false);
@@ -395,6 +402,11 @@ export function App() {
     setSessionDetails(await loadSessionDetails(session));
     setSessionDetailsLoading(false);
   }, [loadSessionDetails, sessionById]);
+
+  const selectContextSource = useCallback((sourceId: string) => {
+    preferredContextSourceIdRef.current = sourceId;
+    setSelectedContextSourceId(sourceId);
+  }, []);
 
   const archiveProject = useCallback(async (projectId: string) => {
     const project = projectById(projectId);
@@ -602,7 +614,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -835,12 +847,47 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function ContextPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail } = props;
+  const { data, header, selectedContextSourceId, selectContextSource, actionLoading, runAction, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail } = props;
+  const selectedSource = data.contextSources.find((source: AnyRecord) => source.id === selectedContextSourceId) || data.contextSources[0];
+  const sourceSnapshots = selectedSource ? data.evidenceSnapshots.filter((snapshot: AnyRecord) => snapshot.sourceId === selectedSource.id) : [];
+  const sourceSnapshotIds = new Set(sourceSnapshots.map((snapshot: AnyRecord) => snapshot.id));
+  const sourceItems = data.contextItems.filter((item: AnyRecord) => item.sourceSnapshotId && sourceSnapshotIds.has(item.sourceSnapshotId));
+  const latestSnapshot = sourceSnapshots.find((snapshot: AnyRecord) => snapshot.id === selectedSource?.lastSnapshotId) || sourceSnapshots[0];
   return (
     <>{header}<div className="grid cols-12"><div className="span-8 stack">
-      <Panel title="Sources" iconName="database"><Table headers={["Source", "Type", "Last sync", "Snapshots", "State", "Action"]} rows={data.contextSources.map((source: AnyRecord) => [<><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="Sync source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "Context source synced")}>{icon("sync")}</button><button className="icon-btn table-action" title="Pause source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "pause"), "Context source paused")}>{icon("pause_circle")}</button><button className="icon-btn table-action" title="Resume source" disabled={source.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "resume"), "Context source resumed")}>{icon("play_arrow")}</button><button className="icon-btn table-action" title="Archive source" disabled={source.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "archive"), "Context source archived")}>{icon("archive")}</button></div>])} empty="No context sources yet." /></Panel>
+      <Panel title="Sources" iconName="database"><Table headers={["Source", "Type", "Last sync", "Snapshots", "State", "Action"]} rows={data.contextSources.map((source: AnyRecord) => [<div className={`session-cell ${source.id === selectedSource?.id ? "selected" : ""}`}><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></div>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View source detail" disabled={actionLoading} onClick={() => selectContextSource(source.id)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Sync source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "Context source synced")}>{icon("sync")}</button><button className="icon-btn table-action" title="Pause source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "pause"), "Context source paused")}>{icon("pause_circle")}</button><button className="icon-btn table-action" title="Resume source" disabled={source.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "resume"), "Context source resumed")}>{icon("play_arrow")}</button><button className="icon-btn table-action" title="Archive source" disabled={source.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "archive"), "Context source archived")}>{icon("archive")}</button></div>])} empty="No context sources yet." /></Panel>
       <Panel title="Evidence Snapshots" iconName="fact_check"><Table headers={["Evidence", "Type", "Captured", "Storage", "Action"]} rows={data.evidenceSnapshots.slice(0, 12).map((snapshot: AnyRecord) => [<><strong>{snapshot.title}</strong><div className="muted mono">{snapshot.contentHash || "-"}</div></>, <Badge text={snapshot.evidenceType} tone="blue" />, fmtDate(snapshot.capturedAt), <span className="mono">{snapshot.storageRef || "-"}</span>, <div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${snapshot.id}\n${snapshot.storageRef || ""}\n${snapshot.contentHash}`)}>{icon("content_copy")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div>])} empty="No evidence snapshots yet." /></Panel>
-    </div><div className="span-4 stack"><Panel title="Integrity Boundary" iconName="verified"><div className="metric-row"><span>Evidence snapshots</span><strong>{data.evidenceSnapshots.length}</strong></div><div className="metric-row"><span>Derived context items</span><strong>{data.contextItems.length}</strong></div><div className="metric-row"><span>Stored evidence</span><strong>{data.evidenceSnapshots.filter((item: AnyRecord) => item.storageRef).length}</strong></div></Panel><Panel title="Context Items" iconName="inventory_2"><Table headers={["Item", "State", "Action"]} rows={data.contextItems.slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View versions" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Activate item" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "Context item activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="Mark stale" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "Context item marked stale")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="Archive item" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "Context item archived")}>{icon("archive")}</button></div>])} empty="No context items yet." /></Panel></div></div></>
+    </div><div className="span-4 stack">
+      <Panel title="Selected Source" iconName="database" meta={selectedSource?.id || "No source"}>
+        {selectedSource ? <div className="session-detail">
+          <div className="detail-grid source-detail-grid">
+            <div><span className="mono muted">STATUS</span><strong>{selectedSource.status}</strong></div>
+            <div><span className="mono muted">TYPE</span><strong>{selectedSource.sourceType}</strong></div>
+            <div><span className="mono muted">REVISION</span><strong>{selectedSource.revision}</strong></div>
+            <div className="detail-wide"><span className="mono muted">NAME</span><strong>{selectedSource.name}</strong></div>
+            <div className="detail-wide"><span className="mono muted">LOCATOR</span><strong className="mono">{selectedSource.locator}</strong></div>
+            <div className="detail-wide"><span className="mono muted">DESCRIPTION</span><strong>{selectedSource.description || "-"}</strong></div>
+            <div className="detail-wide detail-with-action"><div><span className="mono muted">LAST SNAPSHOT</span><strong className="mono">{selectedSource.lastSnapshotId || "No snapshot"}</strong><div className="muted mono">{selectedSource.lastCheckedAt ? `checked ${fmtDate(selectedSource.lastCheckedAt)}` : "Never checked"}</div></div><button className="icon-btn table-action" title="Open last snapshot" disabled={!latestSnapshot || actionLoading} onClick={() => latestSnapshot ? void openEvidenceDetail(latestSnapshot) : undefined}>{icon("visibility")}</button></div>
+          </div>
+          <div className="row-actions">
+            <button className="btn primary" disabled={selectedSource.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(selectedSource.id), "Context source synced")}>{icon("sync")}<span>Sync</span></button>
+            <button className="btn" disabled={selectedSource.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(selectedSource.id, "pause"), "Context source paused")}>{icon("pause_circle")}<span>Pause</span></button>
+            <button className="btn" disabled={selectedSource.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(selectedSource.id, "resume"), "Context source resumed")}>{icon("play_arrow")}<span>Resume</span></button>
+            <button className="btn" disabled={selectedSource.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(selectedSource.id, "archive"), "Context source archived")}>{icon("archive")}<span>Archive</span></button>
+          </div>
+          <pre className="evidence-metadata">{prettyJson(selectedSource.metadata)}</pre>
+        </div> : <EmptyNote>Select or create a context source to inspect provenance.</EmptyNote>}
+      </Panel>
+      <Panel title="Source Provenance" iconName="account_tree" meta={selectedSource ? `${sourceSnapshots.length} snapshots` : ""}>
+        {selectedSource ? <div>
+          <div className="metric-row"><span>Evidence snapshots</span><strong>{sourceSnapshots.length}</strong></div>
+          <div className="metric-row"><span>Derived context items</span><strong>{sourceItems.length}</strong></div>
+          <div className="metric-row"><span>Latest snapshot</span><strong className="mono">{latestSnapshot?.id || "-"}</strong></div>
+          {sourceSnapshots.length ? <div className="stack compact source-linked-list">{sourceSnapshots.slice(0, 5).map((snapshot: AnyRecord) => <div className="metric-row evidence-row" key={snapshot.id}><div className="evidence-row-main"><div className="title-sm">{snapshot.title}</div><div className="muted mono">{fmtDate(snapshot.capturedAt)} · {snapshot.contentHash}</div></div><div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div></div>)}</div> : <EmptyNote>No snapshots captured for this source yet.</EmptyNote>}
+        </div> : <EmptyNote>No source selected.</EmptyNote>}
+      </Panel>
+      <Panel title="Derived Context Items" iconName="inventory_2" meta={selectedSource ? `${sourceItems.length} linked` : ""}><Table headers={["Item", "State", "Action"]} rows={(selectedSource ? sourceItems : data.contextItems).slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence} · {item.sourceSnapshotId || "manual"}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View versions" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Activate item" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "Context item activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="Mark stale" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "Context item marked stale")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="Archive item" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "Context item archived")}>{icon("archive")}</button></div>])} empty={selectedSource ? "No context items derive from this source yet." : "No context items yet."} /></Panel>
+    </div></div></>
   );
 }
 

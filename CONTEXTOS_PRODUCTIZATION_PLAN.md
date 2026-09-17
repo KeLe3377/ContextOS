@@ -355,4 +355,11 @@ Completed follow-up on 2026-09-17:
 - Added explicit Session transcript sync: `POST /api/sessions/:id/sync-transcript`, Sessions page action, detail/table sync buttons, and sync freshness metadata.
 - Verified with `npm run build:all`, targeted Session tests, `npm test`, and `git diff --check`.
 
+Phase 3 first increment completed on 2026-09-17:
+
+- Added selected Context Source workspace on the Context page.
+- Linked Sources to latest Evidence, source snapshot history, and derived Context Items.
+- Added source-level Sync/Pause/Resume/Archive and evidence open/verify actions inside the selected-source workflow.
+- Verified with `npm run build:all`, `npm test`, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

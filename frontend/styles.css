@@ -369,6 +369,17 @@ tbody tr:hover { background: #fbfdff; }
   padding: 14px;
 }
 .evidence-section-title { margin-bottom: 8px; }
+.source-detail-grid { grid-template-columns: 1fr; }
+.source-detail-grid > div,
+.source-detail-grid > div:nth-child(3) {
+  border-right: 0;
+  border-top: 1px solid var(--border);
+}
+.source-detail-grid > div:first-child { border-top: 0; }
+.source-linked-list {
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
 
 dialog {
   width: min(460px, calc(100vw - 32px));
