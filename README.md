@@ -164,11 +164,11 @@ npm run dev
 4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。
 5. 回到 Sessions 页面刷新，可以在 Latest Session Context 里看到 Context Package ID 和 `ContextOS handoff prompt` evidence。
 
-当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定 Codex session ID，后续只读取同一会话。Codex transcript 解析会保留 user/assistant 正文，并在 Evidence metadata 中记录 role counts、turn count 和消息序号范围。受管 Codex 进程运行期间会 best-effort 轮询同一 transcript，内容变化时导入新的 Evidence；进程退出后仍会 final reconcile 兜底。
+当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录或 Claude Code projects 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定外部 agent session ID，后续只读取同一会话。Codex / Claude Code transcript 解析会保留 user/assistant 正文，并在 Evidence metadata 中记录 role counts、turn count 和消息序号范围。受管 agent 进程运行期间会 best-effort 轮询同一 transcript，内容变化时导入新的 Evidence；进程退出后仍会 final reconcile 兜底。
 
 运行中的 Codex Session 可通过 `GET /api/sessions/:id/runtime-status` 查询当前 Run 和受管进程状态，并通过 `POST /api/sessions/:id/interrupt`（请求体包含 `expectedRevision`）终止进程树。中断后 Session 进入 `PAUSED`，Job 和 Run 记录为 `CANCELED`。
 
-`Continue in Agent` 会根据 Session 是否已绑定 `externalSessionId` 自动选择行为：未绑定时把 ContextOS handoff prompt 作为 Codex 初始 prompt 启动新会话，并在进程退出后用唯一 Session marker 自动绑定产生的 Codex UUID；已绑定时使用明确 UUID 执行 `codex resume`，校验该会话属于当前 Project，并为每次恢复创建新的 Job 和 Run。launch/resume 退出后会 best-effort 自动回收同一 Codex transcript：内容变化时写入新的 Evidence，内容未变时复用已有 Evidence；回收失败不会覆盖已经落库的 Run/Job 完成或失败状态。
+`Continue in Agent` 会根据 Session 是否已绑定 `externalSessionId` 自动选择行为：未绑定时把 ContextOS handoff prompt 作为初始 prompt 启动新会话，并在进程退出后用唯一 Session marker best-effort 绑定产生的外部 session ID；已绑定时使用明确 ID 执行 adapter resume，校验该会话属于当前 Project，并为每次恢复创建新的 Job 和 Run。launch/resume 退出后会 best-effort 自动回收同一 transcript：内容变化时写入新的 Evidence，内容未变时复用已有 Evidence；回收失败不会覆盖已经落库的 Run/Job 完成或失败状态。
 
 ## Agent Adapters
 

@@ -291,7 +291,7 @@ frontend/styles.css
 自动发现与导入 first pass 已完成：
 
 - `POST /api/sessions/:id/import-transcript/auto`。
-- 从 Codex JSONL `session_meta` 读取 session ID 与 cwd，按 Project root 隔离并选择最近匹配会话。
+- 从 Codex JSONL `session_meta` 或 Claude Code JSONL `sessionId` / `cwd` 读取外部 session 与 Project root，按 Session 的 adapter 隔离并选择最近匹配会话。
 - 仅抽取 user/assistant 文本，排除 developer、推理密文、工具调用和工具输出。
 - 记录 role counts、turn count、message ordinal 范围，供后续 UI 和 resume 逻辑使用。
 - Session 绑定 external session ID；重复导入未变化内容时复用 Evidence。

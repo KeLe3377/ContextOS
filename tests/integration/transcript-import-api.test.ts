@@ -9,6 +9,9 @@ import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 const originalCommand = process.env.CONTEXTOS_CODEX_COMMAND;
 const originalArgs = process.env.CONTEXTOS_CODEX_ARGS;
 const originalSessionsDir = process.env.CONTEXTOS_CODEX_SESSIONS_DIR;
+const originalClaudeCommand = process.env.CONTEXTOS_CLAUDE_COMMAND;
+const originalClaudeArgs = process.env.CONTEXTOS_CLAUDE_ARGS;
+const originalClaudeProjectsDir = process.env.CONTEXTOS_CLAUDE_PROJECTS_DIR;
 let cleanupTasks: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
@@ -16,6 +19,9 @@ afterEach(async () => {
   setEnv("CONTEXTOS_CODEX_COMMAND", originalCommand);
   setEnv("CONTEXTOS_CODEX_ARGS", originalArgs);
   setEnv("CONTEXTOS_CODEX_SESSIONS_DIR", originalSessionsDir);
+  setEnv("CONTEXTOS_CLAUDE_COMMAND", originalClaudeCommand);
+  setEnv("CONTEXTOS_CLAUDE_ARGS", originalClaudeArgs);
+  setEnv("CONTEXTOS_CLAUDE_PROJECTS_DIR", originalClaudeProjectsDir);
 });
 
 describe("transcript import API", () => {
@@ -223,6 +229,75 @@ describe("transcript import API", () => {
     } finally {
       db.close();
     }
+  });
+
+  test("auto-discovers and binds a Claude Code transcript for the Project", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-claude-auto-transcript-"));
+    const projectRoot = join(tempDir, "workspace");
+    const projectsDir = join(tempDir, "claude-projects");
+    await Promise.all([mkdir(projectRoot), mkdir(projectsDir, { recursive: true })]);
+    const externalSessionId = "claude-auto-session";
+    const transcriptPath = join(projectsDir, `${externalSessionId}.jsonl`);
+    const rows = [
+      { sessionId: externalSessionId, cwd: projectRoot, type: "summary", summary: "ignored" },
+      { sessionId: externalSessionId, cwd: projectRoot, type: "user", message: { role: "user", content: "preserve the Claude decision" } },
+      { sessionId: externalSessionId, cwd: projectRoot, type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "the Claude decision is preserved" }] } }
+    ];
+    await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+    process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+    process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["--version"]);
+    process.env.CONTEXTOS_CODEX_SESSIONS_DIR = join(tempDir, "codex-sessions");
+    process.env.CONTEXTOS_CLAUDE_COMMAND = process.execPath;
+    process.env.CONTEXTOS_CLAUDE_ARGS = JSON.stringify(["--version"]);
+    process.env.CONTEXTOS_CLAUDE_PROJECTS_DIR = projectsDir;
+    const server = await createDaemonServer({
+      config: { host: "127.0.0.1", port: 0, dataDir: tempDir, databaseFile: join(tempDir, "contextos.sqlite") }
+    });
+    cleanupTasks.push(async () => {
+      await server.close();
+      await rm(tempDir, { recursive: true, force: true });
+    });
+    const projectResponse = await server.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Claude auto transcript", rootPath: projectRoot, agentAdapterIds: ["codex", "claude-code"] }
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const sessionResponse = await server.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId: projectResponse.json().id, agentAdapterId: "claude-code", title: "Claude auto import" }
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json();
+
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode, imported.body).toBe(201);
+    expect(imported.json().adapter).toMatchObject({
+      id: "claude-code",
+      externalSessionId,
+      parserVersion: "claude-code-jsonl.v1",
+      messageCount: 2,
+      roleCounts: { user: 1, assistant: 1 },
+      turnCount: 1,
+      messageOrdinalStart: 1,
+      messageOrdinalEnd: 2,
+      truncated: false,
+      reused: false
+    });
+    expect(imported.json().evidence).toMatchObject({
+      title: "Imported Claude Code transcript",
+      metadata: expect.objectContaining({
+        adapterId: "claude-code",
+        externalSessionId,
+        parserVersion: "claude-code-jsonl.v1"
+      })
+    });
+    await expect(readFile(join(tempDir, imported.json().evidence.storageRef), "utf8")).resolves.toBe(
+      "USER:\npreserve the Claude decision\n\nASSISTANT:\nthe Claude decision is preserved"
+    );
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.json().externalSessionId).toBe(externalSessionId);
   });
 });
 
