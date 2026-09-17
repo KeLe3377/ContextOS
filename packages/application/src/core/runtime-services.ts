@@ -65,12 +65,13 @@ export class ContinueSessionService {
 
   continue(session: SessionDto): SessionContinueRuntime {
     const rootPath = this.runtime.getProjectRoot(session.projectId);
-    const contextPackage = this.runtime.createContextPackageForSession({ projectId: session.projectId, sessionId: session.id, intent: session.intent }, nowMs());
-    const handoffPrompt = formatHandoffPrompt({ session, rootPath, contextPackage });
-    this.recordHandoffEvidence({ session, projectId: session.projectId, contextPackageId: contextPackage.id, contentText: handoffPrompt });
     const agentAdapter = this.adapters.getOrThrow(session.agentAdapterId);
     const adapter = agentAdapter.discover();
-    const resumePrompt = formatResumePrompt({ session, contextPackage });
+    const adapterName = agentAdapter.displayName;
+    const contextPackage = this.runtime.createContextPackageForSession({ projectId: session.projectId, sessionId: session.id, intent: session.intent }, nowMs());
+    const handoffPrompt = formatHandoffPrompt({ session, rootPath, contextPackage, adapterName });
+    this.recordHandoffEvidence({ session, projectId: session.projectId, contextPackageId: contextPackage.id, contentText: handoffPrompt });
+    const resumePrompt = formatResumePrompt({ session, contextPackage, adapterName });
     const launch = session.externalSessionId
       ? agentAdapter.buildResumeInfo({ cwd: rootPath, externalSessionId: session.externalSessionId, prompt: resumePrompt })
       : agentAdapter.buildLaunchInfo({ cwd: rootPath, prompt: handoffPrompt });
@@ -88,7 +89,7 @@ export class ContinueSessionService {
         jobId: created.job.id,
         runId: created.run.id,
         failureCode: "ADAPTER_UNAVAILABLE",
-        failureMessage: adapter.error ?? "Codex adapter is unavailable"
+        failureMessage: adapter.error ?? `${adapterName} adapter is unavailable`
       }, nowMs());
       return { ...failed, adapter, launch };
     }
@@ -106,7 +107,7 @@ export class ContinueSessionService {
         jobId: created.job.id,
         runId: created.run.id,
         failureCode: continueFailureCode(session, error),
-        failureMessage: error instanceof Error ? error.message : `Codex ${launch.operation} failed`
+        failureMessage: error instanceof Error ? error.message : `${adapterName} ${launch.operation} failed`
       }, nowMs());
       return { ...failed, adapter, launch };
     }
@@ -187,8 +188,8 @@ export class ContinueSessionService {
       ? { evidence: existing, resumeCapsule: this.runtime.bindExternalSession(session.id, imported.externalSessionId, nowMs()) }
       : this.persistTranscript(session, {
           contentText: imported.contentText,
-          title: input.title ?? "Imported Codex transcript",
-          summary: input.summary ?? `Imported ${imported.messageCount} Codex transcript messages.`
+          title: input.title ?? `Imported ${adapter.displayName} transcript`,
+          summary: input.summary ?? `Imported ${imported.messageCount} ${adapter.displayName} transcript messages.`
         }, {
           externalSessionId: imported.externalSessionId,
           metadata: {
@@ -239,7 +240,7 @@ export class ContinueSessionService {
         id: evidenceId,
         projectId: session.projectId,
         sessionId: session.id,
-        title: input.title ?? "Imported Codex transcript",
+        title: input.title ?? "Imported transcript",
         summary: input.summary ?? "Imported transcript captured.",
         contentHash: stored.contentHash,
         storageRef: stored.storageRef,
@@ -263,7 +264,8 @@ export class ContinueSessionService {
       if (!this.runtime.isSessionRunRunning(input.runId)) return;
       const evidenceIds = this.recordProcessOutputEvidence(input);
       const status: SessionStatus = input.exit.code === 0 ? "COMPLETED" : "FAILED";
-      let summary = "Codex run completed.";
+      const adapterName = this.adapterDisplayName(input.session);
+      let summary = `${adapterName} run completed.`;
       let nextAction: string | null = null;
       if (input.exit.code === 0) {
         this.runtime.markContinueSucceeded({ jobId: input.jobId, runId: input.runId, exitCode: input.exit.code }, nowMs());
@@ -272,8 +274,8 @@ export class ContinueSessionService {
         return;
       }
       const failureMessage = input.exit.signal
-        ? `Codex process terminated with signal ${input.exit.signal}`
-        : `Codex process exited with code ${input.exit.code ?? "unknown"}`;
+        ? `${adapterName} process terminated with signal ${input.exit.signal}`
+        : `${adapterName} process exited with code ${input.exit.code ?? "unknown"}`;
       summary = failureMessage;
       nextAction = "Review failed run evidence";
       this.runtime.markContinueExitedFailed({ jobId: input.jobId, runId: input.runId, exitCode: input.exit.code, signal: input.exit.signal, failureMessage }, nowMs());
@@ -310,8 +312,8 @@ export class ContinueSessionService {
       this.importAdapterTranscriptInternal(session, {
         externalSessionId: session.externalSessionId ?? undefined,
         correlationText: session.externalSessionId ? undefined : launchCorrelationText(session),
-        title: "Codex transcript during run",
-        summary: "Captured Codex transcript while managed run is running."
+        title: `${this.adapterDisplayName(session)} transcript during run`,
+        summary: `Captured ${this.adapterDisplayName(session)} transcript while managed run is running.`
       });
     } catch {
       // During-run bridge is opportunistic; process lifecycle and final reconciliation remain authoritative.
@@ -331,10 +333,10 @@ export class ContinueSessionService {
       const imported = this.importAdapterTranscriptInternal(session, {
         externalSessionId: session.externalSessionId ?? undefined,
         correlationText,
-        title: session.externalSessionId ? "Codex transcript after run" : "Codex transcript after launch",
+        title: session.externalSessionId ? `${this.adapterDisplayName(session)} transcript after run` : `${this.adapterDisplayName(session)} transcript after launch`,
         summary: session.externalSessionId
-          ? "Captured Codex transcript after managed run exit."
-          : "Captured and bound Codex transcript after managed launch exit."
+          ? `Captured ${this.adapterDisplayName(session)} transcript after managed run exit.`
+          : `Captured and bound ${this.adapterDisplayName(session)} transcript after managed launch exit.`
       });
       this.writeResumeCapsule(
         session,
@@ -372,7 +374,7 @@ export class ContinueSessionService {
         projectId: input.session.projectId,
         sessionId: input.session.id,
         runId: input.runId,
-        title: "Codex process output",
+        title: `${this.adapterDisplayName(input.session)} process output`,
         contentHash: stored.contentHash,
         storageRef: stored.storageRef,
         sizeBytes: stored.sizeBytes,
@@ -400,8 +402,12 @@ export class ContinueSessionService {
         sizeBytes: stored.sizeBytes
       }, nowMs());
     } catch {
-      // Handoff evidence helps the user orient Codex, but launch lifecycle must remain primary.
+      // Handoff evidence helps the user orient the agent, but launch lifecycle must remain primary.
     }
+  }
+
+  private adapterDisplayName(session: SessionDto): string {
+    return this.adapters.get(session.agentAdapterId)?.displayName ?? "Agent";
   }
 
   private writeResumeCapsule(session: SessionDto, runId: string, status: SessionStatus, evidenceSnapshotIds: string[], summary: string, nextAction: string | null): void {
@@ -431,7 +437,7 @@ function formatProcessOutput(exit: ProcessExitInfo): string {
   return `${parts.join("\n")}\n`;
 }
 
-function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; contextPackage: ContextPackageDto }): string {
+function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; contextPackage: ContextPackageDto; adapterName: string }): string {
   const contextItems = input.contextPackage.contextItems.length
     ? input.contextPackage.contextItems.map((item) => `- ${item.title} (${item.selectionReason}, rev ${item.revision ?? "n/a"})`).join("\n")
     : "- No active context items selected.";
@@ -440,13 +446,13 @@ function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; con
     : "- No source evidence snapshots selected.";
   const sessionBoundary = input.session.externalSessionId
     ? [
-        "You were resumed from ContextOS using an existing Codex conversation.",
-        `Codex Session ID: ${input.session.externalSessionId}`,
+        `You were resumed from ContextOS using an existing ${input.adapterName} conversation.`,
+        `${input.adapterName} Session ID: ${input.session.externalSessionId}`,
         "This handoff adds the latest governed ContextOS context to that conversation."
       ]
     : [
         "You were launched from ContextOS for a managed agent session.",
-        "No existing Codex conversation is bound yet; use this handoff as the session boundary."
+        `No existing ${input.adapterName} conversation is bound yet; use this handoff as the session boundary.`
       ];
 
   return [
@@ -479,12 +485,12 @@ function launchCorrelationText(session: SessionDto): string {
   return `Session ID: ${session.id}`;
 }
 
-function formatResumePrompt(input: { session: SessionDto; contextPackage: ContextPackageDto }): string {
+function formatResumePrompt(input: { session: SessionDto; contextPackage: ContextPackageDto; adapterName: string }): string {
   const contextItems = input.contextPackage.contextItems
     .map((item) => `- ${item.title} (${item.selectionReason}, rev ${item.revision ?? "n/a"})`)
     .join("\n") || "- No active context items.";
   return [
-    "Continue this ContextOS session using the existing Codex conversation.",
+    `Continue this ContextOS session using the existing ${input.adapterName} conversation.`,
     `Intent: ${input.session.intent ?? "Continue the session."}`,
     `Context Package ID: ${input.contextPackage.id}`,
     "Current active context:",

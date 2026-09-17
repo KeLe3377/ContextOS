@@ -63,6 +63,45 @@ describe("runtime APIs", () => {
     expect(tempDir).toBeTruthy();
   });
 
+  test("uses the selected adapter name in runtime evidence and resume summaries", async () => {
+    const { server, tempDir } = await createTestServerWithAdapters((tempDir) => [
+      new CodexAdapter(process.execPath, ["-e", ""], process.platform, join(tempDir, "codex-sessions")),
+      new ClaudeCodeAdapter(process.execPath, ["-e", "console.log('claude-output')", "--"], process.platform, join(tempDir, "claude-projects"))
+    ]);
+    const projectResponse = await server.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Runtime Claude", rootPath: "D:/project/ContextOS", agentAdapterIds: ["codex", "claude-code"] }
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const sessionResponse = await server.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId: projectResponse.json().id, agentAdapterId: "claude-code", title: "Claude runtime", intent: "Exercise Claude lifecycle" }
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json();
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json().adapter.id).toBe("claude-code");
+
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    expect(evidence.statusCode).toBe(200);
+    expect(evidence.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ evidenceType: "AGENT_OUTPUT", title: "Claude Code process output" })
+    ]));
+    const resume = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/resume-capsule` });
+    expect(resume.statusCode).toBe(200);
+    expect(resume.json()).toMatchObject({ status: "COMPLETED", summary: "Claude Code run completed." });
+    expect(tempDir).toBeTruthy();
+  });
+
   test("marks a short continue run completed after the process exits successfully", async () => {
     const { server } = await createTestServer(["-e", "console.log('phase-e-output')"]);
     const session = await createSession(server);

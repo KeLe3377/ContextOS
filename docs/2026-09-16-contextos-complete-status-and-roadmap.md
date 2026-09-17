@@ -256,6 +256,7 @@ frontend/styles.css
 - Codex transcript 文件自动发现与 adapter `importTranscript` first pass。
 - Codex transcript role/turn 解析 first pass：保留 user/assistant 正文，并输出 role counts、turn count、消息序号范围到 adapter response 和 Evidence metadata。
 - Claude Code transcript 文件自动发现与 adapter `importTranscript` first pass：按 Project root 隔离，解析 `sessionId` / `cwd` 和 user/assistant 正文。
+- runtime 生成的 handoff prompt、process output evidence、transcript evidence 标题和 Resume Capsule summary 已按 Session 选择的 adapter 使用 Codex 或 Claude Code 名称。
 - 共享 adapter contract test harness，覆盖可用/不可用 discovery、launch/resume metadata、transcript normalization、stdout/stderr/exit、inspect 和 interrupt。
 - 首次 Codex launch 会把 ContextOS handoff prompt 作为初始 prompt，并在退出后用唯一 Session marker 自动绑定产生的 Codex UUID。
 - 已绑定 Session 的 Codex resume：Project 归属校验、增量 Context Package prompt、每次恢复独立 Job/Run、明确失败码且不静默降级为新会话。

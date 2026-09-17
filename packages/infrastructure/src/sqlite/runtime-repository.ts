@@ -152,7 +152,7 @@ export class SqliteRuntimeRepository {
         .run(jobId, input.sessionId, JSON.stringify(payload), now, now, now);
       this.db.prepare("INSERT INTO session_runs (id, session_id, job_id, status, adapter_version, created_at, updated_at, revision) VALUES (?, ?, ?, 'CREATED', ?, ?, ?, 1)")
         .run(runId, input.sessionId, jobId, input.adapterVersion, now, now);
-      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_QUEUED', 'Queued Codex continue session job', ?, ?)")
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_QUEUED', 'Queued agent continue session job', ?, ?)")
         .run(newId("act"), input.projectId, input.sessionId, JSON.stringify({ jobId, runId, adapterId: input.adapterId }), now);
       this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CONTINUE_QUEUED', ?, ?)")
         .run(newId("audit"), input.projectId, input.sessionId, JSON.stringify({ jobId, runId }), now);
@@ -248,7 +248,7 @@ export class SqliteRuntimeRepository {
       this.db.prepare("UPDATE job_attempts SET status = 'CANCELED', ended_at = ?, failure_code = 'INTERRUPTED', failure_message = 'Interrupted by user' WHERE job_id = ? AND status = 'STARTED'")
         .run(now, input.jobId);
       const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode: "INTERRUPTED" });
-      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_INTERRUPTED', 'Interrupted Codex continue session', ?, ?)")
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_INTERRUPTED', 'Interrupted agent continue session', ?, ?)")
         .run(newId("act"), session.project_id, input.sessionId, metadata, now);
       this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'SESSION', ?, 'CONTINUE_INTERRUPTED', ?, ?, ?)")
         .run(newId("audit"), session.project_id, input.sessionId, JSON.stringify({ status: session.status, revision: session.revision }), JSON.stringify({ status: "PAUSED", revision: session.revision + 1, jobId: input.jobId, runId: input.runId }), now);
@@ -369,7 +369,7 @@ export class SqliteRuntimeRepository {
       externalSessionId: input.externalSessionId,
       failureMessage: input.message
     });
-    this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'TRANSCRIPT_RECONCILE_FAILED', 'Failed to reconcile Codex transcript after run exit', ?, ?)")
+    this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'TRANSCRIPT_RECONCILE_FAILED', 'Failed to reconcile agent transcript after run exit', ?, ?)")
       .run(newId("act"), input.projectId, input.sessionId, metadata, now);
     this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'TRANSCRIPT_RECONCILE_FAILED', ?, ?)")
       .run(newId("audit"), input.projectId, input.sessionId, metadata, now);

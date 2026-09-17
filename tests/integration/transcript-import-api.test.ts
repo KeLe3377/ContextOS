@@ -95,7 +95,7 @@ describe("transcript import API", () => {
     });
     expect(response.statusCode).toBe(201);
     expect(response.json()).toMatchObject({
-      evidence: { title: "Imported Codex transcript" },
+      evidence: { title: "Imported transcript" },
       resumeCapsule: { status: "CREATED", summary: "Imported transcript captured." }
     });
 
