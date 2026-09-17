@@ -15,6 +15,23 @@ $frontendUrl = "http://${HostName}:${Port}/"
 
 Set-Location $repoRoot
 
+try {
+  $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 2
+  if ($health.processState -eq "ready") {
+    Write-Host ""
+    Write-Host "ContextOS is already running"
+    Write-Host "Daemon:   $healthUrl"
+    Write-Host "Frontend: $frontendUrl"
+    Write-Host ""
+    if (-not $NoBrowser) {
+      Start-Process $frontendUrl
+    }
+    exit 0
+  }
+} catch {
+  # No healthy daemon is listening; continue with a normal local startup.
+}
+
 if (-not (Test-Path (Join-Path $repoRoot "node_modules"))) {
   Write-Host "Installing dependencies..."
   npm install

@@ -17,13 +17,27 @@ npm run start:local
 http://127.0.0.1:4721/
 ```
 
-如果浏览器提示 `ERR_CONNECTION_REFUSED`，说明 daemon 没启动。先看启动窗口报错。最常见是 `.contextos\.daemon.lock` 残留：
+如果浏览器提示 `ERR_CONNECTION_REFUSED`，说明 daemon 没启动。先看启动窗口报错。新版启动时会自动清理 pid 已不存在的 `.contextos\.daemon.lock` 残留。
+
+如果仍然提示 data directory 正在使用，先确认是不是已有 daemon 在运行：
+
+```powershell
+curl.exe http://127.0.0.1:4721/api/health
+```
+
+如果健康检查能返回 JSON，直接打开前端即可：
+
+```text
+http://127.0.0.1:4721/
+```
+
+如果健康检查失败，但仍然报锁冲突，可以查看锁 owner：
 
 ```powershell
 Get-Content -Raw ".contextos\.daemon.lock\owner.json"
 ```
 
-如果里面的 pid 已经不存在，可以删除锁再启动：
+如果里面的 pid 已经不存在，可以删除锁再启动；正常情况下这一步已经由启动过程自动完成：
 
 ```powershell
 Remove-Item -Recurse -Force ".contextos\.daemon.lock"
@@ -394,7 +408,15 @@ curl.exe http://127.0.0.1:4721/api/health
 
 ### 提示 data directory is already in use
 
-通常是残留锁。
+新版会自动清理 pid 已不存在的残留锁。先检查是否已有 daemon 正在运行：
+
+```powershell
+curl.exe http://127.0.0.1:4721/api/health
+```
+
+如果能返回 JSON，说明服务已经可用，不需要再启动第二个 daemon。
+
+如果健康检查失败，再查看锁 owner：
 
 ```powershell
 Get-Content -Raw ".contextos\.daemon.lock\owner.json"

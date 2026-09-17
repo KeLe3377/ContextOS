@@ -111,7 +111,9 @@ describe("CodexAdapter command resolution", () => {
       const supervisor = new ProcessSupervisor();
       expect(() => adapter.resume({ cwd: projectRoot, externalSessionId: "missing", prompt: "continue", supervisor })).toThrow("was not found");
       expect(() => adapter.resume({ cwd: outsideRoot, externalSessionId: "codex-latest", prompt: "continue", supervisor })).toThrow("different Project");
-      expect(() => adapter.resume({ cwd: nestedProjectRoot, externalSessionId: "codex-parent", prompt: "continue", supervisor })).not.toThrow();
+      await new Promise<void>((resolve) => {
+        adapter.resume({ cwd: nestedProjectRoot, externalSessionId: "codex-parent", prompt: "continue", supervisor, onExit: () => resolve() });
+      });
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

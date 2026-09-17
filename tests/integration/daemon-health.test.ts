@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -89,6 +89,17 @@ describe("daemon health endpoint", () => {
 
     await server.close();
     server = undefined;
+
+    server = await createDaemonServer({ config });
+    const response = await server.inject({ method: "GET", url: "/api/health" });
+    expect(response.statusCode).toBe(200);
+  });
+
+  test("removes a stale data directory lock when the owner process is gone", async () => {
+    const config = testConfig();
+    const lockDir = join(tempDir!, ".daemon.lock");
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(join(lockDir, "owner.json"), JSON.stringify({ pid: 99999999, createdAt: "2026-09-17T00:00:00.000Z" }), "utf8");
 
     server = await createDaemonServer({ config });
     const response = await server.inject({ method: "GET", url: "/api/health" });
