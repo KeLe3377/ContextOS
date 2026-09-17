@@ -363,6 +363,18 @@ export class SqliteRuntimeRepository {
     return this.getResumeCapsule(sessionId);
   }
 
+  recordTranscriptReconciliationFailed(input: { sessionId: string; projectId: string; runId: string; externalSessionId: string; message: string }, now: number): void {
+    const metadata = JSON.stringify({
+      runId: input.runId,
+      externalSessionId: input.externalSessionId,
+      failureMessage: input.message
+    });
+    this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'TRANSCRIPT_RECONCILE_FAILED', 'Failed to reconcile Codex transcript after run exit', ?, ?)")
+      .run(newId("act"), input.projectId, input.sessionId, metadata, now);
+    this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'TRANSCRIPT_RECONCILE_FAILED', ?, ?)")
+      .run(newId("audit"), input.projectId, input.sessionId, metadata, now);
+  }
+
   listSessionEvidence(sessionId: string): EvidenceSnapshotDto[] {
     const session = this.db.prepare("SELECT project_id FROM sessions WHERE id = ?").get(sessionId) as { project_id: string } | undefined;
     if (!session) throw new ContextOsError("NOT_FOUND", "Session not found", { id: sessionId });

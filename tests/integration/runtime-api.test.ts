@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
@@ -146,6 +146,138 @@ describe("runtime APIs", () => {
       const runs = db.prepare("SELECT id FROM session_runs WHERE session_id = ? ORDER BY created_at, id").all(session.id) as Array<{ id: string }>;
       expect(runs.map((run) => run.id)).toEqual(expect.arrayContaining([continued.json().run.id, resumedAgain.json().run.id]));
       expect(runs).toHaveLength(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("automatically imports a changed bound Codex transcript after resume exits", async () => {
+    const externalSessionId = "codex-post-run-changed";
+    const projectRoot = "D:/project/ContextOS";
+    let transcriptPath = "";
+    const { server, tempDir } = await createTestServer(
+      ["-e", "console.log('resume-finished')"],
+      async (tempDir) => {
+        const sessionsDir = join(tempDir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        transcriptPath = join(sessionsDir, "rollout-post-run-changed.jsonl");
+        await writeCodexTranscript(transcriptPath, externalSessionId, projectRoot, ["before resume"]);
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+    await appendCodexMessage(transcriptPath, "assistant", "after resume");
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    const importedTranscripts = evidence.json().items.filter((item: { metadata: { stream?: string } }) => item.metadata.stream === "imported-transcript");
+    expect(importedTranscripts).toHaveLength(2);
+    expect(importedTranscripts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "Codex transcript after run" })
+    ]));
+
+    const resume = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/resume-capsule` });
+    expect(resume.json()).toMatchObject({
+      status: "COMPLETED",
+      summary: "Codex run completed.",
+      lastRunId: continued.json().run.id
+    });
+    expect(resume.json().evidenceSnapshotIds).toEqual(expect.arrayContaining(importedTranscripts.map((item: { id: string }) => item.id)));
+
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const activityCount = db.prepare("SELECT COUNT(*) AS count FROM activity_events WHERE resource_id = ? AND event_type = 'TRANSCRIPT_IMPORTED'")
+        .get(session.id) as { count: number };
+      expect(activityCount.count).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("reuses unchanged bound Codex transcript evidence after resume exits", async () => {
+    const externalSessionId = "codex-post-run-unchanged";
+    const projectRoot = "D:/project/ContextOS";
+    const { server } = await createTestServer(
+      ["-e", "console.log('resume-unchanged')"],
+      async (tempDir) => {
+        const sessionsDir = join(tempDir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        await writeCodexTranscript(join(sessionsDir, "rollout-post-run-unchanged.jsonl"), externalSessionId, projectRoot, ["same transcript"]);
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    const importedTranscripts = evidence.json().items.filter((item: { metadata: { stream?: string } }) => item.metadata.stream === "imported-transcript");
+    expect(importedTranscripts).toHaveLength(1);
+
+    const resume = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/resume-capsule` });
+    expect(resume.json().evidenceSnapshotIds).toContain(imported.json().evidence.id);
+    expect(resume.json()).toMatchObject({
+      status: "COMPLETED",
+      lastRunId: continued.json().run.id,
+      summary: "Codex run completed."
+    });
+  });
+
+  test("keeps completed lifecycle status when post-run transcript import fails", async () => {
+    const externalSessionId = "codex-post-run-import-fails";
+    const projectRoot = "D:/project/ContextOS";
+    let transcriptPath = "";
+    const { server, tempDir } = await createTestServer(
+      ["-e", "console.log('resume-import-fails')"],
+      async (tempDir) => {
+        const sessionsDir = join(tempDir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        transcriptPath = join(sessionsDir, "rollout-post-run-import-fails.jsonl");
+        await writeCodexTranscript(transcriptPath, externalSessionId, projectRoot, ["initial transcript"]);
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+    await writeFile(transcriptPath, `${JSON.stringify({ type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } })}\n`, "utf8");
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    const completed = await waitForSessionStatus(server, session.id, "COMPLETED");
+    expect(completed.status).toBe("COMPLETED");
+
+    const latestStatus = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/runtime-status` });
+    expect(latestStatus.json()).toMatchObject({
+      run: { id: continued.json().run.id, status: "SUCCEEDED" }
+    });
+
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const activityCount = db.prepare("SELECT COUNT(*) AS count FROM activity_events WHERE resource_id = ? AND event_type = 'TRANSCRIPT_RECONCILE_FAILED'")
+        .get(session.id) as { count: number };
+      expect(activityCount.count).toBe(1);
     } finally {
       db.close();
     }
@@ -399,6 +531,32 @@ async function createSession(server: FastifyInstance): Promise<{ id: string; rev
   });
   expect(sessionResponse.statusCode).toBe(201);
   return sessionResponse.json();
+}
+
+async function writeCodexTranscript(path: string, externalSessionId: string, cwd: string, messages: string[]): Promise<void> {
+  const rows = [
+    { type: "session_meta", payload: { id: externalSessionId, cwd } },
+    ...messages.map((text, index) => ({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: [{ type: index % 2 === 0 ? "input_text" : "output_text", text }]
+      }
+    }))
+  ];
+  await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+}
+
+async function appendCodexMessage(path: string, role: "user" | "assistant", text: string): Promise<void> {
+  await appendFile(path, `${JSON.stringify({
+    type: "response_item",
+    payload: {
+      type: "message",
+      role,
+      content: [{ type: role === "user" ? "input_text" : "output_text", text }]
+    }
+  })}\n`, "utf8");
 }
 
 async function waitForSessionStatus(server: FastifyInstance, sessionId: string, status: string): Promise<Record<string, unknown>> {

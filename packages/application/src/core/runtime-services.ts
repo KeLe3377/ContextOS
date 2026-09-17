@@ -158,6 +158,10 @@ export class ContinueSessionService {
   }
 
   importAdapterTranscript(session: SessionDto, input: AdapterTranscriptImportInput): AdapterTranscriptImportResult {
+    return this.importAdapterTranscriptInternal(session, input);
+  }
+
+  private importAdapterTranscriptInternal(session: SessionDto, input: AdapterTranscriptImportInput): AdapterTranscriptImportResult {
     const adapter = this.adapters.getOrThrow(session.agentAdapterId);
     if (session.externalSessionId && input.externalSessionId && session.externalSessionId !== input.externalSessionId) {
       throw new ContextOsError("CONFLICT", "Session is already bound to a different external agent session", {
@@ -245,19 +249,64 @@ export class ContinueSessionService {
       if (!this.runtime.isSessionRunRunning(input.runId)) return;
       const evidenceIds = this.recordProcessOutputEvidence(input);
       const status: SessionStatus = input.exit.code === 0 ? "COMPLETED" : "FAILED";
+      let summary = "Codex run completed.";
+      let nextAction: string | null = null;
       if (input.exit.code === 0) {
         this.runtime.markContinueSucceeded({ jobId: input.jobId, runId: input.runId, exitCode: input.exit.code }, nowMs());
-        this.writeResumeCapsule(input.session, input.runId, status, evidenceIds, "Codex run completed.", null);
+        this.writeResumeCapsule(input.session, input.runId, status, this.collectResumeEvidenceIds(input.session.id, evidenceIds), summary, nextAction);
+        this.reconcileTranscriptAfterExit(input.session, input.runId, status, evidenceIds, summary, nextAction);
         return;
       }
       const failureMessage = input.exit.signal
         ? `Codex process terminated with signal ${input.exit.signal}`
         : `Codex process exited with code ${input.exit.code ?? "unknown"}`;
+      summary = failureMessage;
+      nextAction = "Review failed run evidence";
       this.runtime.markContinueExitedFailed({ jobId: input.jobId, runId: input.runId, exitCode: input.exit.code, signal: input.exit.signal, failureMessage }, nowMs());
-      this.writeResumeCapsule(input.session, input.runId, status, evidenceIds, failureMessage, "Review failed run evidence");
+      this.writeResumeCapsule(input.session, input.runId, status, this.collectResumeEvidenceIds(input.session.id, evidenceIds), summary, nextAction);
+      this.reconcileTranscriptAfterExit(input.session, input.runId, status, evidenceIds, summary, nextAction);
     } catch {
       // Phase A keeps lifecycle observation best-effort; Phase B startup recovery reconciles missed exits.
     }
+  }
+
+  private reconcileTranscriptAfterExit(
+    session: SessionDto,
+    runId: string,
+    status: SessionStatus,
+    evidenceIds: string[],
+    summary: string,
+    nextAction: string | null
+  ): void {
+    if (!session.externalSessionId) return;
+    try {
+      const imported = this.importAdapterTranscriptInternal(session, {
+        externalSessionId: session.externalSessionId,
+        title: "Codex transcript after run",
+        summary: "Captured Codex transcript after managed run exit."
+      });
+      this.writeResumeCapsule(
+        session,
+        runId,
+        status,
+        this.collectResumeEvidenceIds(session.id, [...evidenceIds, imported.evidence.id]),
+        summary,
+        nextAction
+      );
+    } catch (error) {
+      this.runtime.recordTranscriptReconciliationFailed({
+        sessionId: session.id,
+        projectId: session.projectId,
+        runId,
+        externalSessionId: session.externalSessionId,
+        message: error instanceof Error ? error.message : "Transcript reconciliation failed"
+      }, nowMs());
+    }
+  }
+
+  private collectResumeEvidenceIds(sessionId: string, evidenceIds: string[]): string[] {
+    const current = this.runtime.getResumeCapsule(sessionId);
+    return [...new Set([...current.evidenceSnapshotIds, ...evidenceIds])];
   }
 
   private recordProcessOutputEvidence(input: { session: SessionDto; runId: string; exit: ProcessExitInfo }): string[] {

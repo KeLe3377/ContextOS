@@ -123,7 +123,8 @@ first pass 已完成，仍有深层硬化空间。
 当前边界：
 
 - 已支持按 Project root 自动发现并显式导入本机 Codex transcript，首次导入后绑定 external session ID。
-- 不会后台轮询或实时采集 Codex CLI 后续 transcript。
+- 已绑定 Session 的 resume 进程退出后会 best-effort 自动回收同一 Codex transcript，按内容 hash 去重，并在回收失败时保留已落库 lifecycle 状态。
+- 不会后台轮询或实时采集未绑定 Codex CLI 后续 transcript。
 
 ### Phase F: Core Resource Lifecycle
 
@@ -252,17 +253,18 @@ frontend/styles.css
 - Codex transcript 文件自动发现与 adapter `importTranscript` first pass。
 - 共享 adapter contract test harness，覆盖可用/不可用 discovery、launch/resume metadata、transcript normalization、stdout/stderr/exit、inspect 和 interrupt。
 - 已绑定 Session 的 Codex resume：Project 归属校验、增量 Context Package prompt、每次恢复独立 Job/Run、明确失败码且不静默降级为新会话。
+- 已绑定 Session 的 resume 退出后自动回收 Codex transcript：内容变化写新 Evidence，未变化复用 Evidence，失败只记录 Activity/Audit。
 
 遗留：
 
-- 首次 launch 后自动关联 Codex UUID，以及 resume 结束后的 transcript 自动回收。
+- 首次 launch 后自动关联 Codex UUID。
 - Claude Code adapter。
 - Cursor adapter。
 - adapter fixtures 仍需随新增 adapter 扩展。
 
 建议后续 Adapter 顺序：
 
-1. 完成首次 launch 的确定性 Codex UUID 绑定和运行后 transcript 回收。
+1. 完成首次 launch 的确定性 Codex UUID 绑定。
 2. 最后才加 Claude Code / Cursor，并复用 shared contract tests。
 
 ## 6. 后端遗留路线
@@ -286,6 +288,7 @@ frontend/styles.css
 - 从 Codex JSONL `session_meta` 读取 session ID 与 cwd，按 Project root 隔离并选择最近匹配会话。
 - 仅抽取 user/assistant 文本，排除 developer、推理密文、工具调用和工具输出。
 - Session 绑定 external session ID；重复导入未变化内容时复用 Evidence。
+- 已绑定 Session 的 resume 退出后自动复用这套导入逻辑完成 transcript 回收；失败时记录 `TRANSCRIPT_RECONCILE_FAILED` Activity/Audit，不回滚 Run/Job 状态。
 
 仍待后续：
 
@@ -326,7 +329,7 @@ frontend/styles.css
 
 ## 8. 推荐下一步
 
-如果继续后端：完成 Codex session identity 自动绑定和运行后 transcript 回收，或按前端集成反馈补齐 Context/Evidence API。
+如果继续后端：完成 Codex session identity 自动绑定，或按前端集成反馈补齐 Context/Evidence API。
 
 如果转前端：
 
@@ -336,5 +339,5 @@ frontend/styles.css
 
 如果转 Adapter：
 
-1. Codex session identity 自动绑定和运行后 transcript 回收。
+1. Codex session identity 自动绑定。
 2. Claude Code / Cursor adapter 复用 shared contract tests。
