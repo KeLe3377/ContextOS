@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { CodexAdapter, defaultCodexCommand, resolveProcessCommand, shouldLaunchWithShell } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
+import { CodexAdapter, defaultCodexCommand, defaultCodexLaunchArgs, resolveProcessCommand, shouldLaunchWithShell } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
 import { ProcessSupervisor } from "../../packages/infrastructure/src/process-supervisor.js";
 
 describe("CodexAdapter command resolution", () => {
@@ -13,6 +13,16 @@ describe("CodexAdapter command resolution", () => {
   test("keeps the plain executable name on non-Windows platforms", () => {
     expect(defaultCodexCommand("linux")).toBe("codex");
     expect(defaultCodexCommand("darwin")).toBe("codex");
+  });
+
+  test("uses the non-interactive exec entrypoint by default", () => {
+    expect(defaultCodexLaunchArgs(undefined)).toEqual(["exec"]);
+    expect(defaultCodexLaunchArgs(JSON.stringify(["--help"]))).toEqual(["--help"]);
+
+    const adapter = new CodexAdapter("codex", undefined, "linux", "sessions");
+    expect(adapter.buildLaunchInfo({ cwd: "D:/project/ContextOS", prompt: "start" }).args).toEqual(["exec", "-"]);
+    expect(adapter.buildResumeInfo({ cwd: "D:/project/ContextOS", externalSessionId: "codex-session", prompt: "continue" }).args)
+      .toEqual(["exec", "resume", "codex-session", "-"]);
   });
 
   test("detects Windows cmd and bat shims", () => {
@@ -31,6 +41,23 @@ describe("CodexAdapter command resolution", () => {
       command: "codex",
       args: ["--version"]
     });
+  });
+
+  test("passes multiline launch prompts through stdin instead of argv", async () => {
+    const adapter = new CodexAdapter(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], process.platform, "sessions");
+    const supervisor = new ProcessSupervisor();
+    const prompt = "line one\nSession ID: sess_stdin\nline three";
+    const exit = await new Promise<{ code: number | null; stdout: string }>((resolve) => {
+      adapter.launch({
+        cwd: process.cwd(),
+        prompt,
+        supervisor,
+        onExit: (result) => resolve({ code: result.code, stdout: result.stdout })
+      });
+    });
+
+    expect(adapter.buildLaunchInfo({ cwd: process.cwd(), prompt }).args.at(-1)).toBe("-");
+    expect(exit).toEqual({ code: 0, stdout: prompt });
   });
 
   test("discovers and normalizes the latest Codex transcript inside the Project root", async () => {

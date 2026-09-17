@@ -166,7 +166,7 @@ describe("runtime APIs", () => {
         `const sessionsDir = ${JSON.stringify(sessionsDir)}`,
         `const transcriptPath = ${JSON.stringify(transcriptPath)}`,
         `const externalSessionId = ${JSON.stringify(externalSessionId)}`,
-        "const prompt = process.argv[1] || ''",
+        "const prompt = fs.readFileSync(0, 'utf8')",
         "fs.mkdirSync(sessionsDir, { recursive: true })",
         "const rows = [",
         "  { type: 'session_meta', payload: { id: externalSessionId, cwd: 'D:/project/ContextOS' } },",
@@ -189,7 +189,7 @@ describe("runtime APIs", () => {
     expect(continued.json()).toMatchObject({
       launch: { operation: "launch", externalSessionId: null }
     });
-    expect(continued.json().launch.args.at(-1)).toContain(`Session ID: ${session.id}`);
+    expect(continued.json().launch.args.at(-1)).toBe("-");
     await waitForSessionStatus(server, session.id, "COMPLETED");
 
     const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
@@ -240,7 +240,7 @@ describe("runtime APIs", () => {
         `const sessionsDir = ${JSON.stringify(sessionsDir)}`,
         `const transcriptPath = ${JSON.stringify(transcriptPath)}`,
         `const externalSessionId = ${JSON.stringify(externalSessionId)}`,
-        "const prompt = process.argv[1] || ''",
+        "const prompt = fs.readFileSync(0, 'utf8')",
         "fs.mkdirSync(sessionsDir, { recursive: true })",
         "const rows = [",
         "  { type: 'session_meta', payload: { id: externalSessionId, cwd: 'D:/project/ContextOS' } },",
@@ -314,7 +314,7 @@ describe("runtime APIs", () => {
       job: { payload: { launchInfo: { operation: "resume", externalSessionId } } }
     });
     expect(continued.json().launch.args).toEqual(expect.arrayContaining(["resume", externalSessionId]));
-    expect(continued.json().launch.args.at(-1)).toContain("Continue this ContextOS session");
+    expect(continued.json().launch.args.at(-1)).toBe("-");
     await waitForSessionStatus(server, session.id, "COMPLETED");
     const completed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
     const resumedAgain = await server.inject({

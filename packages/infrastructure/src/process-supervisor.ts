@@ -15,6 +15,7 @@ export type LaunchProcessInput = {
   args: string[];
   cwd: string;
   captureOutput?: boolean;
+  stdinText?: string;
   onExit?: (exit: ProcessExitInfo) => void;
 };
 
@@ -35,7 +36,7 @@ export class ProcessSupervisor {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
       detached: true,
-      stdio: input.captureOutput ? ["ignore", "pipe", "pipe"] : "ignore",
+      stdio: input.captureOutput || input.stdinText !== undefined ? ["pipe", "pipe", "pipe"] : "ignore",
       shell: false,
       windowsHide: false
     });
@@ -43,6 +44,11 @@ export class ProcessSupervisor {
     if (input.captureOutput) {
       child.stdout?.on("data", (chunk: Buffer) => captured.pushStdout(chunk));
       child.stderr?.on("data", (chunk: Buffer) => captured.pushStderr(chunk));
+    }
+    if (input.stdinText !== undefined) {
+      child.stdin?.end(input.stdinText);
+    } else {
+      child.stdin?.end();
     }
     child.once("exit", (code, signal) => {
       try {

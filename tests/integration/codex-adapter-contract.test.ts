@@ -22,6 +22,7 @@ runAgentAdapterContract("CodexAdapter", async () => {
     completedAdapter: new CodexAdapter(process.execPath, ["-e", "console.log('contract-stdout'); console.error('contract-stderr')"], process.platform, sessionsDir),
     unavailableAdapter: new CodexAdapter(unavailableCommand, [], process.platform, sessionsDir),
     capabilities: ["discover", "launch", "resume", "inspectStatus", "interrupt", "importTranscript"],
+    expectedResumeArgs: ["resume", externalSessionId, "-"],
     cwd: projectRoot,
     externalSessionId,
     cleanup: () => rm(tempDir, { recursive: true, force: true })

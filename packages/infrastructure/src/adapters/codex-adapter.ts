@@ -17,7 +17,7 @@ export class CodexAdapter implements AgentAdapter {
 
   constructor(
     command = process.env.CONTEXTOS_CODEX_COMMAND ?? defaultCodexCommand(),
-    launchArgs = parseArgs(process.env.CONTEXTOS_CODEX_ARGS),
+    launchArgs = defaultCodexLaunchArgs(),
     platform = process.platform,
     sessionsDir = defaultCodexSessionsDir()
   ) {
@@ -51,7 +51,7 @@ export class CodexAdapter implements AgentAdapter {
     return {
       adapterId: this.id,
       command: this.command,
-      args: input.prompt ? [...this.launchArgs, input.prompt] : this.launchArgs,
+      args: input.prompt ? [...this.launchArgs, "-"] : this.launchArgs,
       cwd: input.cwd,
       mode: "queued-job",
       operation: "launch",
@@ -63,7 +63,7 @@ export class CodexAdapter implements AgentAdapter {
     return {
       adapterId: this.id,
       command: this.command,
-      args: [...this.launchArgs, "resume", input.externalSessionId, input.prompt],
+      args: [...this.launchArgs, "resume", input.externalSessionId, "-"],
       cwd: input.cwd,
       mode: "queued-job",
       operation: "resume",
@@ -73,18 +73,18 @@ export class CodexAdapter implements AgentAdapter {
 
   launch(input: AgentLaunchInput): AgentLaunchResult {
     const launch = this.buildLaunchInfo(input);
-    return this.start(launch, input.supervisor, input.onExit);
+    return this.start(launch, input.supervisor, input.onExit, input.prompt);
   }
 
   resume(input: AgentResumeInput): AgentLaunchResult {
     this.assertResumeTarget(input.cwd, input.externalSessionId);
     const launch = this.buildResumeInfo(input);
-    return this.start(launch, input.supervisor, input.onExit);
+    return this.start(launch, input.supervisor, input.onExit, input.prompt);
   }
 
-  private start(launch: AgentLaunchInfoDto, supervisor: ProcessSupervisor, onExit?: (exit: ProcessExitInfo) => void): AgentLaunchResult {
+  private start(launch: AgentLaunchInfoDto, supervisor: ProcessSupervisor, onExit?: (exit: ProcessExitInfo) => void, stdinText?: string): AgentLaunchResult {
     const processCommand = resolveProcessCommand(launch.command, launch.args, this.platform);
-    const process = supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, onExit });
+    const process = supervisor.launch({ command: processCommand.command, args: processCommand.args, cwd: launch.cwd, captureOutput: true, stdinText, onExit });
     return { pid: process.pid, launch };
   }
 
@@ -278,6 +278,10 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 
 export function defaultCodexCommand(platform: NodeJS.Platform = process.platform): string {
   return platform === "win32" ? "codex.cmd" : "codex";
+}
+
+export function defaultCodexLaunchArgs(value = process.env.CONTEXTOS_CODEX_ARGS): string[] {
+  return value === undefined ? ["exec"] : parseArgs(value);
 }
 
 export function shouldLaunchWithShell(command: string, platform: NodeJS.Platform = process.platform): boolean {
