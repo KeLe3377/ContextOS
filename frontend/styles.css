@@ -227,7 +227,7 @@ h2, h3, p { margin: 0; }
 .btn:disabled, .icon-btn:disabled { cursor: not-allowed; opacity: .45; }
 .btn:disabled:hover, .icon-btn:disabled:hover { background: inherit; color: inherit; }
 .table-action { border-color: var(--border); }
-.row-actions { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.row-actions { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
 .action-notice { margin-top: 8px; font-size: 12px; font-weight: 600; }
 .action-notice.success { color: var(--green); }
 .action-notice.error { color: var(--red); }
@@ -267,6 +267,16 @@ h2, h3, p { margin: 0; }
 }
 .metric-row:first-child, .setting-row:first-child, .list-row:first-child { border-top: 0; }
 .evidence-row { align-items: flex-start; }
+.evidence-row-main { min-width: 0; }
+.evidence-row .row-actions { justify-content: flex-end; flex: 0 0 auto; }
+.session-cell {
+  min-width: 0;
+  border-left: 3px solid transparent;
+  padding-left: 8px;
+}
+.session-cell.selected {
+  border-left-color: var(--blue);
+}
 .list-row:hover, .setting-row:hover { background: #fbfdff; }
 .title-sm { font-weight: 700; }
 .muted { color: var(--muted); }
@@ -341,10 +351,18 @@ tbody tr:hover { background: #fbfdff; }
   color: var(--muted);
 }
 .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
-.detail-grid > div { display: flex; flex-direction: column; gap: 4px; padding: 14px; border-right: 1px solid var(--border); }
+.detail-grid > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 14px; border-right: 1px solid var(--border); }
 .detail-grid > div:nth-child(3) { border-right: 0; }
 .detail-grid .detail-wide { grid-column: 1 / -1; border-top: 1px solid var(--border); border-right: 0; }
 .detail-grid .mono { font-size: 10px; }
+.detail-grid strong { overflow-wrap: anywhere; }
+.detail-grid .detail-with-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.detail-with-action > div { min-width: 0; display: grid; gap: 4px; }
 .session-detail {
   display: grid;
   gap: 14px;

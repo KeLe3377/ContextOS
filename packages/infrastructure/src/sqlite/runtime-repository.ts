@@ -407,6 +407,30 @@ export class SqliteRuntimeRepository {
     return mapResumeCapsule(row, state.resumeCapsule);
   }
 
+  patchResumeCapsule(input: { sessionId: string; expectedRevision: number; summary?: string; nextAction?: string | null }, now: number): ResumeCapsuleDto {
+    const row = this.getResumeSessionRow(input.sessionId);
+    const session = this.db.prepare("SELECT revision FROM sessions WHERE id = ?").get(input.sessionId) as { revision: number } | undefined;
+    if (!session) throw new ContextOsError("NOT_FOUND", "Session not found", { id: input.sessionId });
+    if (session.revision !== input.expectedRevision) {
+      throw new ContextOsError("CONFLICT", "Session revision conflict", { id: input.sessionId, expectedRevision: input.expectedRevision, currentRevision: session.revision });
+    }
+    const state = JSON.parse(row.runtime_state) as { resumeCapsule?: ResumeCapsuleState };
+    const current = mapResumeCapsule(row, state.resumeCapsule);
+    state.resumeCapsule = {
+      summary: input.summary ?? current.summary,
+      nextAction: input.nextAction === undefined ? current.nextAction : input.nextAction,
+      lastRunId: current.lastRunId,
+      evidenceSnapshotIds: current.evidenceSnapshotIds,
+      updatedAt: new Date(now).toISOString()
+    };
+    const result = this.db.prepare("UPDATE sessions SET runtime_state = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+      .run(JSON.stringify(state), now, input.sessionId, input.expectedRevision);
+    if (result.changes !== 1) {
+      throw new ContextOsError("CONFLICT", "Session revision conflict", { id: input.sessionId, expectedRevision: input.expectedRevision });
+    }
+    return this.getResumeCapsule(input.sessionId);
+  }
+
   recoverOrphanRunningContinues(now: number): number {
     const rows = this.db.prepare("SELECT runs.id AS run_id, runs.job_id AS job_id, runs.session_id AS session_id, sessions.project_id AS project_id FROM session_runs runs JOIN sessions ON sessions.id = runs.session_id WHERE runs.status = 'RUNNING' AND runs.job_id IS NOT NULL").all() as Array<{ run_id: string; job_id: string; session_id: string; project_id: string }>;
     if (rows.length === 0) return 0;

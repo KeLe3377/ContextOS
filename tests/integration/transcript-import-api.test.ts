@@ -120,6 +120,51 @@ describe("transcript import API", () => {
     }
   });
 
+  test("patches resume capsule notes without dropping evidence history", async () => {
+    const { server } = await createTestServer();
+    const { session } = await createSession(server);
+    const imported = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/import-transcript`,
+      payload: {
+        contentText: "user: current state\nassistant: ship sessions next\n",
+        summary: "Imported summary",
+        title: "Imported transcript"
+      }
+    });
+    expect(imported.statusCode).toBe(201);
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const revision = refreshed.json().revision;
+    const patched = await server.inject({
+      method: "PATCH",
+      url: `/api/sessions/${session.id}/resume-capsule`,
+      payload: {
+        summary: "Manual session summary",
+        nextAction: "Continue productizing Sessions",
+        expectedRevision: revision
+      }
+    });
+
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).toMatchObject({
+      sessionId: session.id,
+      summary: "Manual session summary",
+      nextAction: "Continue productizing Sessions"
+    });
+    expect(patched.json().evidenceSnapshotIds).toEqual(imported.json().resumeCapsule.evidenceSnapshotIds);
+
+    const after = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(after.json().revision).toBe(revision + 1);
+
+    const stale = await server.inject({
+      method: "PATCH",
+      url: `/api/sessions/${session.id}/resume-capsule`,
+      payload: { summary: "Stale update", expectedRevision: revision }
+    });
+    expect(stale.statusCode).toBe(409);
+  });
+
   test("replays transcript imports by idempotency key without duplicate evidence", async () => {
     const { server, tempDir } = await createTestServer();
     const { session } = await createSession(server);

@@ -17,6 +17,12 @@ export const sessionPatchSchema = z.object({
   expectedRevision: z.number().int().positive()
 });
 
+export const resumeCapsulePatchSchema = z.object({
+  summary: z.string().trim().min(1, "Summary must not be blank").optional(),
+  nextAction: z.string().trim().min(1, "Next action must not be blank").nullable().optional(),
+  expectedRevision: z.number().int().positive()
+});
+
 export const sessionDtoSchema = resourceMetaSchema.extend({
   projectId: z.string(),
   agentAdapterId: z.string(),
@@ -56,6 +62,7 @@ export const adapterTranscriptImportInputSchema = z.object({
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 export type SessionInput = z.infer<typeof sessionInputSchema>;
 export type SessionPatch = z.infer<typeof sessionPatchSchema>;
+export type ResumeCapsulePatch = z.infer<typeof resumeCapsulePatchSchema>;
 export type SessionDto = z.infer<typeof sessionDtoSchema>;
 export type ResumeCapsuleDto = z.infer<typeof resumeCapsuleDtoSchema>;
 export type TranscriptImportInput = z.infer<typeof transcriptImportInputSchema>;

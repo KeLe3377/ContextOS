@@ -4,7 +4,7 @@ import { DecisionService, ReviewItemService, SessionService, WorkItemService } f
 import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages/contracts/src/common.js";
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
 import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
-import { adapterTranscriptImportInputSchema, sessionInputSchema, sessionPatchSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
+import { adapterTranscriptImportInputSchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
 import { workItemInputSchema, workItemPatchSchema } from "../../../../../packages/contracts/src/work-items.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
@@ -32,6 +32,7 @@ export async function registerCoreResourceRoutes(
   server.get("/api/sessions/:id/context-pack", async (request) => services.sessions.getContextPackage(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/sessions/:id/evidence", async (request) => ({ items: services.sessions.listEvidence(paramsWithIdSchema.parse(request.params).id), page: { nextCursor: null, hasMore: false } }));
   server.get("/api/sessions/:id/resume-capsule", async (request) => services.sessions.getResumeCapsule(paramsWithIdSchema.parse(request.params).id));
+  server.patch("/api/sessions/:id/resume-capsule", async (request) => services.sessions.patchResumeCapsule(paramsWithIdSchema.parse(request.params).id, resumeCapsulePatchSchema.parse(request.body)));
   server.get("/api/sessions/:id/runtime-status", async (request) => services.sessions.runtimeStatus(paramsWithIdSchema.parse(request.params).id));
   server.post("/api/sessions/:id/import-transcript", async (request, reply) => {
     const { id } = paramsWithIdSchema.parse(request.params);

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionInterruptRuntimeDto, SessionRunDto, SessionRuntimeStatusDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
-import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
+import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
@@ -123,6 +123,15 @@ export class ContinueSessionService {
 
   getResumeCapsule(sessionId: string): ResumeCapsuleDto {
     return this.runtime.getResumeCapsule(sessionId);
+  }
+
+  patchResumeCapsule(sessionId: string, input: ResumeCapsulePatch): ResumeCapsuleDto {
+    return this.runtime.patchResumeCapsule({
+      sessionId,
+      expectedRevision: input.expectedRevision,
+      summary: input.summary,
+      nextAction: input.nextAction
+    }, nowMs());
   }
 
   inspectStatus(session: SessionDto): SessionRuntimeStatusDto {

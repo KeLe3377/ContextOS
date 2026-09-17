@@ -346,4 +346,12 @@ Concrete first increment:
 - Keep row actions but make their result visible in the detail panel.
 - Verify with `npm run build:all`, `npm test -- tests/integration/runtime-api.test.ts tests/integration/transcript-import-api.test.ts`, and full `npm test` if frontend wiring touches shared state.
 
+Completed follow-up on 2026-09-17:
+
+- Added selected-session capsule export from the Sessions header, table rows, and detail panel.
+- Added Session detail actions for opening/copying linked evidence and copying bound external/context package IDs.
+- Added `PATCH /api/sessions/:id/resume-capsule` with revision conflict protection, preserving run/evidence history.
+- Added frontend Edit Capsule flow backed by the new API.
+- Verified with `npm run build:all`, targeted Session tests, `npm test`, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
