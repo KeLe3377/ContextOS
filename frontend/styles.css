@@ -296,6 +296,9 @@ h2, h3, p { margin: 0; }
 }
 .kpi-value { font-size: 22px; line-height: 28px; font-weight: 700; color: var(--text); }
 .kpi-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.compact-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.compact-kpis .kpi { padding: 10px; }
+.compact-kpis .kpi-value { font-size: 16px; line-height: 22px; overflow-wrap: anywhere; }
 .table-scroll {
   width: 100%;
   overflow-x: auto;
@@ -342,6 +345,12 @@ tbody tr:hover { background: #fbfdff; }
 .detail-grid > div:nth-child(3) { border-right: 0; }
 .detail-grid .detail-wide { grid-column: 1 / -1; border-top: 1px solid var(--border); border-right: 0; }
 .detail-grid .mono { font-size: 10px; }
+.session-detail {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+.evidence-section-title { margin-bottom: 8px; }
 
 dialog {
   width: min(460px, calc(100vw - 32px));

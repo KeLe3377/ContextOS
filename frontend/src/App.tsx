@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:4721";
 
@@ -138,6 +138,7 @@ const iconPaths: Record<string, ReactNode> = {
   play_arrow: <path d="M8 5v14l11-7z" />,
   playlist_add_check: <><path d="M4 7h9M4 12h8M4 17h6" /><path d="M14 15l2 2 4-5" /></>,
   policy: <><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z" /><path d="M9 12l2 2 4-5" /></>,
+  progress_activity: <><circle cx="12" cy="12" r="8" strokeDasharray="30 18" /><path d="M12 4v4" /></>,
   publish: <><path d="M12 19V5M8 9l4-4 4 4" /><path d="M5 19h14" /></>,
   rate_review: <><path d="M4 5h16v11H8l-4 4z" /><path d="M8 9h8M8 13h5" /></>,
   refresh: <><path d="M19 8a7 7 0 1 0 1 5" /><path d="M19 4v4h-4" /></>,
@@ -262,10 +263,13 @@ export function App() {
   const [actionLoading, setActionLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [data, setData] = useState<WorkspaceData>(() => emptyData());
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
+  const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string }>({ kind: null });
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [contextItemDetail, setContextItemDetail] = useState<{ item: AnyRecord; versions: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
+  const preferredSessionIdRef = useRef<string | null>(null);
 
   const availableAdapters = useCallback(() => data.adapters.filter((adapter) => adapter.available), [data.adapters]);
   const defaultAdapterId = useCallback(() => {
@@ -321,9 +325,14 @@ export function App() {
     }
     next.projects = next.projects.filter((project) => !isArchived(project));
     next.sessions = next.sessions.filter((session) => !isArchived(session));
+    const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
-    setSessionDetails(await loadSessionDetails(next.sessions[0]));
+    preferredSessionIdRef.current = selectedSession?.id || null;
+    setSelectedSessionId(selectedSession?.id || null);
+    setSessionDetailsLoading(Boolean(selectedSession));
+    setSessionDetails(await loadSessionDetails(selectedSession));
+    setSessionDetailsLoading(false);
     setLoading(false);
   }, [loadSessionDetails]);
 
@@ -364,6 +373,16 @@ export function App() {
   const decisionById = useCallback((decisionId: string) => data.decisions.find((item) => item.id === decisionId), [data.decisions]);
   const workItemById = useCallback((workItemId: string) => data.workItems.find((item) => item.id === workItemId), [data.workItems]);
   const reviewById = useCallback((reviewId: string) => data.reviews.find((item) => item.id === reviewId), [data.reviews]);
+
+  const selectSession = useCallback(async (sessionId: string) => {
+    const session = sessionById(sessionId);
+    preferredSessionIdRef.current = sessionId;
+    setSelectedSessionId(sessionId);
+    setSessionDetails(null);
+    setSessionDetailsLoading(Boolean(session));
+    setSessionDetails(await loadSessionDetails(session));
+    setSessionDetailsLoading(false);
+  }, [loadSessionDetails, sessionById]);
 
   const archiveProject = useCallback(async (projectId: string) => {
     const project = projectById(projectId);
@@ -492,17 +511,18 @@ export function App() {
     }
     if (action === "sync-sources") return void runAction(syncActiveSources, "Context sources synced");
     if (action === "continue-in-agent") {
-      const session = data.sessions.find((item) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
+      const selected = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : null;
+      const session = selected && ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(selected.status) ? selected : data.sessions.find((item) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
       if (!session) return setActionMessage({ text: "Create a session before continuing in an agent", error: true });
       return void runAction(() => continueSession(session.id), "Session continued in Agent");
     }
     if (action === "import-transcript") {
-      const session = data.sessions[0];
+      const session = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : data.sessions[0];
       if (!session) return setActionMessage({ text: "Create a session before importing a transcript", error: true });
       return setModal({ kind: "transcript", sessionId: session.id });
     }
     if (action === "import-existing-session") {
-      const session = data.sessions[0];
+      const session = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : data.sessions[0];
       if (!session) return setActionMessage({ text: "Create a ContextOS session before importing an existing agent session", error: true });
       return setModal({ kind: "existingTranscript", sessionId: session.id });
     }
@@ -517,7 +537,7 @@ export function App() {
         expectedRevision: data.settings!.revision
       }), "Settings saved");
     }
-  }, [continueSession, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, loadData, runAction, syncActiveSources, transitionWorkItem]);
+  }, [continueSession, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, loadData, runAction, selectedSessionId, syncActiveSources, transitionWorkItem]);
 
   const navigate = (next: PageId) => {
     setPage(next);
@@ -527,7 +547,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, interruptSession, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, sessionDetails };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, interruptSession, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -638,18 +658,23 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function SessionsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, sessionDetails: details, actionLoading, runAction, archiveSession, continueSession, importTranscriptAuto, interruptSession, setModal } = props;
+  const { data, header, selectedSessionId, selectSession, sessionDetails: details, sessionDetailsLoading, actionLoading, runAction, archiveSession, continueSession, importTranscriptAuto, interruptSession, setModal } = props;
   const canContinue = (status: string) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
   const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `adapter ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `external ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} messages` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} turns` : null].filter(Boolean).join(" · ");
+  const selectedSession = data.sessions.find((session: AnyRecord) => session.id === selectedSessionId) || data.sessions[0];
+  const contextItemCount = details?.contextPack?.contextItems?.length ?? 0;
+  const evidencePackageCount = details?.contextPack?.evidenceSnapshots?.length ?? 0;
+  const runtime = details?.runtimeStatus;
   return (
     <>{header}<div className="stack">
       <Panel title="Session Episodes" iconName="terminal"><Table headers={["Session", "Agent", "Started", "Updated", "Status", "Action"]} rows={data.sessions.map((session: AnyRecord) => [
-        <><strong>{session.title || session.id}</strong><div className="muted">{session.intent || ""}</div></>,
+        <><strong>{session.title || session.id}</strong><div className="muted">{session.intent || ""}</div>{session.id === selectedSession?.id ? <div className="muted mono">selected</div> : null}</>,
         session.agentAdapterId,
         fmtDate(session.startedAt),
         fmtDate(session.updatedAt),
         <Badge text={session.status} tone={toneForStatus(session.status)} />,
         <div className="row-actions">
+          <button className="icon-btn table-action" title="View session details" disabled={actionLoading} onClick={() => void selectSession(session.id)}>{icon("visibility")}</button>
           <button className="icon-btn table-action" title="Continue in Agent" disabled={!canContinue(session.status) || actionLoading} onClick={() => runAction(() => continueSession(session.id), "Session continued in Agent")}>{icon("play_arrow")}</button>
           <button className="icon-btn table-action" title="Interrupt managed run" disabled={session.status !== "RUNNING" || actionLoading} onClick={() => runAction(() => interruptSession(session.id), "Session interrupted")}>{icon("stop_circle")}</button>
           <button className="icon-btn table-action" title="Import existing agent session" disabled={actionLoading} onClick={() => setModal({ kind: "existingTranscript", sessionId: session.id })}>{icon("manage_search")}</button>
@@ -657,17 +682,40 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           <button className="icon-btn table-action" title="Archive session" disabled={session.status === "RUNNING" || actionLoading} onClick={() => runAction(() => archiveSession(session.id), "Session archived")}>{icon("archive")}</button>
         </div>
       ])} empty="No sessions yet." /></Panel>
-      <Panel title="Latest Session Context" iconName="inventory_2" meta={details ? details.sessionId : "No session"}>
-        {details ? <div className="detail-grid">
-          <div><span className="mono muted">CONTEXT ITEMS</span><strong>{details.contextPack?.contextItems?.length ?? 0}</strong></div>
-          <div><span className="mono muted">EVIDENCE</span><strong>{details.evidence.length}</strong></div>
-          <div><span className="mono muted">RESUME STATUS</span><strong>{details.resumeCapsule?.status || "Not available"}</strong></div>
-          <div className="detail-wide"><span className="mono muted">CONTEXT PACKAGE</span><strong>{details.contextPack?.id || "Not generated"}</strong></div>
-          <div className="detail-wide"><span className="mono muted">EXTERNAL AGENT SESSION</span><strong>{data.sessions.find((session: AnyRecord) => session.id === details.sessionId)?.externalSessionId || "Not bound"}</strong></div>
-          <div className="detail-wide"><span className="mono muted">RUNTIME</span><strong>{details.runtimeStatus?.run?.status || "No active run"}</strong><div className="muted mono">{details.runtimeStatus?.process ? `pid ${details.runtimeStatus.process.pid} · managed ${details.runtimeStatus.process.managed} · running ${details.runtimeStatus.process.running}` : "No managed process"}</div></div>
-          <div className="detail-wide"><span className="mono muted">NEXT ACTION</span><strong>{details.resumeCapsule?.nextAction || "-"}</strong></div>
-          {details.evidence.length ? <div className="detail-wide"><span className="mono muted">EVIDENCE SNAPSHOTS</span><div className="stack compact">{details.evidence.slice(0, 6).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><Badge text={item.evidenceType} tone="blue" /></div>)}</div></div> : null}
-        </div> : <EmptyNote>Continue a session to generate its context package and resume capsule.</EmptyNote>}
+      <Panel title="Selected Session Detail" iconName="inventory_2" meta={selectedSession ? selectedSession.id : "No session"}>
+        {sessionDetailsLoading ? <EmptyNote>Loading selected session detail...</EmptyNote> : null}
+        {selectedSession && details ? <div className="session-detail">
+          <div className="detail-grid">
+            <div><span className="mono muted">STATUS</span><strong>{selectedSession.status}</strong></div>
+            <div><span className="mono muted">AGENT</span><strong>{selectedSession.agentAdapterId}</strong></div>
+            <div><span className="mono muted">REVISION</span><strong>{selectedSession.revision}</strong></div>
+            <div className="detail-wide"><span className="mono muted">TITLE</span><strong>{selectedSession.title || selectedSession.id}</strong></div>
+            <div className="detail-wide"><span className="mono muted">INTENT</span><strong>{selectedSession.intent || "-"}</strong></div>
+            <div className="detail-wide"><span className="mono muted">EXTERNAL AGENT SESSION</span><strong className="mono">{selectedSession.externalSessionId || "Not bound"}</strong></div>
+          </div>
+          <div className="kpi-grid compact-kpis">
+            <div className="kpi"><div className="kpi-value">{contextItemCount}</div><div className="kpi-label mono">Context items</div></div>
+            <div className="kpi"><div className="kpi-value">{evidencePackageCount}</div><div className="kpi-label mono">Package evidence</div></div>
+            <div className="kpi"><div className="kpi-value">{details.evidence.length}</div><div className="kpi-label mono">Session evidence</div></div>
+            <div className="kpi"><div className="kpi-value">{details.resumeCapsule?.status || "-"}</div><div className="kpi-label mono">Resume status</div></div>
+          </div>
+          <div className="detail-grid">
+            <div className="detail-wide"><span className="mono muted">CONTEXT PACKAGE</span><strong className="mono">{details.contextPack?.id || "Not generated"}</strong></div>
+            <div className="detail-wide"><span className="mono muted">RUNTIME</span><strong>{runtime?.run?.status || "No active run"}</strong><div className="muted mono">{runtime?.process ? `pid ${runtime.process.pid} · managed ${runtime.process.managed} · running ${runtime.process.running}` : "No managed process"}</div></div>
+            <div className="detail-wide"><span className="mono muted">RESUME SUMMARY</span><strong>{details.resumeCapsule?.summary || "No resume capsule yet"}</strong></div>
+            <div className="detail-wide"><span className="mono muted">NEXT ACTION</span><strong>{details.resumeCapsule?.nextAction || "-"}</strong></div>
+          </div>
+          <div className="row-actions">
+            <button className="btn primary" disabled={!canContinue(selectedSession.status) || actionLoading} onClick={() => runAction(() => continueSession(selectedSession.id), "Session continued in Agent")}>{icon("play_arrow")}<span>Continue</span></button>
+            <button className="btn" disabled={selectedSession.status !== "RUNNING" || actionLoading} onClick={() => runAction(() => interruptSession(selectedSession.id), "Session interrupted")}>{icon("stop_circle")}<span>Interrupt</span></button>
+            <button className="btn" disabled={actionLoading} onClick={() => setModal({ kind: "existingTranscript", sessionId: selectedSession.id })}>{icon("manage_search")}<span>Import Existing</span></button>
+            <button className="btn" disabled={actionLoading} onClick={() => setModal({ kind: "transcript", sessionId: selectedSession.id })}>{icon("edit_note")}<span>Paste Transcript</span></button>
+          </div>
+          {details.evidence.length ? <div>
+            <div className="title-sm evidence-section-title">Evidence Snapshots</div>
+            <div className="stack compact">{details.evidence.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><Badge text={item.evidenceType} tone="blue" /></div>)}</div>
+          </div> : <EmptyNote>No evidence has been captured for this session yet.</EmptyNote>}
+        </div> : !sessionDetailsLoading ? <EmptyNote>Select or create a session to inspect its context package, runtime state, evidence, and resume capsule.</EmptyNote> : null}
       </Panel>
     </div></>
   );
