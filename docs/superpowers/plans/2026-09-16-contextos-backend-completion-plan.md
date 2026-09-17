@@ -21,13 +21,14 @@ The simplified version is now useful enough to exercise the core loop:
 - Rule versioning and validation exist in simplified form.
 - Settings, Jobs, Activity, Audit, Outbox, and Idempotency tables exist, but runtime behavior is minimal.
 - Codex adapter can now resolve `codex.cmd` on Windows and discover the installed CLI.
-- `POST /api/sessions/:id/continue` creates a session run/job and launches Codex through the adapter.
+- Claude Code adapter can discover, launch, resume, inspect/interrupt managed processes, and import local transcripts.
+- `POST /api/sessions/:id/continue` creates a session run/job and launches the Session's selected adapter through the registry.
 - Static frontend reads real daemon APIs from `http://127.0.0.1:4721` and does not need React yet.
 
 This means the simplified E2E loop is basically complete:
 
 ```text
-Project -> Session -> Continue -> Codex Adapter -> process launch -> frontend reads state
+Project -> Session -> Continue -> Agent Adapter registry -> process launch -> frontend reads state
 ```
 
 The remaining work is not to add pages. It is to make the loop reliable, inspectable, recoverable, and closer to the original ContextOS design.
@@ -38,7 +39,7 @@ The remaining work is not to add pages. It is to make the loop reliable, inspect
 - Do not create product pages for Jobs, Audit Activity, Outbox, or internal worker state.
 - Keep official pages aligned to: Overview, Projects, Sessions, Review Inbox, Decisions, Work Items, Context, Rules, Settings footer/shell behavior.
 - Keep ContextOS positioned as a local Agent Workspace and project-level governance container, not a general memory engine or chatbot.
-- Keep Codex as the first real adapter. Claude Code and Cursor can be planned as later adapter implementations after the adapter contract is solid.
+- Keep Codex and Claude Code as the first real adapters. Cursor remains deferred until the adapter contract and transcript/evidence loop are stable.
 - Keep frontend as the current static frontend until backend behavior is stable enough to justify React/Vite migration.
 - Verification is implementation-first: build/tests/startup checks after changes, not red-light test-first cycles.
 
@@ -127,7 +128,7 @@ Action: this is the next practical backend improvement area. Start with process 
 
 ### Original Task 7: Agent Adapters And Process Supervision
 
-Status: Codex MVP only.
+Status: Codex + Claude Code first pass.
 
 Remaining gaps:
 
@@ -136,9 +137,9 @@ Remaining gaps:
 - No normalized Agent Events.
 - No stdout/stderr capture into Evidence.
 - No graceful interrupt or timeout handling.
-- Claude Code and Cursor adapters are not implemented.
+- Cursor adapter is not implemented.
 
-Action: deepen Codex first. Do not add Claude/Cursor until Codex lifecycle, evidence, and event capture are stable.
+Action: deepen Codex/Claude Code shared behavior first. Do not add Cursor until lifecycle, evidence, and event capture are stable.
 
 ### Original Task 8: API Integration, Shutdown, Packaging
 
@@ -368,13 +369,14 @@ Can be short: yes. Do after backend lifecycle is truthful.
 
 ### Phase J: Adapter Contract Deepening - first pass complete
 
-Purpose: Codex first, then Claude Code/Cursor later.
+Purpose: keep Codex and Claude Code behind one shared contract; Cursor remains later.
 
 Files likely touched:
 
 - New: `packages/application/src/ports/agent-adapter.ts`
 - New or modify: `packages/infrastructure/src/adapters/registry.ts`
 - Modify: `packages/infrastructure/src/adapters/codex-adapter.ts`
+- Modify: `packages/infrastructure/src/adapters/claude-code-adapter.ts`
 - Modify: `packages/infrastructure/src/process-supervisor.ts`
 - Tests under `tests/integration` and `tests/fixtures/adapters`
 
@@ -382,11 +384,12 @@ Steps:
 
 - [x] Extract an adapter interface around current Codex behavior.
 - [x] Add normalized capabilities: discover, launch, resume, inspectStatus, interrupt, importTranscript.
-- [x] Add adapter registry with Codex only enabled initially.
+- [x] Add adapter registry with Codex and Claude Code enabled.
 - [x] Keep Codex non-interactive output covered by runtime/codex adapter tests.
-- [ ] Add Claude Code and Cursor only after Codex passes the shared contract.
+- [x] Add Claude Code after Codex passed the shared contract.
+- [ ] Add Cursor only after the Codex/Claude Code lifecycle and transcript paths are stable.
 
-Can be short: no for full multi-agent support. Keep first pass Codex-only.
+Can be short: no for full multi-agent support. Keep the current first pass to Codex + Claude Code.
 
 ### Phase K: Packaging, Docs, And Final Backend Verification - first pass complete
 
@@ -461,7 +464,7 @@ Then trigger `POST /api/sessions/:id/continue` and confirm the run no longer rem
 
 - The original design mentioned Drizzle, but the current working implementation uses better-sqlite3 with raw SQL migrations. Do not rewrite storage only to match the old wording unless it removes a real blocker.
 - Jobs/Audit/Outbox are infrastructure. They may appear as counts, activity summaries, or diagnostics, but not as new product pages.
-- Claude Code and Cursor are important for the product promise, but adding them before Codex lifecycle/evidence is stable will multiply uncertainty.
+- Cursor is important for the product promise, but adding it before the Codex/Claude Code lifecycle and evidence paths are stable will multiply uncertainty.
 - Frontend React migration should wait until backend action semantics and DTOs are stable enough to avoid rework.
 
 
