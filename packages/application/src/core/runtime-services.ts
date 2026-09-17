@@ -64,13 +64,14 @@ export class ContinueSessionService {
   continue(session: SessionDto): SessionContinueRuntime {
     const rootPath = this.runtime.getProjectRoot(session.projectId);
     const contextPackage = this.runtime.createContextPackageForSession({ projectId: session.projectId, sessionId: session.id, intent: session.intent }, nowMs());
-    this.recordHandoffEvidence({ session, rootPath, contextPackage });
+    const handoffPrompt = formatHandoffPrompt({ session, rootPath, contextPackage });
+    this.recordHandoffEvidence({ session, projectId: session.projectId, contextPackageId: contextPackage.id, contentText: handoffPrompt });
     const agentAdapter = this.adapters.getOrThrow(session.agentAdapterId);
     const adapter = agentAdapter.discover();
     const resumePrompt = formatResumePrompt({ session, contextPackage });
     const launch = session.externalSessionId
       ? agentAdapter.buildResumeInfo({ cwd: rootPath, externalSessionId: session.externalSessionId, prompt: resumePrompt })
-      : agentAdapter.buildLaunchInfo({ cwd: rootPath });
+      : agentAdapter.buildLaunchInfo({ cwd: rootPath, prompt: handoffPrompt });
     const created = this.runtime.createContinueSessionJob({
       sessionId: session.id,
       projectId: session.projectId,
@@ -94,7 +95,7 @@ export class ContinueSessionService {
       const onExit = (exit: ProcessExitInfo) => this.markProcessExit({ session, jobId: created.job.id, runId: created.run.id, exit });
       const launched = session.externalSessionId
         ? agentAdapter.resume({ cwd: rootPath, externalSessionId: session.externalSessionId, prompt: resumePrompt, supervisor: this.supervisor, onExit })
-        : agentAdapter.launch({ cwd: rootPath, supervisor: this.supervisor, onExit });
+        : agentAdapter.launch({ cwd: rootPath, prompt: handoffPrompt, supervisor: this.supervisor, onExit });
       const running = this.runtime.markContinueRunning({ jobId: created.job.id, runId: created.run.id, pid: launched.pid }, nowMs());
       return { ...running, adapter, launch: launched.launch };
     } catch (error) {
@@ -161,7 +162,7 @@ export class ContinueSessionService {
     return this.importAdapterTranscriptInternal(session, input);
   }
 
-  private importAdapterTranscriptInternal(session: SessionDto, input: AdapterTranscriptImportInput): AdapterTranscriptImportResult {
+  private importAdapterTranscriptInternal(session: SessionDto, input: AdapterTranscriptImportInput & { correlationText?: string }): AdapterTranscriptImportResult {
     const adapter = this.adapters.getOrThrow(session.agentAdapterId);
     if (session.externalSessionId && input.externalSessionId && session.externalSessionId !== input.externalSessionId) {
       throw new ContextOsError("CONFLICT", "Session is already bound to a different external agent session", {
@@ -171,7 +172,8 @@ export class ContinueSessionService {
     }
     const imported = adapter.importTranscript({
       cwd: this.runtime.getProjectRoot(session.projectId),
-      externalSessionId: input.externalSessionId ?? session.externalSessionId ?? undefined
+      externalSessionId: input.externalSessionId ?? session.externalSessionId ?? undefined,
+      correlationText: input.correlationText
     });
     if (session.externalSessionId && session.externalSessionId !== imported.externalSessionId) {
       throw new ContextOsError("CONFLICT", "Adapter returned a different external session", { sessionId: session.id });
@@ -278,12 +280,15 @@ export class ContinueSessionService {
     summary: string,
     nextAction: string | null
   ): void {
-    if (!session.externalSessionId) return;
+    const correlationText = session.externalSessionId ? undefined : launchCorrelationText(session);
     try {
       const imported = this.importAdapterTranscriptInternal(session, {
-        externalSessionId: session.externalSessionId,
-        title: "Codex transcript after run",
-        summary: "Captured Codex transcript after managed run exit."
+        externalSessionId: session.externalSessionId ?? undefined,
+        correlationText,
+        title: session.externalSessionId ? "Codex transcript after run" : "Codex transcript after launch",
+        summary: session.externalSessionId
+          ? "Captured Codex transcript after managed run exit."
+          : "Captured and bound Codex transcript after managed launch exit."
       });
       this.writeResumeCapsule(
         session,
@@ -298,7 +303,7 @@ export class ContinueSessionService {
         sessionId: session.id,
         projectId: session.projectId,
         runId,
-        externalSessionId: session.externalSessionId,
+        externalSessionId: session.externalSessionId ?? null,
         message: error instanceof Error ? error.message : "Transcript reconciliation failed"
       }, nowMs());
     }
@@ -333,17 +338,16 @@ export class ContinueSessionService {
     }
   }
 
-  private recordHandoffEvidence(input: { session: SessionDto; rootPath: string; contextPackage: ContextPackageDto }): void {
+  private recordHandoffEvidence(input: { session: SessionDto; projectId: string; contextPackageId: string; contentText: string }): void {
     if (!this.evidenceStore) return;
     try {
       const evidenceId = newId("ev");
-      const contentText = formatHandoffPrompt(input);
-      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, projectId: input.session.projectId, contentText });
+      const stored = this.evidenceStore.writeText({ snapshotId: evidenceId, projectId: input.projectId, contentText: input.contentText });
       this.runtime.createSessionHandoffEvidence({
         id: evidenceId,
-        projectId: input.session.projectId,
+        projectId: input.projectId,
         sessionId: input.session.id,
-        contextPackageId: input.contextPackage.id,
+        contextPackageId: input.contextPackageId,
         title: "ContextOS handoff prompt",
         contentHash: stored.contentHash,
         storageRef: stored.storageRef,
@@ -423,6 +427,10 @@ function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; con
     "- If this task depends on prior GUI conversation, ask the user to paste or import that transcript.",
     ""
   ].join("\n");
+}
+
+function launchCorrelationText(session: SessionDto): string {
+  return `Session ID: ${session.id}`;
 }
 
 function formatResumePrompt(input: { session: SessionDto; contextPackage: ContextPackageDto }): string {

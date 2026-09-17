@@ -3,6 +3,7 @@ import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from
 
 export type AgentLaunchInput = {
   cwd: string;
+  prompt?: string;
   supervisor: ProcessSupervisor;
   onExit?: (exit: ProcessExitInfo) => void;
 };
@@ -30,11 +31,11 @@ export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
   discover(): AgentAdapterStatusDto;
-  buildLaunchInfo(input: { cwd: string }): AgentLaunchInfoDto;
+  buildLaunchInfo(input: { cwd: string; prompt?: string }): AgentLaunchInfoDto;
   buildResumeInfo(input: { cwd: string; externalSessionId: string; prompt: string }): AgentLaunchInfoDto;
   launch(input: AgentLaunchInput): AgentLaunchResult;
   resume(input: AgentResumeInput): AgentLaunchResult;
   inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus;
   interrupt(input: { pid: number; supervisor: ProcessSupervisor }): boolean;
-  importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult;
+  importTranscript(input: { cwd: string; externalSessionId?: string; correlationText?: string }): AgentTranscriptImportResult;
 }

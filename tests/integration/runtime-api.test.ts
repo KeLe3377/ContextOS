@@ -92,6 +92,75 @@ describe("runtime APIs", () => {
     expect(failed.completedAt).toBeTruthy();
   });
 
+  test("automatically binds the Codex session created by the first launch", async () => {
+    const externalSessionId = "codex-first-launch-bound";
+    const { server, tempDir } = await createTestServer((tempDir) => {
+      const sessionsDir = join(tempDir, "codex-sessions");
+      const transcriptPath = join(sessionsDir, "rollout-first-launch-bound.jsonl");
+      const script = [
+        "const fs = require('node:fs')",
+        "const path = require('node:path')",
+        `const sessionsDir = ${JSON.stringify(sessionsDir)}`,
+        `const transcriptPath = ${JSON.stringify(transcriptPath)}`,
+        `const externalSessionId = ${JSON.stringify(externalSessionId)}`,
+        "const prompt = process.argv[1] || ''",
+        "fs.mkdirSync(sessionsDir, { recursive: true })",
+        "const rows = [",
+        "  { type: 'session_meta', payload: { id: externalSessionId, cwd: 'D:/project/ContextOS' } },",
+        "  { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } },",
+        "  { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'bound from first launch' }] } }",
+        "]",
+        "fs.writeFileSync(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join('\\n')}\\n`, 'utf8')",
+        "console.log('first-launch-bound')"
+      ].join("\n");
+      return ["-e", script];
+    });
+    const session = await createSession(server);
+
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json()).toMatchObject({
+      launch: { operation: "launch", externalSessionId: null }
+    });
+    expect(continued.json().launch.args.at(-1)).toContain(`Session ID: ${session.id}`);
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.json().externalSessionId).toBe(externalSessionId);
+
+    const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
+    const importedTranscripts = evidence.json().items.filter((item: { metadata: { stream?: string } }) => item.metadata.stream === "imported-transcript");
+    expect(importedTranscripts).toHaveLength(1);
+    expect(importedTranscripts[0]).toMatchObject({
+      title: "Codex transcript after launch",
+      metadata: expect.objectContaining({ externalSessionId })
+    });
+
+    const completed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const resumed = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: completed.json().revision }
+    });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({
+      launch: { operation: "resume", externalSessionId }
+    });
+
+    const db = new Database(join(tempDir, "contextos.sqlite"), { readonly: true });
+    try {
+      const failures = db.prepare("SELECT COUNT(*) AS count FROM activity_events WHERE resource_id = ? AND event_type = 'TRANSCRIPT_RECONCILE_FAILED'")
+        .get(session.id) as { count: number };
+      expect(failures.count).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   test("resumes the bound Codex session with an incremental context prompt", async () => {
     const externalSessionId = "codex-resume-session";
     const projectRoot = "D:/project/ContextOS";
@@ -495,12 +564,13 @@ describe("runtime APIs", () => {
   });
 });
 
-async function createTestServer(args: string[], configure?: (tempDir: string) => Promise<void>): Promise<{ server: FastifyInstance; tempDir: string }> {
+async function createTestServer(args: string[] | ((tempDir: string) => string[]), configure?: (tempDir: string) => Promise<void>): Promise<{ server: FastifyInstance; tempDir: string }> {
   const tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-"));
   await configure?.(tempDir);
   const sessionsDir = join(tempDir, "codex-sessions");
+  const launchArgs = Array.isArray(args) ? args : args(tempDir);
   const server = await createDaemonServer({
-    agentAdapter: new CodexAdapter(process.execPath, args, process.platform, sessionsDir),
+    agentAdapter: new CodexAdapter(process.execPath, launchArgs, process.platform, sessionsDir),
     config: {
       host: "127.0.0.1",
       port: 0,

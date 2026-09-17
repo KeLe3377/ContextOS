@@ -47,11 +47,11 @@ export class CodexAdapter implements AgentAdapter {
     };
   }
 
-  buildLaunchInfo(input: { cwd: string }): AgentLaunchInfoDto {
+  buildLaunchInfo(input: { cwd: string; prompt?: string }): AgentLaunchInfoDto {
     return {
       adapterId: this.id,
       command: this.command,
-      args: this.launchArgs,
+      args: input.prompt ? [...this.launchArgs, input.prompt] : this.launchArgs,
       cwd: input.cwd,
       mode: "queued-job",
       operation: "launch",
@@ -108,14 +108,24 @@ export class CodexAdapter implements AgentAdapter {
     return input.supervisor.interrupt(input.pid, this.platform);
   }
 
-  importTranscript(input: { cwd: string; externalSessionId?: string }): AgentTranscriptImportResult {
+  importTranscript(input: { cwd: string; externalSessionId?: string; correlationText?: string }): AgentTranscriptImportResult {
     const candidates = listJsonlFiles(this.sessionsDir)
       .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    const matches: AgentTranscriptImportResult[] = [];
     for (const path of candidates) {
       const metadata = readSessionMetadata(path);
       if (!metadata || !isPathWithin(input.cwd, metadata.cwd)) continue;
       if (input.externalSessionId && metadata.id !== input.externalSessionId) continue;
-      return parseCodexTranscript(path, metadata.id);
+      const transcript = parseCodexTranscript(path, metadata.id);
+      if (input.correlationText && !transcript.contentText.includes(input.correlationText)) continue;
+      if (!input.correlationText) return transcript;
+      matches.push(transcript);
+    }
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length > 1) {
+      throw new ContextOsError("CONFLICT", "Multiple Codex transcripts matched the launch correlation marker", {
+        correlationText: input.correlationText
+      });
     }
     throw new ContextOsError("NOT_FOUND", input.externalSessionId
       ? "Codex transcript was not found for this Project and external session"

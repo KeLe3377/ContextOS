@@ -168,7 +168,7 @@ npm run dev
 
 运行中的 Codex Session 可通过 `GET /api/sessions/:id/runtime-status` 查询当前 Run 和受管进程状态，并通过 `POST /api/sessions/:id/interrupt`（请求体包含 `expectedRevision`）终止进程树。中断后 Session 进入 `PAUSED`，Job 和 Run 记录为 `CANCELED`。
 
-`Continue in Agent` 会根据 Session 是否已绑定 `externalSessionId` 自动选择行为：未绑定时启动新 Codex 会话；已绑定时使用明确 UUID 执行 `codex resume`，校验该会话属于当前 Project，并为每次恢复创建新的 Job 和 Run。已绑定 Session 的 resume 进程退出后会 best-effort 自动回收同一 Codex transcript：内容变化时写入新的 Evidence，内容未变时复用已有 Evidence；回收失败不会覆盖已经落库的 Run/Job 完成或失败状态。当前仍需先通过 transcript 自动导入绑定首次启动产生的 Codex UUID。
+`Continue in Agent` 会根据 Session 是否已绑定 `externalSessionId` 自动选择行为：未绑定时把 ContextOS handoff prompt 作为 Codex 初始 prompt 启动新会话，并在进程退出后用唯一 Session marker 自动绑定产生的 Codex UUID；已绑定时使用明确 UUID 执行 `codex resume`，校验该会话属于当前 Project，并为每次恢复创建新的 Job 和 Run。launch/resume 退出后会 best-effort 自动回收同一 Codex transcript：内容变化时写入新的 Evidence，内容未变时复用已有 Evidence；回收失败不会覆盖已经落库的 Run/Job 完成或失败状态。
 
 ## Codex Adapter
 

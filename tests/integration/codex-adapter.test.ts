@@ -66,6 +66,9 @@ describe("CodexAdapter command resolution", () => {
       const explicit = adapter.importTranscript({ cwd: projectRoot, externalSessionId: "codex-old" });
       expect(explicit.externalSessionId).toBe("codex-old");
       expect(explicit.contentText).toContain("old question");
+      const correlated = adapter.importTranscript({ cwd: projectRoot, correlationText: "old question" });
+      expect(correlated.externalSessionId).toBe("codex-old");
+      expect(() => adapter.importTranscript({ cwd: projectRoot, correlationText: "missing marker" })).toThrow("No Codex transcript was found");
       expect(() => adapter.importTranscript({ cwd: projectRoot, externalSessionId: "codex-outside" })).toThrow("Codex transcript was not found");
       const supervisor = new ProcessSupervisor();
       expect(() => adapter.resume({ cwd: projectRoot, externalSessionId: "missing", prompt: "continue", supervisor })).toThrow("was not found");

@@ -363,7 +363,7 @@ export class SqliteRuntimeRepository {
     return this.getResumeCapsule(sessionId);
   }
 
-  recordTranscriptReconciliationFailed(input: { sessionId: string; projectId: string; runId: string; externalSessionId: string; message: string }, now: number): void {
+  recordTranscriptReconciliationFailed(input: { sessionId: string; projectId: string; runId: string; externalSessionId: string | null; message: string }, now: number): void {
     const metadata = JSON.stringify({
       runId: input.runId,
       externalSessionId: input.externalSessionId,
