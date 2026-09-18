@@ -498,4 +498,11 @@ Phase 11 user-guide synchronization completed on 2026-09-18:
 - Removed obsolete limitations that described already completed product features as unavailable.
 - Updated README adapter normalization details and the verified 97-test baseline.
 
+P1 product-closeout increment completed on 2026-09-18:
+
+- Wired the saved `confirmDestructiveActions` setting into frontend destructive actions.
+- Added confirmation gates for Project/Session archive, managed run interrupt, Source/Context Item/Decision archive, Work Item cancel, and Work Item block.
+- Kept cancellation quiet so backing out of a confirmation does not show a false success state.
+- Verified with `npm run build:all`, targeted runtime/transcript integration tests, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

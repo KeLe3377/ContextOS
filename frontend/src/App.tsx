@@ -30,6 +30,12 @@ type WorkspaceData = {
   adapters: AnyRecord[];
 };
 
+class ActionCanceled extends Error {
+  constructor() {
+    super("Action canceled");
+  }
+}
+
 type SessionDetails = {
   sessionId: string;
   contextPack: AnyRecord | null;
@@ -502,9 +508,16 @@ export function App() {
       await loadData();
     } catch (actionError) {
       setActionLoading(false);
+      if (actionError instanceof ActionCanceled) return;
       setActionMessage({ text: actionError instanceof Error ? actionError.message : "Action failed", error: true });
     }
   }, [loadData]);
+
+  const confirmDestructiveAction = useCallback((message: string) => {
+    if (!data.settings?.confirmDestructiveActions) return true;
+    if (window.confirm(message)) return true;
+    throw new ActionCanceled();
+  }, [data.settings?.confirmDestructiveActions]);
 
   const projectById = useCallback((projectId: string) => data.projects.find((item) => item.id === projectId), [data.projects]);
   const sessionById = useCallback((sessionId: string) => data.sessions.find((item) => item.id === sessionId), [data.sessions]);
@@ -565,14 +578,16 @@ export function App() {
   const archiveProject = useCallback(async (projectId: string) => {
     const project = projectById(projectId);
     if (!project) throw new Error("No project is available to archive");
+    if (!confirmDestructiveAction(`Archive project "${project.name}"?`)) return;
     await sendJson(`/api/projects/${project.id}/archive`, "POST", { expectedRevision: project.revision });
-  }, [projectById]);
+  }, [confirmDestructiveAction, projectById]);
 
   const archiveSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
     if (!session) throw new Error("No session is available to archive");
+    if (!confirmDestructiveAction(`Archive session "${session.title || session.id}"?`)) return;
     await sendJson(`/api/sessions/${session.id}/archive`, "POST", { expectedRevision: session.revision });
-  }, [sessionById]);
+  }, [confirmDestructiveAction, sessionById]);
 
   const continueSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
@@ -596,8 +611,9 @@ export function App() {
   const interruptSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
     if (!session) throw new Error("No session is available to interrupt");
+    if (!confirmDestructiveAction(`Interrupt the active run for "${session.title || session.id}"?`)) return;
     await sendJson(`/api/sessions/${session.id}/interrupt`, "POST", { expectedRevision: session.revision });
-  }, [sessionById]);
+  }, [confirmDestructiveAction, sessionById]);
 
   const exportSessionCapsule = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
@@ -640,8 +656,9 @@ export function App() {
   const transitionSource = useCallback(async (sourceId: string, action: string) => {
     const source = sourceById(sourceId);
     if (!source) throw new Error("No context source is available");
+    if (action === "archive" && !confirmDestructiveAction(`Archive context source "${source.name}"?`)) return;
     await sendJson(`/api/context-sources/${source.id}/${action}`, "POST", { expectedRevision: source.revision });
-  }, [sourceById]);
+  }, [confirmDestructiveAction, sourceById]);
 
   const syncActiveSources = useCallback(async () => {
     const sources = data.contextSources.filter((source) => source.status === "ACTIVE");
@@ -677,8 +694,9 @@ export function App() {
   const transitionContextItem = useCallback(async (itemId: string, action: string) => {
     const item = data.contextItems.find((entry) => entry.id === itemId);
     if (!item) throw new Error("No context item is available");
+    if (action === "archive" && !confirmDestructiveAction(`Archive context item "${item.title}"?`)) return;
     await sendJson(`/api/context-items/${item.id}/${action}`, "POST", { expectedRevision: item.revision });
-  }, [data.contextItems]);
+  }, [confirmDestructiveAction, data.contextItems]);
   const openContextItemDetail = useCallback(async (item: AnyRecord) => {
     setContextItemDetail({ item, versions: [], loading: true, error: null });
     try {
@@ -710,13 +728,15 @@ export function App() {
   const transitionDecision = useCallback(async (decisionId: string, action: string) => {
     const decision = decisionById(decisionId);
     if (!decision) throw new Error("No decision is available");
+    if (action === "archive" && !confirmDestructiveAction(`Archive decision "${decision.title}"?`)) return;
     await sendJson(`/api/decisions/${decision.id}/${action}`, "POST", { expectedRevision: decision.revision });
-  }, [decisionById]);
+  }, [confirmDestructiveAction, decisionById]);
   const transitionWorkItem = useCallback(async (workItemId: string, action: string) => {
     const item = workItemById(workItemId);
     if (!item) throw new Error("No work item is available");
+    if (action === "cancel" && !confirmDestructiveAction(`Cancel work item "${item.title}"?`)) return;
     await sendJson(`/api/work-items/${item.id}/${action}`, "POST", { expectedRevision: item.revision });
-  }, [workItemById]);
+  }, [confirmDestructiveAction, workItemById]);
   const startWorkItemSession = useCallback(async (workItemId: string) => {
     const item = workItemById(workItemId);
     if (!item) throw new Error("No work item is available");
@@ -871,6 +891,7 @@ export function App() {
         decisionVersions={decisionVersions}
         workItemDetail={workItemDetail}
         runAction={runAction}
+        confirmDestructiveAction={confirmDestructiveAction}
       />
       <EvidenceDetail detail={evidenceDetail} onClose={() => setEvidenceDetail(null)} />
       <EvidenceCompare detail={evidenceCompare} onClose={() => setEvidenceCompare(null)} />
@@ -1472,7 +1493,7 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
   );
 }
 
-function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, runAction }: AnyRecord) {
+function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, runAction, confirmDestructiveAction }: AnyRecord) {
   const project = data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
@@ -1522,7 +1543,10 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
       }), "Work item updated");
     }
     if (kind === "workItemBlock") {
-      void runAction(() => sendJson(`/api/work-items/${workItem.id}/block`, "POST", { reason: values.get("reason"), expectedRevision: workItem.revision }), "Work item blocked");
+      void runAction(() => {
+        confirmDestructiveAction(`Block work item "${workItem.title}"?`);
+        return sendJson(`/api/work-items/${workItem.id}/block`, "POST", { reason: values.get("reason"), expectedRevision: workItem.revision });
+      }, "Work item blocked");
     }
     if (kind === "workItemResolveBlocker") {
       void runAction(() => sendJson(`/api/work-items/${workItem.id}/resolve-blocker`, "POST", { resolution: values.get("resolution"), expectedRevision: workItem.revision }), "Work item blocker resolved");
