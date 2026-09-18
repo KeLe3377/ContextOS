@@ -33,7 +33,7 @@ afterEach(async () => {
 });
 
 describe("runtime recovery", () => {
-  test("marks orphaned running continue runs failed on daemon restart", async () => {
+  test("cancels managed runs during graceful daemon shutdown", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "contextos-recovery-"));
     const databaseFile = join(tempDir, "contextos.sqlite");
 
@@ -56,8 +56,12 @@ describe("runtime recovery", () => {
     server = await createTestServer(databaseFile, ["-e", ""]);
     const recovered = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
     expect(recovered.statusCode).toBe(200);
-    expect(recovered.json().status).toBe("FAILED");
-    expect(recovered.json().completedAt).toBeTruthy();
+    expect(recovered.json().status).toBe("PAUSED");
+    expect(recovered.json().completedAt).toBeNull();
+    const runtime = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/runtime-status` });
+    expect(runtime.json().run).toMatchObject({ status: "CANCELED", failureCode: "DAEMON_SHUTDOWN" });
+    const health = await server.inject({ method: "GET", url: "/api/health" });
+    expect(health.json().recovery.orphanContinuesRecovered).toBe(0);
   });
 });
 

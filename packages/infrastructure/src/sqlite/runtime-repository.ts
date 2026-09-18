@@ -626,6 +626,34 @@ export class SqliteRuntimeRepository {
     return rows.length;
   }
 
+  cancelManagedRunningContinues(pids: number[], now: number): number {
+    if (pids.length === 0) return 0;
+    const placeholders = pids.map(() => "?").join(",");
+    const rows = this.db.prepare(`SELECT runs.id AS run_id, runs.job_id AS job_id, runs.session_id AS session_id, sessions.project_id AS project_id FROM session_runs runs JOIN sessions ON sessions.id = runs.session_id WHERE runs.status = 'RUNNING' AND runs.job_id IS NOT NULL AND runs.pid IN (${placeholders})`)
+      .all(...pids) as Array<{ run_id: string; job_id: string; session_id: string; project_id: string }>;
+    if (rows.length === 0) return 0;
+
+    this.db.transaction(() => {
+      for (const row of rows) {
+        this.db.prepare("UPDATE jobs SET status = 'CANCELED', ended_at = ?, failure_code = 'DAEMON_SHUTDOWN', failure_message = 'Daemon shut down while this run was active', updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
+          .run(now, now, row.job_id);
+        this.db.prepare("UPDATE session_runs SET status = 'CANCELED', ended_at = ?, failure_code = 'DAEMON_SHUTDOWN', failure_message = 'Daemon shut down while this run was active', updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
+          .run(now, now, row.run_id);
+        this.db.prepare("UPDATE job_attempts SET status = 'CANCELED', ended_at = ?, failure_code = 'DAEMON_SHUTDOWN', failure_message = 'Daemon shut down while this run was active' WHERE job_id = ? AND status = 'STARTED'")
+          .run(now, row.job_id);
+        this.db.prepare("UPDATE sessions SET status = 'PAUSED', completed_at = NULL, last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
+          .run(now, now, row.session_id);
+        this.reconcileWorkItemAttempt(row.run_id, "CANCELED", now, "Daemon shut down while this run was active");
+        const metadata = JSON.stringify({ jobId: row.job_id, runId: row.run_id, failureCode: "DAEMON_SHUTDOWN" });
+        this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_CANCELED_ON_SHUTDOWN', 'Canceled active run during daemon shutdown', ?, ?)")
+          .run(newId("act"), row.project_id, row.session_id, metadata, now);
+        this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CONTINUE_CANCELED_ON_SHUTDOWN', ?, ?)")
+          .run(newId("audit"), row.project_id, row.session_id, metadata, now);
+      }
+    })();
+    return rows.length;
+  }
+
   getProjectRoot(projectId: string): string {
     const row = this.db.prepare("SELECT root_path FROM projects WHERE id = ?").get(projectId) as { root_path: string } | undefined;
     if (!row) throw new ContextOsError("NOT_FOUND", "Project not found", { id: projectId });

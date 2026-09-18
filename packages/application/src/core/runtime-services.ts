@@ -206,6 +206,16 @@ export class ContinueSessionService {
     return { ...canceled, process: { pid: run.pid, managed: true, running: false } };
   }
 
+  shutdown(): number {
+    const pids = this.supervisor.runningPids();
+    if (pids.length === 0) return 0;
+    const canceled = this.runtime.cancelManagedRunningContinues(pids, nowMs());
+    for (const timer of this.transcriptBridgeTimers.values()) clearInterval(timer);
+    this.transcriptBridgeTimers.clear();
+    this.supervisor.interruptAll();
+    return canceled;
+  }
+
   importTranscript(session: SessionDto, input: TranscriptImportInput): TranscriptImportResult {
     return this.persistTranscript(session, input);
   }

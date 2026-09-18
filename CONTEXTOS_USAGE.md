@@ -178,6 +178,8 @@ codex exec resume <externalSessionId> -
 
 如果 Session 长时间 `RUNNING`，说明受管进程还没退出。可以点 `stop_circle` 中断。
 
+使用 `Ctrl+C` 正常关闭 ContextOS 时，仍在运行的受管 Agent 进程会被终止；对应 Run 和 Job 会记录为 `CANCELED / DAEMON_SHUTDOWN`，Session 回到 `PAUSED`，下次启动后可以继续。只有 daemon 异常退出、来不及执行关闭流程时，遗留的 `RUNNING` 记录才会在下次启动时恢复为 `FAILED / DAEMON_RESTARTED`。
+
 ### Runtime 信息
 
 `Latest Session Context` 里有一块 `RUNTIME`：

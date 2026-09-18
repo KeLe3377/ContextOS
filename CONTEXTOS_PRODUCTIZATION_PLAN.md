@@ -434,4 +434,11 @@ Phase 8 context-package quality increment completed on 2026-09-18:
 - Added readable package selection detail to Sessions and richer package counts to Overview.
 - Verified with `npm run build:all`, targeted Overview tests, full `npm test`, and `git diff --check`.
 
+Phase 9 graceful-shutdown increment completed on 2026-09-18:
+
+- Added an explicit daemon shutdown path that cancels active managed runs before closing storage.
+- Active Sessions return to `PAUSED`, while runs, jobs, and linked Work Item attempts become `CANCELED` with `DAEMON_SHUTDOWN` provenance.
+- Terminated all supervised agent process trees and cleared transcript bridge timers during shutdown.
+- Preserved startup orphan recovery for genuinely unclean daemon exits.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

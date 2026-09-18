@@ -218,6 +218,7 @@ export async function createDaemonServer(
   });
 
     server.addHook("onClose", async () => {
+      continueSessionService.shutdown();
       if (sqlite) sqlite.close();
       runtimeLock.release();
     });

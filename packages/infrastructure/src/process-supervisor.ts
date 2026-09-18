@@ -82,6 +82,20 @@ export class ProcessSupervisor {
       return child.kill("SIGTERM");
     }
   }
+
+  runningPids(): number[] {
+    return [...this.processes.entries()]
+      .filter(([, child]) => child.exitCode === null && child.signalCode === null)
+      .map(([pid]) => pid);
+  }
+
+  interruptAll(): number[] {
+    const interrupted: number[] = [];
+    for (const pid of this.runningPids()) {
+      if (this.interrupt(pid)) interrupted.push(pid);
+    }
+    return interrupted;
+  }
 }
 
 class BoundedOutput {
