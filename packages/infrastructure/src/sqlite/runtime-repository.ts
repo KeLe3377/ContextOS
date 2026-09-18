@@ -252,6 +252,7 @@ export class SqliteRuntimeRepository {
         .run(input.pid, now, now, input.runId);
       this.db.prepare("INSERT INTO job_attempts (id, job_id, status, started_at) VALUES (?, ?, 'STARTED', ?)")
         .run(newId("jattempt"), input.jobId, now);
+      this.reconcileWorkItemAttempt(input.runId, "STARTED", now);
     })();
     return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
   }
@@ -266,6 +267,7 @@ export class SqliteRuntimeRepository {
         .run(now, input.jobId);
       this.db.prepare("UPDATE sessions SET status = 'COMPLETED', completed_at = COALESCE(completed_at, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = (SELECT session_id FROM session_runs WHERE id = ?) AND status = 'RUNNING'")
         .run(now, now, now, input.runId);
+      this.reconcileWorkItemAttempt(input.runId, "SUCCEEDED", now);
     })();
     return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
   }
@@ -282,6 +284,7 @@ export class SqliteRuntimeRepository {
         .run(now, failureCode, input.failureMessage, input.jobId);
       this.db.prepare("UPDATE sessions SET status = 'FAILED', completed_at = COALESCE(completed_at, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = (SELECT session_id FROM session_runs WHERE id = ?) AND status = 'RUNNING'")
         .run(now, now, now, input.runId);
+      this.reconcileWorkItemAttempt(input.runId, "FAILED", now, input.failureMessage);
       const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode, failureMessage: input.failureMessage });
       this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_FAILED', ?, ?, ?)")
         .run(newId("act"), resource.projectId, resource.sessionId, input.failureMessage, metadata, now);
@@ -300,6 +303,7 @@ export class SqliteRuntimeRepository {
         .run(now, input.failureCode, input.failureMessage, now, input.runId);
       this.db.prepare("UPDATE sessions SET status = 'FAILED', completed_at = COALESCE(completed_at, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = (SELECT session_id FROM session_runs WHERE id = ?) AND status IN ('CREATED', 'RUNNING')")
         .run(now, now, now, input.runId);
+      this.reconcileWorkItemAttempt(input.runId, "FAILED", now, input.failureMessage);
       this.db.prepare("INSERT INTO job_attempts (id, job_id, status, started_at, ended_at, failure_code, failure_message) VALUES (?, ?, 'FAILED', ?, ?, ?, ?)")
         .run(newId("jattempt"), input.jobId, now, now, input.failureCode, input.failureMessage);
       const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode: input.failureCode, failureMessage: input.failureMessage });
@@ -341,6 +345,7 @@ export class SqliteRuntimeRepository {
         .run(now, now, input.runId);
       this.db.prepare("UPDATE job_attempts SET status = 'CANCELED', ended_at = ?, failure_code = 'INTERRUPTED', failure_message = 'Interrupted by user' WHERE job_id = ? AND status = 'STARTED'")
         .run(now, input.jobId);
+      this.reconcileWorkItemAttempt(input.runId, "CANCELED", now, "Agent session interrupted by user");
       const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode: "INTERRUPTED" });
       this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_INTERRUPTED', 'Interrupted agent continue session', ?, ?)")
         .run(newId("act"), session.project_id, input.sessionId, metadata, now);
@@ -539,6 +544,7 @@ export class SqliteRuntimeRepository {
           .run(now, row.job_id);
         this.db.prepare("UPDATE sessions SET status = 'FAILED', completed_at = COALESCE(completed_at, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
           .run(now, now, now, row.session_id);
+        this.reconcileWorkItemAttempt(row.run_id, "FAILED", now, "Daemon restarted before this run completed");
         this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_RECOVERED_FAILED', 'Marked orphaned continue run failed after daemon restart', ?, ?)")
           .run(newId("act"), row.project_id, row.session_id, JSON.stringify({ jobId: row.job_id, runId: row.run_id, failureCode: "DAEMON_RESTARTED" }), now);
         this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CONTINUE_RECOVERED_FAILED', ?, ?)")
@@ -623,6 +629,36 @@ export class SqliteRuntimeRepository {
       .get(runId) as { sessionId: string; projectId: string } | undefined;
     if (!row) throw new ContextOsError("NOT_FOUND", "Session run not found", { id: runId });
     return row;
+  }
+
+  private reconcileWorkItemAttempt(
+    runId: string,
+    status: "STARTED" | "SUCCEEDED" | "FAILED" | "CANCELED",
+    now: number,
+    detail?: string
+  ): void {
+    const attempts = this.db.prepare(`
+      SELECT attempts.id AS attemptId, attempts.work_item_id AS workItemId,
+             attempts.status AS previousStatus, work_items.project_id AS projectId
+      FROM work_item_attempts attempts
+      JOIN work_items ON work_items.id = attempts.work_item_id
+      WHERE attempts.session_id = (SELECT session_id FROM session_runs WHERE id = ?)
+        AND attempts.status != ?
+    `).all(runId, status) as Array<{ attemptId: string; workItemId: string; previousStatus: string; projectId: string }>;
+    if (attempts.length === 0) return;
+
+    const endedAt = status === "STARTED" ? null : now;
+    const eventType = `WORK_ITEM_ATTEMPT_${status}`;
+    const summary = detail ?? (status === "STARTED" ? "Agent session attempt started" : `Agent session attempt ${status.toLowerCase()}`);
+    const update = this.db.prepare("UPDATE work_item_attempts SET status = ?, result_ref = ?, ended_at = ? WHERE id = ?");
+    const activity = this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'WORK_ITEM', ?, ?, ?, ?, ?)");
+    const audit = this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'WORK_ITEM', ?, ?, ?, ?, ?)");
+    for (const attempt of attempts) {
+      update.run(status, runId, endedAt, attempt.attemptId);
+      const metadata = JSON.stringify({ attemptId: attempt.attemptId, runId, previousStatus: attempt.previousStatus, status, detail: detail ?? null });
+      activity.run(newId("act"), attempt.projectId, attempt.workItemId, eventType, summary, metadata, now);
+      audit.run(newId("audit"), attempt.projectId, attempt.workItemId, eventType, JSON.stringify({ attemptId: attempt.attemptId, status: attempt.previousStatus }), metadata, now);
+    }
   }
 }
 

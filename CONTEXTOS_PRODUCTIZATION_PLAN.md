@@ -389,6 +389,13 @@ Phase 6 first increment completed on 2026-09-18:
 - Extended Work Item PATCH contract/backend so definition fields are actually persisted.
 - Verified with `npm run build:all`, targeted Work Item tests, full `npm test`, and `git diff --check`.
 
+Phase 6 execution-loop increment completed on 2026-09-18:
+
+- Linked Work Item attempts to the full managed Session lifecycle instead of leaving them permanently `STARTED`.
+- Reconciled attempt states to `SUCCEEDED`, `FAILED`, or `CANCELED`, including daemon-restart recovery, and preserved the latest Session run reference.
+- Added Work Item activity and audit records for attempt lifecycle changes.
+- Added direct navigation from a Work Item attempt to its linked Session, with completion time and run reference visible in the Work detail workspace.
+
 Phase 7 first increment completed on 2026-09-18:
 
 - Added Rules detail workspace with current version, validation state, enforcement, effect, scope, usage, versions, and recent evaluations.

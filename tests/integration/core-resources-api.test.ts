@@ -199,6 +199,24 @@ describe("core resource APIs", () => {
       })
     ]);
 
+    const continued = await server!.inject({
+      method: "POST",
+      url: `/api/sessions/${started.json().session.id}/continue`,
+      payload: { expectedRevision: started.json().session.revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    await waitForSessionStatus(started.json().session.id, "COMPLETED");
+
+    const completedAttempts = await server!.inject({ method: "GET", url: `/api/work-items/${create.json().id}/attempts` });
+    expect(completedAttempts.json().items).toEqual([
+      expect.objectContaining({
+        id: started.json().attempt.id,
+        status: "SUCCEEDED",
+        resultRef: continued.json().run.id,
+        endedAt: expect.any(String)
+      })
+    ]);
+
     const stale = await server!.inject({
       method: "POST",
       url: `/api/work-items/${create.json().id}/start-session`,
@@ -449,5 +467,12 @@ describe("core resource APIs", () => {
   });
 });
 
-
+async function waitForSessionStatus(sessionId: string, status: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await server!.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
+    if (response.json().status === status) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Session ${sessionId} did not reach ${status}`);
+}
 

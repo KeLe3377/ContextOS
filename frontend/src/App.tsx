@@ -517,6 +517,11 @@ export function App() {
     setSessionDetailsLoading(false);
   }, [loadSessionDetails, sessionById]);
 
+  const openSession = useCallback(async (sessionId: string) => {
+    await selectSession(sessionId);
+    location.hash = "sessions";
+  }, [selectSession]);
+
   const selectReview = useCallback(async (reviewId: string) => {
     preferredReviewIdRef.current = reviewId;
     setSelectedReviewId(reviewId);
@@ -803,7 +808,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -1107,7 +1112,7 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function WorkPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, transitionWorkItem, startWorkItemSession, selectedWorkItemId, selectWorkItem, workItemDetail, setModal } = props;
+  const { data, header, actionLoading, runAction, transitionWorkItem, startWorkItemSession, selectedWorkItemId, selectWorkItem, workItemDetail, openSession, setModal } = props;
   const selectedItem = data.workItems.find((item: AnyRecord) => item.id === selectedWorkItemId) || data.workItems[0];
   const detail = selectedItem && workItemDetail?.workItemId === selectedItem.id ? workItemDetail : null;
   const canStartSession = (item: AnyRecord) => ["READY", "IN_PROGRESS"].includes(item.status);
@@ -1166,9 +1171,13 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
         <div className="evidence-row-main">
           <div className="title-sm">{attempt.session?.title || attempt.summary || "Agent session"}</div>
           <div className="muted mono">{fmtDate(attempt.startedAt || attempt.createdAt)} · {attempt.sessionId || "no session"}</div>
+          {attempt.endedAt ? <div className="muted mono">Ended {fmtDate(attempt.endedAt)} · run {attempt.resultRef || "-"}</div> : null}
           {attempt.session?.intent ? <div className="muted">{String(attempt.session.intent).split("\n")[0]}</div> : null}
         </div>
-        <Badge text={attempt.status} tone={toneForStatus(attempt.status)} />
+        <div className="row-actions">
+          <Badge text={attempt.status} tone={toneForStatus(attempt.status)} />
+          <button className="icon-btn table-action" title="Open linked session" disabled={!attempt.sessionId || actionLoading} onClick={() => attempt.sessionId ? void openSession(attempt.sessionId) : undefined}>{icon("visibility")}</button>
+        </div>
       </div>)}</div> : detail && !detail.loading ? <EmptyNote>No agent sessions have been started for this work item yet.</EmptyNote> : null}
     </Panel>
   </div></div></>;
