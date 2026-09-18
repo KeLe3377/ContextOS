@@ -199,6 +199,8 @@ No managed process
 
 说明没有当前 daemon 可管理的运行进程，通常是已退出、daemon 重启过，或该 Session 是手动导入的。
 
+`Run History` 会保留这个 Session 的每次 Agent 运行，包括状态、Run ID、开始/结束时间、PID、退出码和失败原因。失败后再次 Continue 不会覆盖之前的失败记录。Settings 的 `Runtime Health` 也可以从失败记录直接打开所属 Session。
+
 ### Evidence 列表
 
 Evidence 里常见项目：

@@ -160,6 +160,10 @@ export class ContinueSessionService {
     return this.runtime.getResumeCapsule(sessionId);
   }
 
+  listRuns(sessionId: string): SessionRunDto[] {
+    return this.runtime.listSessionRuns(sessionId);
+  }
+
   listActivity(sessionId: string): ResourceActivityEventDto[] {
     return this.runtime.listResourceActivity({ resourceType: "SESSION", resourceId: sessionId, limit: 40 });
   }

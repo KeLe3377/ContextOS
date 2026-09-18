@@ -341,6 +341,12 @@ export class SqliteRuntimeRepository {
     return row ? mapSessionRun(row) : null;
   }
 
+  listSessionRuns(sessionId: string, limit = 50): SessionRunDto[] {
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    return (this.db.prepare("SELECT * FROM session_runs WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(sessionId, safeLimit) as SessionRunRow[]).map(mapSessionRun);
+  }
+
   isSessionRunRunning(runId: string): boolean {
     const row = this.db.prepare("SELECT status FROM session_runs WHERE id = ?").get(runId) as { status: string } | undefined;
     return row?.status === "RUNNING";

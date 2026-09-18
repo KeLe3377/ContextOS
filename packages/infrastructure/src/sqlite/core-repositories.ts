@@ -207,6 +207,7 @@ type WorkItemRow = { id: string; project_id: string; parent_id: string | null; t
 type WorkItemAttemptRow = {
   id: string; work_item_id: string; session_id: string | null; status: WorkItemAttemptDto["status"]; summary: string | null; result_ref: string | null;
   started_at: number | null; ended_at: number | null; created_at: number;
+  failure_code: string | null; failure_message: string | null;
   session_id_join: string | null; project_id: string | null; agent_adapter_id: string | null; external_session_id: string | null; title: string | null; intent: string | null;
   session_status: SessionStatus | null; session_started_at: number | null; completed_at: number | null; last_activity_at: number | null; session_created_at: number | null;
   session_updated_at: number | null; session_revision: number | null; archived_at: number | null;
@@ -352,6 +353,8 @@ export class SqliteWorkItemRepository {
   listAttempts(id: string): WorkItemAttemptDto[] {
     return (this.db.prepare(`
       SELECT attempts.*,
+             runs.failure_code,
+             runs.failure_message,
              sessions.id AS session_id_join,
              sessions.project_id,
              sessions.agent_adapter_id,
@@ -368,6 +371,7 @@ export class SqliteWorkItemRepository {
              sessions.archived_at
       FROM work_item_attempts attempts
       LEFT JOIN sessions ON sessions.id = attempts.session_id
+      LEFT JOIN session_runs runs ON runs.id = attempts.result_ref
       WHERE attempts.work_item_id = ?
       ORDER BY attempts.created_at DESC, attempts.id DESC
     `).all(id) as WorkItemAttemptRow[]).map(mapWorkItemAttempt);
@@ -452,6 +456,8 @@ function mapWorkItemAttempt(row: WorkItemAttemptRow): WorkItemAttemptDto {
     status: row.status,
     summary: row.summary,
     resultRef: row.result_ref,
+    failureCode: row.failure_code,
+    failureMessage: row.failure_message,
     startedAt: iso(row.started_at),
     endedAt: iso(row.ended_at),
     createdAt: new Date(row.created_at).toISOString(),

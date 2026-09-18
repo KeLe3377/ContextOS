@@ -89,6 +89,12 @@ export class SessionService {
     return this.continueSession.inspectStatus(this.sessions.getByIdOrThrow(id));
   }
 
+  runs(id: string) {
+    if (!this.continueSession) throw new Error("Continue session runtime is not configured");
+    this.sessions.getByIdOrThrow(id);
+    return this.continueSession.listRuns(id);
+  }
+
   activity(id: string): ResourceActivityEventDto[] {
     if (!this.continueSession) throw new Error("Continue session runtime is not configured");
     this.sessions.getByIdOrThrow(id);

@@ -36,6 +36,7 @@ type SessionDetails = {
   evidence: AnyRecord[];
   resumeCapsule: AnyRecord | null;
   runtimeStatus: AnyRecord | null;
+  runs: AnyRecord[];
   activity: AnyRecord[];
   transcriptEvents: AnyRecord | null;
 };
@@ -344,11 +345,12 @@ export function App() {
 
   const loadSessionDetails = useCallback(async (session: AnyRecord | undefined): Promise<SessionDetails | null> => {
     if (!session) return null;
-    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity, transcriptEvents] = await Promise.all([
+    const [contextPack, evidence, resumeCapsule, runtimeStatus, runs, activity, transcriptEvents] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
       settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
       settle(fetchJson(`/api/sessions/${session.id}/runtime-status`)),
+      settle(fetchJson(`/api/sessions/${session.id}/runs`)),
       settle(fetchJson(`/api/sessions/${session.id}/activity`)),
       settle(fetchJson(`/api/sessions/${session.id}/transcript-events`))
     ]);
@@ -358,6 +360,7 @@ export function App() {
       evidence: evidence.ok ? evidence.value.items : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
+      runs: runs.ok ? runs.value.items : [],
       activity: activity.ok ? activity.value.items : [],
       transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null
     };
@@ -941,6 +944,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
   const contextItemCount = details?.contextPack?.contextItems?.length ?? 0;
   const evidencePackageCount = details?.contextPack?.evidenceSnapshots?.length ?? 0;
   const runtime = details?.runtimeStatus;
+  const runs = details?.runs || [];
   const latestAgentTranscript = details?.evidence.find((item: AnyRecord) => item.metadata?.stream === "imported-transcript" && item.metadata?.adapterId);
   const syncLabel = latestAgentTranscript?.metadata?.sourceUpdatedAt ? `Last synced ${fmtDate(latestAgentTranscript.metadata.sourceUpdatedAt)}` : selectedSession?.externalSessionId ? "Bound, not synced yet" : "Not bound yet";
   return (
@@ -982,7 +986,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           </div>
           <div className="detail-grid">
             <div className="detail-wide detail-with-action"><div><span className="mono muted">CONTEXT PACKAGE</span><strong className="mono">{details.contextPack?.id || "Not generated"}</strong></div><button className="icon-btn table-action" title="Copy context package ID" disabled={!details.contextPack?.id} onClick={() => copyText(details.contextPack?.id)}>{icon("content_copy")}</button></div>
-            <div className="detail-wide"><span className="mono muted">RUNTIME</span><strong>{runtime?.run?.status || "No active run"}</strong><div className="muted mono">{runtime?.process ? `pid ${runtime.process.pid} · managed ${runtime.process.managed} · running ${runtime.process.running}` : "No managed process"}</div></div>
+            <div className="detail-wide"><span className="mono muted">RUNTIME</span><strong>{runtime?.run?.status || "No active run"}</strong><div className="muted mono">{runtime?.process ? `pid ${runtime.process.pid} · managed ${runtime.process.managed} · running ${runtime.process.running}` : "No managed process"}</div>{runtime?.run?.failureMessage ? <div className="muted">{runtime.run.failureCode}: {runtime.run.failureMessage}</div> : null}</div>
             <div className="detail-wide"><span className="mono muted">RESUME SUMMARY</span><strong>{details.resumeCapsule?.summary || "No resume capsule yet"}</strong></div>
             <div className="detail-wide"><span className="mono muted">NEXT ACTION</span><strong>{details.resumeCapsule?.nextAction || "-"}</strong></div>
           </div>
@@ -994,6 +998,10 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <button className="btn" disabled={actionLoading} onClick={() => setModal({ kind: "existingTranscript", sessionId: selectedSession.id })}>{icon("manage_search")}<span>Import Existing</span></button>
             <button className="btn" disabled={actionLoading} onClick={() => setModal({ kind: "transcript", sessionId: selectedSession.id })}>{icon("edit_note")}<span>Paste Transcript</span></button>
             <button className="btn" disabled={actionLoading} onClick={() => runAction(() => exportSessionCapsule(selectedSession.id), "Session capsule exported")}>{icon("download")}<span>Export Capsule</span></button>
+          </div>
+          <div>
+            <div className="title-sm evidence-section-title">Run History</div>
+            {runs.length ? <div className="stack compact">{runs.map((run: AnyRecord) => <div className="metric-row evidence-row" key={run.id}><div className="evidence-row-main"><div className="title-sm">{run.failureMessage || `Agent run ${run.status.toLowerCase()}`}</div><div className="muted mono">{run.id} · {fmtDate(run.startedAt || run.createdAt)}{run.endedAt ? ` · ended ${fmtDate(run.endedAt)}` : ""}</div><div className="muted mono">{run.pid ? `pid ${run.pid}` : "no pid"}{run.exitCode !== null && run.exitCode !== undefined ? ` · exit ${run.exitCode}` : ""}</div></div><Badge text={run.failureCode || run.status} tone={toneForStatus(run.status)} /></div>)}</div> : <EmptyNote>No agent runs recorded.</EmptyNote>}
           </div>
           {details.contextPack ? <div>
             <div className="title-sm evidence-section-title">Context Package Selection</div>
@@ -1190,6 +1198,7 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
           <div className="title-sm">{attempt.session?.title || attempt.summary || "Agent session"}</div>
           <div className="muted mono">{fmtDate(attempt.startedAt || attempt.createdAt)} · {attempt.sessionId || "no session"}</div>
           {attempt.endedAt ? <div className="muted mono">Ended {fmtDate(attempt.endedAt)} · run {attempt.resultRef || "-"}</div> : null}
+          {attempt.failureMessage ? <div className="muted">{attempt.failureCode}: {attempt.failureMessage}</div> : null}
           {attempt.session?.intent ? <div className="muted">{String(attempt.session.intent).split("\n")[0]}</div> : null}
         </div>
         <div className="row-actions">
@@ -1311,7 +1320,7 @@ function RulesPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function SettingsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, defaultAdapterId, adapterList } = props;
+  const { data, header, defaultAdapterId, adapterList, openSession } = props;
   const settings = data.settings;
   const runtimeHealth = data.runtimeHealth;
   const connected = data.adapters.filter((adapter: AnyRecord) => adapter.available).length;
@@ -1338,9 +1347,9 @@ function SettingsPage(props: AnyRecord & { header: ReactNode }) {
           <div className="setting-row"><div><div className="title-sm">Job lifecycle</div><div className="muted mono">{Object.entries(runtimeHealth.jobs.byStatus || {}).map(([status, count]) => `${status}:${count}`).join(" · ")}</div></div><Badge text={`${runtimeHealth.jobs.total} jobs`} /></div>
           <div className="setting-row"><div><div className="title-sm">Outbox</div><div className="muted">Internal delivery queue used by runtime support events.</div></div><Badge text={`${runtimeHealth.outbox.failed} failed`} tone={runtimeHealth.outbox.failed ? "red" : "green"} /></div>
           {failedRuns.length || failedJobs.length ? <div className="stack compact">
-            {[...failedRuns.map((run: AnyRecord) => ({ id: run.id, title: run.failureMessage || run.failureCode || "Session run failed", meta: `${run.sessionId} · ${fmtDate(run.updatedAt)}`, badge: run.failureCode || run.status })),
+            {[...failedRuns.map((run: AnyRecord) => ({ id: run.id, sessionId: run.sessionId, title: run.failureMessage || run.failureCode || "Session run failed", meta: `${run.sessionId} · ${fmtDate(run.updatedAt)}`, badge: run.failureCode || run.status })),
               ...failedJobs.map((job: AnyRecord) => ({ id: job.id, title: job.failureMessage || job.failureCode || job.kind, meta: `${job.resourceType} ${job.resourceId} · ${fmtDate(job.updatedAt)}`, badge: job.failureCode || job.status }))].slice(0, 6).map((item: AnyRecord) => (
-              <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{item.meta}</div></div><Badge text={item.badge} tone="red" /></div>
+              <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{item.meta}</div></div><div className="row-actions"><Badge text={item.badge} tone="red" />{item.sessionId ? <button className="icon-btn table-action" title="Open owning session" onClick={() => void openSession(item.sessionId)}>{icon("visibility")}</button> : null}</div></div>
             ))}
           </div> : <EmptyNote>No failed runtime work is currently recorded.</EmptyNote>}
         </> : <EmptyNote>Runtime health unavailable.</EmptyNote>}

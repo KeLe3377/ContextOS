@@ -82,6 +82,8 @@ export type WorkItemAttemptDto = {
   status: "STARTED" | "SUCCEEDED" | "FAILED" | "CANCELED";
   summary: string | null;
   resultRef: string | null;
+  failureCode: string | null;
+  failureMessage: string | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;

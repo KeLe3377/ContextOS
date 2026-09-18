@@ -60,6 +60,10 @@ describe("core resource APIs", () => {
     expect(continued.statusCode).toBe(200);
     expect(continued.json().status).toBe("RUNNING");
 
+    const runs = await server!.inject({ method: "GET", url: `/api/sessions/${session.id}/runs` });
+    expect(runs.statusCode).toBe(200);
+    expect(runs.json().items).toEqual([expect.objectContaining({ sessionId: session.id, status: "RUNNING" })]);
+
     const db = new Database(join(tempDir!, "contextos.sqlite"), { readonly: true });
     try {
       const activity = db.prepare("SELECT event_type FROM activity_events WHERE resource_id = ? ORDER BY created_at, id").all(session.id);

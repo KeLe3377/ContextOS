@@ -441,4 +441,11 @@ Phase 9 graceful-shutdown increment completed on 2026-09-18:
 - Terminated all supervised agent process trees and cleared transcript bridge timers during shutdown.
 - Preserved startup orphan recovery for genuinely unclean daemon exits.
 
+Phase 9 runtime-visibility increment completed on 2026-09-18:
+
+- Added per-Session run history so earlier failures remain visible after later retries.
+- Displayed runtime failure codes, messages, process IDs, exit codes, and timestamps in Session detail.
+- Exposed linked run failures directly on Work Item attempts.
+- Added navigation from failed runs in Runtime Health to their owning Session.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
