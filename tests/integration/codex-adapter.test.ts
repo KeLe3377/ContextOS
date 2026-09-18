@@ -86,8 +86,10 @@ describe("CodexAdapter command resolution", () => {
       const latest = adapter.importTranscript({ cwd: projectRoot });
       expect(latest).toMatchObject({
         externalSessionId: "codex-latest",
-        contentText: "USER:\nnew question\n\nASSISTANT:\nnew answer",
-        parserVersion: "codex-jsonl.v1",
+        contentText: "USER:\nnew question\n\nTOOL CALL shell (call_shell):\ntool output\n\nTOOL RESULT (call_shell):\ncommand finished\n\nASSISTANT:\nnew answer",
+        parserVersion: "codex-jsonl.v2",
+        eventCount: 4,
+        eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 0 },
         messageCount: 2,
         roleCounts: { user: 1, assistant: 1 },
         turnCount: 1,
@@ -96,7 +98,10 @@ describe("CodexAdapter command resolution", () => {
         truncated: false
       });
       expect(latest.contentText).not.toContain("developer instructions");
-      expect(latest.contentText).not.toContain("tool output");
+      expect(latest.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "tool_call", name: "shell", callId: "call_shell", text: "tool output" }),
+        expect.objectContaining({ kind: "tool_result", callId: "call_shell", text: "command finished" })
+      ]));
 
       const explicit = adapter.importTranscript({ cwd: projectRoot, externalSessionId: "codex-old" });
       expect(explicit.externalSessionId).toBe("codex-old");
@@ -118,6 +123,33 @@ describe("CodexAdapter command resolution", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  test("normalizes Codex summary events without counting them as messages", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-codex-summary-"));
+    try {
+      const sessionsDir = join(tempDir, "sessions");
+      const projectRoot = join(tempDir, "project");
+      await Promise.all([mkdir(sessionsDir, { recursive: true }), mkdir(projectRoot)]);
+      const rows = [
+        { type: "session_meta", payload: { id: "codex-summary", cwd: projectRoot } },
+        { type: "summary", payload: { type: "summary", summary: "Earlier work selected the SQLite path." } },
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "what changed?" }] } },
+        { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "runtime health changed" }] } }
+      ];
+      await writeFile(join(sessionsDir, "rollout-summary.jsonl"), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+
+      const transcript = new CodexAdapter(process.execPath, ["--version"], process.platform, sessionsDir).importTranscript({ cwd: projectRoot });
+      expect(transcript).toMatchObject({
+        parserVersion: "codex-jsonl.v2",
+        eventCount: 3,
+        eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 1 },
+        messageCount: 2
+      });
+      expect(transcript.contentText).toContain("SUMMARY:\nEarlier work selected the SQLite path.");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 async function writeCodexTranscript(path: string, id: string, cwd: string, userText: string, assistantText: string): Promise<void> {
@@ -125,7 +157,8 @@ async function writeCodexTranscript(path: string, id: string, cwd: string, userT
     { type: "session_meta", payload: { id, cwd } },
     { type: "response_item", payload: { type: "message", role: "developer", content: [{ type: "input_text", text: "developer instructions" }] } },
     { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: userText }] } },
-    { type: "response_item", payload: { type: "function_call", name: "shell", arguments: "tool output" } },
+    { type: "response_item", payload: { type: "function_call", name: "shell", call_id: "call_shell", arguments: "tool output" } },
+    { type: "response_item", payload: { type: "function_call_output", call_id: "call_shell", output: "command finished" } },
     { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: assistantText }] } }
   ];
   await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");

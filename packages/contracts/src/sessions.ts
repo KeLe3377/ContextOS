@@ -77,6 +77,21 @@ export type AdapterTranscriptImportResult = TranscriptImportResult & {
     externalSessionId: string;
     parserVersion: string;
     sourceUpdatedAt: string;
+    eventCount?: number;
+    eventCounts?: {
+      message: number;
+      toolCall: number;
+      toolResult: number;
+      summary: number;
+    };
+    events?: Array<{
+      ordinal: number;
+      kind: "message" | "tool_call" | "tool_result" | "summary";
+      role?: "user" | "assistant" | "system";
+      text?: string;
+      name?: string;
+      callId?: string;
+    }>;
     messageCount: number;
     roleCounts: {
       user: number;

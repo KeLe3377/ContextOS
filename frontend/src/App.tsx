@@ -216,6 +216,21 @@ function fmtDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "-";
 }
 
+function transcriptStructure(metadata: AnyRecord | null | undefined) {
+  if (!metadata) return "No transcript metadata";
+  const counts = metadata.eventCounts || {};
+  const parts = [
+    `${metadata.messageCount || 0} messages`,
+    metadata.eventCount ? `${metadata.eventCount} events` : null,
+    counts.toolCall ? `${counts.toolCall} tool calls` : null,
+    counts.toolResult ? `${counts.toolResult} tool results` : null,
+    counts.summary ? `${counts.summary} summaries` : null,
+    `${metadata.turnCount || 0} turns`,
+    metadata.transcriptTruncated ? "truncated" : "complete"
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
 function toneForStatus(status: string | null | undefined) {
   if (["ACTIVE", "RUNNING", "READY", "SUCCEEDED", "DONE", "ACCEPTED", "RESOLVED", "VALID"].includes(String(status))) return "green";
   if (["OPEN", "DRAFT", "PROPOSED", "CREATED", "IN_PROGRESS", "IN_REVIEW"].includes(String(status))) return "blue";
@@ -889,7 +904,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
 function SessionsPage(props: AnyRecord & { header: ReactNode }) {
   const { data, header, selectedSessionId, selectSession, sessionDetails: details, sessionDetailsLoading, actionLoading, runAction, archiveSession, continueSession, syncSessionTranscript, interruptSession, exportSessionCapsule, openEvidenceDetail, setModal } = props;
   const canContinue = (status: string) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
-  const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `adapter ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `external ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} messages` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} turns` : null].filter(Boolean).join(" · ");
+  const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `adapter ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `external ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} messages` : null, item.metadata?.eventCount ? `${item.metadata.eventCount} events` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} turns` : null].filter(Boolean).join(" · ");
   const selectedSession = data.sessions.find((session: AnyRecord) => session.id === selectedSessionId) || data.sessions[0];
   const contextItemCount = details?.contextPack?.contextItems?.length ?? 0;
   const evidencePackageCount = details?.contextPack?.evidenceSnapshots?.length ?? 0;
@@ -925,7 +940,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <div className="detail-wide"><span className="mono muted">TITLE</span><strong>{selectedSession.title || selectedSession.id}</strong></div>
             <div className="detail-wide"><span className="mono muted">INTENT</span><strong>{selectedSession.intent || "-"}</strong></div>
             <div className="detail-wide detail-with-action"><div><span className="mono muted">EXTERNAL AGENT SESSION</span><strong className="mono">{selectedSession.externalSessionId || "Not bound"}</strong></div><button className="icon-btn table-action" title="Copy external session ID" disabled={!selectedSession.externalSessionId} onClick={() => copyText(selectedSession.externalSessionId)}>{icon("content_copy")}</button></div>
-            <div className="detail-wide detail-with-action"><div><span className="mono muted">TRANSCRIPT SYNC</span><strong>{syncLabel}</strong><div className="muted mono">{latestAgentTranscript ? `${latestAgentTranscript.metadata?.messageCount || 0} messages · ${latestAgentTranscript.metadata?.turnCount || 0} turns · ${latestAgentTranscript.metadata?.transcriptTruncated ? "truncated" : "complete"}` : "Uses Codex/Claude transcript discovery for this Project"}</div></div><button className="icon-btn table-action" title="Sync agent transcript now" disabled={actionLoading} onClick={() => runAction(() => syncSessionTranscript(selectedSession.id), "Transcript synced from agent")}>{icon("sync")}</button></div>
+            <div className="detail-wide detail-with-action"><div><span className="mono muted">TRANSCRIPT SYNC</span><strong>{syncLabel}</strong><div className="muted mono">{latestAgentTranscript ? transcriptStructure(latestAgentTranscript.metadata) : "Uses Codex/Claude transcript discovery for this Project"}</div></div><button className="icon-btn table-action" title="Sync agent transcript now" disabled={actionLoading} onClick={() => runAction(() => syncSessionTranscript(selectedSession.id), "Transcript synced from agent")}>{icon("sync")}</button></div>
           </div>
           <div className="kpi-grid compact-kpis">
             <div className="kpi"><div className="kpi-value">{contextItemCount}</div><div className="kpi-label mono">Context items</div></div>

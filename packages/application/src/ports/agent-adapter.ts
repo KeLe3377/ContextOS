@@ -23,6 +23,14 @@ export type AgentTranscriptImportResult = {
   contentText: string;
   sourceUpdatedAt: string;
   parserVersion: string;
+  eventCount?: number;
+  eventCounts?: {
+    message: number;
+    toolCall: number;
+    toolResult: number;
+    summary: number;
+  };
+  events?: AgentTranscriptEvent[];
   messageCount: number;
   roleCounts: {
     user: number;
@@ -32,6 +40,15 @@ export type AgentTranscriptImportResult = {
   messageOrdinalStart: number;
   messageOrdinalEnd: number;
   truncated: boolean;
+};
+
+export type AgentTranscriptEvent = {
+  ordinal: number;
+  kind: "message" | "tool_call" | "tool_result" | "summary";
+  role?: "user" | "assistant" | "system";
+  text?: string;
+  name?: string;
+  callId?: string;
 };
 
 export interface AgentAdapter {

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
+import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptEvent, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
@@ -142,7 +142,22 @@ export function defaultCodexSessionsDir(): string {
 }
 
 type CodexSessionMetadata = { id: string; cwd: string };
-type CodexTranscriptMessage = { role: "user" | "assistant"; text: string; ordinal: number };
+type CodexTranscriptMessage = AgentTranscriptEvent & { kind: "message"; role: "user" | "assistant"; text: string };
+type CodexJsonRow = {
+  type?: string;
+  payload?: {
+    id?: string;
+    call_id?: string;
+    callId?: string;
+    type?: string;
+    role?: string;
+    name?: string;
+    arguments?: string;
+    output?: string;
+    summary?: string | Array<{ text?: string }>;
+    content?: string | Array<{ type?: string; text?: string; content?: string }>;
+  };
+};
 
 function readSessionMetadata(path: string): CodexSessionMetadata | null {
   const line = readFirstLine(path);
@@ -161,28 +176,20 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
   if (file.size > 50 * 1024 * 1024) {
     throw new ContextOsError("INVALID_ARGUMENT", "Codex transcript exceeds the 50 MB import limit", { externalSessionId });
   }
-  const messages: CodexTranscriptMessage[] = [];
-  let ordinal = 0;
+  const events: AgentTranscriptEvent[] = [];
+  let eventOrdinal = 0;
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     if (!line) continue;
     try {
-      const row = JSON.parse(line) as {
-        type?: string;
-        payload?: { type?: string; role?: string; content?: Array<{ type?: string; text?: string }> };
-      };
-      const payload = row.payload;
-      if (row.type !== "response_item" || payload?.type !== "message" || !["user", "assistant"].includes(payload.role ?? "")) continue;
-      ordinal += 1;
-      const text = (payload.content ?? [])
-        .filter((item) => item.type === "input_text" || item.type === "output_text")
-        .map((item) => item.text ?? "")
-        .join("\n")
-        .trim();
-      if (text) messages.push({ role: payload.role as "user" | "assistant", text, ordinal });
+      const event = readCodexEvent(JSON.parse(line) as CodexJsonRow, eventOrdinal + 1);
+      if (!event) continue;
+      eventOrdinal += 1;
+      events.push(event);
     } catch {
       // A crash can leave one partial JSONL record; valid records remain importable.
     }
   }
+  const messages = events.filter((event): event is CodexTranscriptMessage => event.kind === "message" && (event.role === "user" || event.role === "assistant") && Boolean(event.text));
   if (messages.length === 0) {
     throw new ContextOsError("INVALID_ARGUMENT", "Codex transcript contains no user or assistant messages", { externalSessionId });
   }
@@ -191,42 +198,90 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
   const selected: string[] = [];
   let length = 0;
   let oversizedMessageTruncated = false;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    const formatted = formatTranscriptMessage(message);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    const formatted = formatTranscriptEvent(event);
     const addedLength = formatted.length + (selected.length ? separator.length : 0);
     if (length + addedLength > 1_000_000) break;
     selected.unshift(formatted);
     length += addedLength;
   }
   if (selected.length === 0) {
-    const latest = messages.at(-1)!;
-    selected.push(formatTranscriptMessage({ ...latest, text: latest.text.slice(-1_000_000) }));
+    const latest = events.at(-1)!;
+    selected.push(formatTranscriptEvent({ ...latest, text: latest.text?.slice(-1_000_000) }));
     oversizedMessageTruncated = true;
   }
-  const selectedMessages = oversizedMessageTruncated
-    ? [messages.at(-1)!]
-    : messages.slice(messages.length - selected.length);
+  const selectedEvents = oversizedMessageTruncated
+    ? [events.at(-1)!]
+    : events.slice(events.length - selected.length);
+  const selectedMessages = selectedEvents.filter((event): event is CodexTranscriptMessage => event.kind === "message" && (event.role === "user" || event.role === "assistant") && Boolean(event.text));
   const roleCounts = selectedMessages.reduce((counts, message) => {
     counts[message.role] += 1;
     return counts;
   }, { user: 0, assistant: 0 });
+  const eventCounts = selectedEvents.reduce((counts, event) => {
+    if (event.kind === "message") counts.message += 1;
+    if (event.kind === "tool_call") counts.toolCall += 1;
+    if (event.kind === "tool_result") counts.toolResult += 1;
+    if (event.kind === "summary") counts.summary += 1;
+    return counts;
+  }, { message: 0, toolCall: 0, toolResult: 0, summary: 0 });
+  const messageOrdinalStart = selectedMessages[0] ? messages.findIndex((message) => message === selectedMessages[0]) + 1 : 1;
+  const messageOrdinalEnd = selectedMessages.at(-1) ? messages.findIndex((message) => message === selectedMessages.at(-1)) + 1 : messages.length;
   return {
     externalSessionId,
     contentText: selected.join(separator),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "codex-jsonl.v1",
-    messageCount: selected.length,
+    parserVersion: "codex-jsonl.v2",
+    eventCount: selectedEvents.length,
+    eventCounts,
+    events: selectedEvents,
+    messageCount: selectedMessages.length,
     roleCounts,
     turnCount: roleCounts.user,
-    messageOrdinalStart: selectedMessages[0]!.ordinal,
-    messageOrdinalEnd: selectedMessages.at(-1)!.ordinal,
-    truncated: oversizedMessageTruncated || selected.length < messages.length
+    messageOrdinalStart,
+    messageOrdinalEnd,
+    truncated: oversizedMessageTruncated || selectedEvents.length < events.length
   };
 }
 
-function formatTranscriptMessage(message: Pick<CodexTranscriptMessage, "role" | "text">): string {
-  return `${message.role.toUpperCase()}:\n${message.text}`;
+function readCodexEvent(row: CodexJsonRow, ordinal: number): AgentTranscriptEvent | null {
+  const payload = row.payload;
+  if (row.type === "summary" || payload?.type === "summary") {
+    const text = contentToText(payload?.summary ?? payload?.content);
+    return text ? { ordinal, kind: "summary", text } : null;
+  }
+  if (row.type !== "response_item" || !payload?.type) return null;
+  if (payload.type === "message" && ["user", "assistant"].includes(payload.role ?? "")) {
+    const text = contentToText(payload.content).trim();
+    return text ? { ordinal, kind: "message", role: payload.role as "user" | "assistant", text } : null;
+  }
+  if (payload.type === "function_call" || payload.type === "tool_call") {
+    const text = typeof payload.arguments === "string" ? payload.arguments : contentToText(payload.content);
+    return { ordinal, kind: "tool_call", name: payload.name ?? "tool", callId: payload.call_id ?? payload.callId, text };
+  }
+  if (payload.type === "function_call_output" || payload.type === "tool_result") {
+    const text = typeof payload.output === "string" ? payload.output : contentToText(payload.content);
+    return { ordinal, kind: "tool_result", callId: payload.call_id ?? payload.callId, text };
+  }
+  return null;
+}
+
+function contentToText(content: string | Array<{ type?: string; text?: string; content?: string }> | undefined): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((item) => !item.type || ["input_text", "output_text", "text"].includes(item.type))
+    .map((item) => item.text ?? item.content ?? "")
+    .join("\n")
+    .trim();
+}
+
+function formatTranscriptEvent(event: AgentTranscriptEvent): string {
+  if (event.kind === "message") return `${event.role?.toUpperCase() ?? "MESSAGE"}:\n${event.text ?? ""}`;
+  if (event.kind === "tool_call") return `TOOL CALL ${event.name ?? "tool"}${event.callId ? ` (${event.callId})` : ""}:\n${event.text ?? ""}`;
+  if (event.kind === "tool_result") return `TOOL RESULT${event.callId ? ` (${event.callId})` : ""}:\n${event.text ?? ""}`;
+  return `SUMMARY:\n${event.text ?? ""}`;
 }
 
 function listJsonlFiles(root: string): string[] {
