@@ -519,4 +519,11 @@ P1 Decision action-surface increment completed on 2026-09-18:
 - Routed supersede/reverse through the saved destructive-action confirmation setting.
 - Verified with `npm run build:all`, targeted core resource integration tests, and `git diff --check`.
 
+P1 Decision version-compare increment completed on 2026-09-18:
+
+- Connected the Decisions page `Compare Versions` action to a selected-decision comparison workspace.
+- Added base/target version selectors and field-level comparison for statement, rationale, problem context, consequences, alternatives, and references.
+- Reused the existing Decision version endpoint and kept the increment frontend-only.
+- Verified with `npm run build:all`, targeted core resource integration tests, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

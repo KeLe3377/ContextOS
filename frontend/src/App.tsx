@@ -65,7 +65,7 @@ const pages: Record<PageId, PageDef> = {
   settings: { title: "Settings", subtitle: "Configure how ContextOS runs, connects to agents, and handles work context.", actions: [["restart_alt", "Reset changes"], ["check", "Save changes", "primary"]], narrow: true }
 };
 
-const enabledActions = new Set(["refresh-context", "add-project", "new-session", "sync-transcript", "continue-in-agent", "import-existing-session", "import-transcript", "export-capsule", "approve-selected", "reject", "record-decision", "start-ready-item", "create-item", "add-source", "add-context-item", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "sync-transcript", "continue-in-agent", "import-existing-session", "import-transcript", "export-capsule", "approve-selected", "reject", "record-decision", "compare-versions", "start-ready-item", "create-item", "add-source", "add-context-item", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 
 function emptyData(): WorkspaceData {
   return {
@@ -794,6 +794,7 @@ export function App() {
       return data.projects[0] ? setModal({ kind: "contextItem", sourceSnapshotId: snapshot?.id }) : setActionMessage({ text: "Create a project before adding context items", error: true });
     }
     if (action === "record-decision") return data.projects[0] ? setModal({ kind: "decision" }) : setActionMessage({ text: "Create a project before recording decisions", error: true });
+    if (action === "compare-versions") return document.getElementById("decision-version-compare")?.scrollIntoView({ behavior: "smooth", block: "start" });
     if (action === "create-item") return data.projects[0] ? setModal({ kind: "workItem" }) : setActionMessage({ text: "Create a project before creating work items", error: true });
     if (action === "start-ready-item") {
       const item = data.workItems.find((workItem) => workItem.status === "READY");
@@ -1184,6 +1185,13 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
   const selectedDecision = data.decisions.find((item: AnyRecord) => item.id === selectedDecisionId) || data.decisions[0];
   const versions = selectedDecision && decisionVersions?.decisionId === selectedDecision.id ? decisionVersions.items : [];
   const currentVersion = selectedDecision ? versions.find((version: AnyRecord) => version.id === selectedDecision.currentVersionId) || versions[0] : null;
+  const orderedVersions = [...versions].sort((left: AnyRecord, right: AnyRecord) => Number(right.versionNumber) - Number(left.versionNumber));
+  const [baseVersionId, setBaseVersionId] = useState<string>("");
+  const [targetVersionId, setTargetVersionId] = useState<string>("");
+  const baseVersion = orderedVersions.find((version: AnyRecord) => version.id === baseVersionId) || orderedVersions[1] || orderedVersions[0];
+  const targetVersion = orderedVersions.find((version: AnyRecord) => version.id === targetVersionId) || orderedVersions[0];
+  const comparisonFields: Array<[string, string]> = [["statement", "Statement"], ["rationale", "Rationale"], ["problemContext", "Problem context"], ["consequences", "Consequences"], ["alternatives", "Alternatives"], ["references", "References"]];
+  const displayDecisionValue = (value: unknown) => Array.isArray(value) ? (value.length ? value.join("; ") : "-") : String(value || "-");
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
     <Panel title="Decision Register" iconName="gavel"><Table headers={["Decision", "Version", "Updated", "State", "Action"]} rows={data.decisions.map((item: AnyRecord) => [
       <div className={`session-cell ${item.id === selectedDecision?.id ? "selected" : ""}`}><strong>{item.title}</strong><div className="muted mono">{item.id}</div></div>,
@@ -1231,6 +1239,22 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
       {decisionVersions?.loading ? <EmptyNote>Loading decision versions...</EmptyNote> : null}
       {decisionVersions?.error ? <EmptyNote>{decisionVersions.error}</EmptyNote> : null}
       {versions.length ? <div className="version-list">{versions.map((version: AnyRecord) => <div className="version-row" key={version.id}><div><div className="title-sm">v{version.versionNumber} · {version.state}</div><div className="muted">{version.statement}</div><div className="muted mono">{version.createdByType}{version.createdById ? `:${version.createdById}` : ""} · {fmtDate(version.createdAt)}</div></div></div>)}</div> : !decisionVersions?.loading && !decisionVersions?.error ? <EmptyNote>No versions recorded for this decision.</EmptyNote> : null}
+    </Panel>
+    <Panel title="Compare Versions" iconName="compare_arrows" meta={baseVersion && targetVersion ? `v${baseVersion.versionNumber} to v${targetVersion.versionNumber}` : ""}>
+      <div id="decision-version-compare" className="version-compare">
+        {orderedVersions.length ? <>
+          <div className="version-selectors">
+            <label><span className="mono muted">BASE VERSION</span><select value={baseVersion?.id || ""} onChange={(event) => setBaseVersionId(event.target.value)}>{orderedVersions.map((version: AnyRecord) => <option value={version.id} key={version.id}>v{version.versionNumber} · {version.state}</option>)}</select></label>
+            <label><span className="mono muted">TARGET VERSION</span><select value={targetVersion?.id || ""} onChange={(event) => setTargetVersionId(event.target.value)}>{orderedVersions.map((version: AnyRecord) => <option value={version.id} key={version.id}>v{version.versionNumber} · {version.state}</option>)}</select></label>
+          </div>
+          <div className="version-comparison-list">{comparisonFields.map(([field, label]) => {
+            const baseValue = displayDecisionValue(baseVersion?.[field]);
+            const targetValue = displayDecisionValue(targetVersion?.[field]);
+            const changed = baseValue !== targetValue;
+            return <div className="compare-field" key={field}><div className="split"><strong>{label}</strong><Badge text={changed ? "changed" : "same"} tone={changed ? "amber" : "green"} /></div><div className="compare-values"><div><span className="mono muted">v{baseVersion?.versionNumber}</span><p>{baseValue}</p></div><div><span className="mono muted">v{targetVersion?.versionNumber}</span><p>{targetValue}</p></div></div></div>;
+          })}</div>
+        </> : <EmptyNote>Select a decision with version history to compare.</EmptyNote>}
+      </div>
     </Panel>
   </div></div></>;
 }
