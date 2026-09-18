@@ -319,7 +319,7 @@ export function App() {
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [reviewActionLog, setReviewActionLog] = useState<{ reviewId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [decisionVersions, setDecisionVersions] = useState<{ decisionId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
-  const [workItemDetail, setWorkItemDetail] = useState<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
+  const [workItemDetail, setWorkItemDetail] = useState<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; attempts: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [ruleDetail, setRuleDetail] = useState<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [ruleInstructionPreview, setRuleInstructionPreview] = useState<AnyRecord | null>(null);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string; decisionId?: string; workItemId?: string; sourceId?: string; sourceSnapshotId?: string; contextItemId?: string }>({ kind: null });
@@ -384,14 +384,15 @@ export function App() {
     };
   }, []);
 
-  const loadWorkItemDetail = useCallback(async (workItemId: string | null): Promise<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; loading: boolean; error: string | null } | null> => {
+  const loadWorkItemDetail = useCallback(async (workItemId: string | null): Promise<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; attempts: AnyRecord[]; loading: boolean; error: string | null } | null> => {
     if (!workItemId) return null;
-    const [readiness, dependencies] = await Promise.all([
+    const [readiness, dependencies, attempts] = await Promise.all([
       settle(fetchJson(`/api/work-items/${workItemId}/readiness`)),
-      settle(fetchJson(`/api/work-items/${workItemId}/dependencies`))
+      settle(fetchJson(`/api/work-items/${workItemId}/dependencies`)),
+      settle(fetchJson(`/api/work-items/${workItemId}/attempts`))
     ]);
-    const error = !readiness.ok ? readiness.error.message : !dependencies.ok ? dependencies.error.message : null;
-    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], loading: false, error };
+    const error = !readiness.ok ? readiness.error.message : !dependencies.ok ? dependencies.error.message : !attempts.ok ? attempts.error.message : null;
+    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], attempts: attempts.ok ? attempts.value.items : [], loading: false, error };
   }, []);
 
   const loadRuleDetail = useCallback(async (ruleId: string | null): Promise<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null> => {
@@ -533,7 +534,7 @@ export function App() {
   const selectWorkItem = useCallback(async (workItemId: string) => {
     preferredWorkItemIdRef.current = workItemId;
     setSelectedWorkItemId(workItemId);
-    setWorkItemDetail({ workItemId, readiness: null, dependencies: [], loading: true, error: null });
+    setWorkItemDetail({ workItemId, readiness: null, dependencies: [], attempts: [], loading: true, error: null });
     setWorkItemDetail(await loadWorkItemDetail(workItemId));
   }, [loadWorkItemDetail]);
 
@@ -704,6 +705,11 @@ export function App() {
     if (!item) throw new Error("No work item is available");
     await sendJson(`/api/work-items/${item.id}/${action}`, "POST", { expectedRevision: item.revision });
   }, [workItemById]);
+  const startWorkItemSession = useCallback(async (workItemId: string) => {
+    const item = workItemById(workItemId);
+    if (!item) throw new Error("No work item is available");
+    await sendJson(`/api/work-items/${item.id}/start-session`, "POST", { expectedRevision: item.revision });
+  }, [workItemById]);
   const resolveReview = useCallback(async (reviewId: string, input: AnyRecord) => {
     const review = reviewById(reviewId);
     if (!review) throw new Error("No review item is available");
@@ -741,7 +747,7 @@ export function App() {
     if (action === "start-ready-item") {
       const item = data.workItems.find((workItem) => workItem.status === "READY");
       if (!item) return setActionMessage({ text: "No ready work item is available", error: true });
-      return void runAction(() => transitionWorkItem(item.id, "start"), "Work item started");
+      return void runAction(() => startWorkItemSession(item.id), "Work item session started");
     }
     if (action === "approve-selected" || action === "reject") {
       const selectedReview = selectedReviewId ? data.reviews.find((item) => item.id === selectedReviewId) : null;
@@ -787,7 +793,7 @@ export function App() {
         expectedRevision: data.settings!.revision
       }), "Settings saved");
     }
-  }, [continueSession, data.contextSources, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, syncActiveSources, syncSessionTranscript, transitionWorkItem]);
+  }, [continueSession, data.contextSources, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, startWorkItemSession, syncActiveSources, syncSessionTranscript, transitionWorkItem]);
 
   const navigate = (next: PageId) => {
     setPage(next);
@@ -797,7 +803,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -1101,9 +1107,10 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function WorkPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, transitionWorkItem, selectedWorkItemId, selectWorkItem, workItemDetail, setModal } = props;
+  const { data, header, actionLoading, runAction, transitionWorkItem, startWorkItemSession, selectedWorkItemId, selectWorkItem, workItemDetail, setModal } = props;
   const selectedItem = data.workItems.find((item: AnyRecord) => item.id === selectedWorkItemId) || data.workItems[0];
   const detail = selectedItem && workItemDetail?.workItemId === selectedItem.id ? workItemDetail : null;
+  const canStartSession = (item: AnyRecord) => ["READY", "IN_PROGRESS"].includes(item.status);
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
   <Panel title="Execution Readiness" iconName="task_alt"><Table headers={["Work item", "Parent", "Acceptance", "Updated", "Status", "Action"]} rows={data.workItems.map((item: AnyRecord) => [
     <div className={`session-cell ${item.id === selectedItem?.id ? "selected" : ""}`}><strong>{item.title}</strong><div className="muted">{item.description || ""}</div></div>,
@@ -1116,6 +1123,7 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
       <button className="icon-btn table-action" title="Edit work item" disabled={["DONE", "CANCELED"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "workItemEdit", workItemId: item.id })}>{icon("edit_note")}</button>
       <button className="icon-btn table-action" title="Mark ready" disabled={item.status !== "BACKLOG" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "mark-ready"), "Work item marked ready")}>{icon("playlist_add_check")}</button>
       <button className="icon-btn table-action" title="Start work" disabled={item.status !== "READY" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "start"), "Work item started")}>{icon("play_arrow")}</button>
+      <button className="icon-btn table-action" title="Start agent session" disabled={!canStartSession(item) || actionLoading} onClick={() => runAction(() => startWorkItemSession(item.id), "Work item session started")}>{icon("terminal")}</button>
       <button className="icon-btn table-action" title="Block work" disabled={item.status !== "IN_PROGRESS" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "block"), "Work item blocked")}>{icon("pause_circle")}</button>
       <button className="icon-btn table-action" title="Send to review" disabled={item.status !== "IN_PROGRESS" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "send-to-review"), "Work item sent to review")}>{icon("rate_review")}</button>
       <button className="icon-btn table-action" title="Complete work" disabled={!["IN_PROGRESS", "IN_REVIEW"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "complete"), "Work item completed")}>{icon("check_circle")}</button>
@@ -1139,6 +1147,7 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
           <button className="btn" disabled={["DONE", "CANCELED"].includes(selectedItem.status) || actionLoading} onClick={() => setModal({ kind: "workItemEdit", workItemId: selectedItem.id })}>{icon("edit_note")}<span>Edit</span></button>
           <button className="btn primary" disabled={selectedItem.status !== "BACKLOG" || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "mark-ready"), "Work item marked ready")}>{icon("playlist_add_check")}<span>Ready</span></button>
           <button className="btn" disabled={selectedItem.status !== "READY" || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "start"), "Work item started")}>{icon("play_arrow")}<span>Start</span></button>
+          <button className="btn" disabled={!canStartSession(selectedItem) || actionLoading} onClick={() => runAction(() => startWorkItemSession(selectedItem.id), "Work item session started")}>{icon("terminal")}<span>Start Session</span></button>
           <button className="btn" disabled={selectedItem.status !== "IN_PROGRESS" || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "block"), "Work item blocked")}>{icon("pause_circle")}<span>Block</span></button>
           <button className="btn" disabled={!["IN_PROGRESS", "IN_REVIEW"].includes(selectedItem.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "complete"), "Work item completed")}>{icon("check_circle")}<span>Done</span></button>
         </div>
@@ -1150,6 +1159,17 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
       {detail?.readiness ? <div className="metric-row"><span>Ready to start</span><strong>{detail.readiness.ready ? "Yes" : "No"}</strong></div> : null}
       {detail?.readiness?.blockers?.length ? detail.readiness.blockers.map((blocker: AnyRecord) => <div className="metric-row" key={blocker.dependsOnId}><span className="mono">{blocker.dependsOnId}</span><Badge text={blocker.status} tone={toneForStatus(blocker.status)} /></div>) : null}
       {detail && !detail.dependencies.length && !detail.readiness?.blockers?.length ? <EmptyNote>No blocking dependencies.</EmptyNote> : null}
+    </Panel>
+    <Panel title="Agent Attempts" iconName="terminal" meta={detail ? `${detail.attempts.length} attempts` : ""}>
+      {detail?.loading ? <EmptyNote>Loading agent attempts...</EmptyNote> : null}
+      {detail?.attempts?.length ? <div className="stack compact">{detail.attempts.map((attempt: AnyRecord) => <div className="metric-row evidence-row" key={attempt.id}>
+        <div className="evidence-row-main">
+          <div className="title-sm">{attempt.session?.title || attempt.summary || "Agent session"}</div>
+          <div className="muted mono">{fmtDate(attempt.startedAt || attempt.createdAt)} · {attempt.sessionId || "no session"}</div>
+          {attempt.session?.intent ? <div className="muted">{String(attempt.session.intent).split("\n")[0]}</div> : null}
+        </div>
+        <Badge text={attempt.status} tone={toneForStatus(attempt.status)} />
+      </div>)}</div> : detail && !detail.loading ? <EmptyNote>No agent sessions have been started for this work item yet.</EmptyNote> : null}
     </Panel>
   </div></div></>;
 }

@@ -4,7 +4,7 @@ import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/revi
 import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
 import type { ResourceActivityEventDto, SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionInput, SessionPatch, SessionStatus, SessionTranscriptEventsDto, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
-import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemStatus } from "../../../contracts/src/work-items.js";
+import type { WorkItemAttemptDto, WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemStartSessionInput, WorkItemStartSessionResult, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type {
   SqliteDecisionRepository,
   SqliteReviewItemRepository,
@@ -189,7 +189,11 @@ export class DecisionService {
 }
 
 export class WorkItemService {
-  constructor(private readonly workItems: SqliteWorkItemRepository) {}
+  constructor(
+    private readonly workItems: SqliteWorkItemRepository,
+    private readonly sessions?: SqliteSessionRepository,
+    private readonly projects?: SqliteProjectRepository
+  ) {}
 
   create(input: WorkItemInput): WorkItemDto {
     if (input.parentId) this.workItems.assertParentInProject(input.parentId, input.projectId);
@@ -225,6 +229,41 @@ export class WorkItemService {
     return this.workItems.listDependencies(id);
   }
 
+  attempts(id: string): WorkItemAttemptDto[] {
+    this.workItems.getByIdOrThrow(id);
+    return this.workItems.listAttempts(id);
+  }
+
+  startSession(id: string, input: WorkItemStartSessionInput): WorkItemStartSessionResult {
+    if (!this.sessions || !this.projects) throw new Error("Work Item session runtime is not configured");
+    const current = this.workItems.getByIdOrThrow(id);
+    if (!["READY", "IN_PROGRESS"].includes(current.status)) {
+      throw new ContextOsError("CONFLICT", "Work Item must be ready before starting an agent session", { id, status: current.status });
+    }
+    if (current.revision !== input.expectedRevision) {
+      throw new ContextOsError("CONFLICT", "Work Item revision conflict", { id, expectedRevision: input.expectedRevision, actualRevision: current.revision });
+    }
+    const readiness = this.readiness(id);
+    if (!readiness.ready) {
+      throw new ContextOsError("CONFLICT", "Work Item has incomplete dependencies", { id });
+    }
+    const project = this.projects.getByIdOrThrow(current.projectId);
+    const agentAdapterId = input.agentAdapterId ?? project.agentAdapterIds[0] ?? "codex";
+    const session = this.sessions.create({
+      projectId: current.projectId,
+      agentAdapterId,
+      title: input.title ?? `Work: ${current.title}`,
+      intent: input.intent ?? formatWorkItemIntent(current)
+    }, nowMs());
+    const attempt = this.workItems.recordSessionAttempt({
+      workItemId: id,
+      expectedRevision: input.expectedRevision,
+      sessionId: session.id,
+      summary: `Started agent session for Work Item: ${current.title}`
+    }, nowMs());
+    return { workItem: this.workItems.getByIdOrThrow(id), attempt, session };
+  }
+
   transition(id: string, action: "mark-ready" | "start" | "block" | "resolve-blocker" | "send-to-review" | "complete" | "reopen" | "cancel", expectedRevision: number): WorkItemDto {
     const current = this.workItems.getByIdOrThrow(id);
     const allowed: Record<typeof action, WorkItemStatus[]> = {
@@ -253,6 +292,20 @@ export class WorkItemService {
     };
     return this.workItems.updateStatus(id, statusByAction[action], expectedRevision, nowMs());
   }
+}
+
+function formatWorkItemIntent(item: WorkItemDto): string {
+  const acceptance = item.acceptance.length ? item.acceptance.map((value) => `- ${value}`).join("\n") : "- No acceptance criteria recorded.";
+  return [
+    `Execute Work Item: ${item.title}`,
+    "",
+    item.description ? `Description:\n${item.description}` : "Description: not recorded.",
+    "",
+    "Acceptance Criteria:",
+    acceptance,
+    "",
+    item.executionContract ? `Execution Contract:\n${item.executionContract}` : "Execution Contract: use repository validation and report evidence."
+  ].join("\n");
 }
 
 export class ReviewItemService {

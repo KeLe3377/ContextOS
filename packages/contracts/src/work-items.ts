@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { resourceMetaSchema } from "./common.js";
+import type { SessionDto } from "./sessions.js";
 
 export const workItemStatusSchema = z.enum(["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW", "DONE", "CANCELED"]);
 
@@ -19,6 +20,13 @@ export const workItemPatchSchema = z.object({
   description: z.string().nullable().optional(),
   acceptance: z.array(z.string()).optional(),
   executionContract: z.string().nullable().optional(),
+  expectedRevision: z.number().int().positive()
+});
+
+export const workItemStartSessionSchema = z.object({
+  agentAdapterId: z.string().min(1).optional(),
+  title: z.string().trim().min(1).optional(),
+  intent: z.string().trim().min(1).optional(),
   expectedRevision: z.number().int().positive()
 });
 
@@ -49,6 +57,26 @@ export const workItemDtoSchema = resourceMetaSchema.extend({
 export type WorkItemStatus = z.infer<typeof workItemStatusSchema>;
 export type WorkItemInput = z.infer<typeof workItemInputSchema>;
 export type WorkItemPatch = z.infer<typeof workItemPatchSchema>;
+export type WorkItemStartSessionInput = z.infer<typeof workItemStartSessionSchema>;
 export type WorkItemDto = z.infer<typeof workItemDtoSchema>;
 export type WorkItemDependencyDto = z.infer<typeof workItemDependencyDtoSchema>;
 export type WorkItemReadinessDto = z.infer<typeof workItemReadinessDtoSchema>;
+
+export type WorkItemAttemptDto = {
+  id: string;
+  workItemId: string;
+  sessionId: string | null;
+  status: "STARTED" | "SUCCEEDED" | "FAILED" | "CANCELED";
+  summary: string | null;
+  resultRef: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
+  session: SessionDto | null;
+};
+
+export type WorkItemStartSessionResult = {
+  workItem: WorkItemDto;
+  attempt: WorkItemAttemptDto;
+  session: SessionDto;
+};

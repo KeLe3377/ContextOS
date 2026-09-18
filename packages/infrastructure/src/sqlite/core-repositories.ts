@@ -1,7 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { SessionDto, SessionInput, SessionPatch, SessionStatus } from "../../../contracts/src/sessions.js";
 import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus, DecisionVersionDto } from "../../../contracts/src/decisions.js";
-import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
+import type { WorkItemAttemptDto, WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type { ReviewItemDto, ReviewItemInput, ReviewItemPriority, ReviewItemStatus } from "../../../contracts/src/review-items.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
@@ -203,6 +203,13 @@ function mapDecisionVersion(row: DecisionVersionRow): DecisionVersionDto {
 }
 
 type WorkItemRow = { id: string; project_id: string; parent_id: string | null; title: string; description: string | null; status: WorkItemStatus; acceptance_json: string; execution_contract: string | null; readiness_state: string; completed_at: number | null; created_at: number; updated_at: number; revision: number };
+type WorkItemAttemptRow = {
+  id: string; work_item_id: string; session_id: string | null; status: WorkItemAttemptDto["status"]; summary: string | null; result_ref: string | null;
+  started_at: number | null; ended_at: number | null; created_at: number;
+  session_id_join: string | null; project_id: string | null; agent_adapter_id: string | null; external_session_id: string | null; title: string | null; intent: string | null;
+  session_status: SessionStatus | null; session_started_at: number | null; completed_at: number | null; last_activity_at: number | null; session_created_at: number | null;
+  session_updated_at: number | null; session_revision: number | null; archived_at: number | null;
+};
 
 export class SqliteWorkItemRepository {
   constructor(private readonly db: Database) {}
@@ -313,6 +320,54 @@ export class SqliteWorkItemRepository {
     `).all(id) as WorkItemDependencyDto[];
   }
 
+  listAttempts(id: string): WorkItemAttemptDto[] {
+    return (this.db.prepare(`
+      SELECT attempts.*,
+             sessions.id AS session_id_join,
+             sessions.project_id,
+             sessions.agent_adapter_id,
+             sessions.external_session_id,
+             sessions.title,
+             sessions.intent,
+             sessions.status AS session_status,
+             sessions.started_at AS session_started_at,
+             sessions.completed_at,
+             sessions.last_activity_at,
+             sessions.created_at AS session_created_at,
+             sessions.updated_at AS session_updated_at,
+             sessions.revision AS session_revision,
+             sessions.archived_at
+      FROM work_item_attempts attempts
+      LEFT JOIN sessions ON sessions.id = attempts.session_id
+      WHERE attempts.work_item_id = ?
+      ORDER BY attempts.created_at DESC, attempts.id DESC
+    `).all(id) as WorkItemAttemptRow[]).map(mapWorkItemAttempt);
+  }
+
+  recordSessionAttempt(input: { workItemId: string; expectedRevision: number; sessionId: string; summary: string }, now: number): WorkItemAttemptDto {
+    const before = this.getById(input.workItemId);
+    if (!before) throw new ContextOsError("NOT_FOUND", "Work Item not found", { id: input.workItemId });
+    if (!["READY", "IN_PROGRESS"].includes(before.status)) {
+      throw new ContextOsError("CONFLICT", "Work Item must be ready before starting an agent session", { id: input.workItemId, status: before.status });
+    }
+    const attemptId = newId("wattempt");
+    this.db.transaction(() => {
+      const result = before.status === "READY"
+        ? this.db.prepare("UPDATE work_items SET status = 'IN_PROGRESS', updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+          .run(now, input.workItemId, input.expectedRevision)
+        : this.db.prepare("UPDATE work_items SET updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+          .run(now, input.workItemId, input.expectedRevision);
+      ensureChanged(result.changes, before, "Work Item", input.workItemId, input.expectedRevision);
+      this.db.prepare("INSERT INTO work_item_attempts (id, work_item_id, session_id, status, summary, started_at, created_at) VALUES (?, ?, ?, 'STARTED', ?, ?, ?)")
+        .run(attemptId, input.workItemId, input.sessionId, input.summary, now, now);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'WORK_ITEM', ?, 'WORK_ITEM_SESSION_STARTED', ?, ?, ?)")
+        .run(newId("act"), before.projectId, input.workItemId, input.summary, JSON.stringify({ attemptId, sessionId: input.sessionId, beforeStatus: before.status, afterStatus: "IN_PROGRESS" }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'WORK_ITEM', ?, 'START_SESSION', ?, ?, ?)")
+        .run(newId("audit"), before.projectId, input.workItemId, JSON.stringify(before), JSON.stringify({ attemptId, sessionId: input.sessionId, status: "IN_PROGRESS" }), now);
+    })();
+    return this.listAttempts(input.workItemId).find((attempt) => attempt.id === attemptId)!;
+  }
+
   updateStatus(id: string, status: WorkItemStatus, expectedRevision: number, now: number): WorkItemDto {
     const completedAt = status === "DONE" ? now : null;
     const result = this.db.prepare("UPDATE work_items SET status = ?, completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? IN ('BACKLOG', 'CANCELED') THEN NULL ELSE completed_at END, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
@@ -324,6 +379,38 @@ export class SqliteWorkItemRepository {
 
 function mapWorkItem(row: WorkItemRow): WorkItemDto {
   return { id: row.id, projectId: row.project_id, parentId: row.parent_id, title: row.title, description: row.description, status: row.status, acceptance: JSON.parse(row.acceptance_json) as string[], executionContract: row.execution_contract, readinessState: JSON.parse(row.readiness_state) as Record<string, unknown>, completedAt: iso(row.completed_at), createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), revision: row.revision };
+}
+
+function mapWorkItemAttempt(row: WorkItemAttemptRow): WorkItemAttemptDto {
+  return {
+    id: row.id,
+    workItemId: row.work_item_id,
+    sessionId: row.session_id,
+    status: row.status,
+    summary: row.summary,
+    resultRef: row.result_ref,
+    startedAt: iso(row.started_at),
+    endedAt: iso(row.ended_at),
+    createdAt: new Date(row.created_at).toISOString(),
+    session: row.session_id_join !== null && row.project_id !== null && row.agent_adapter_id !== null && row.session_status !== null && row.session_created_at !== null && row.session_updated_at !== null && row.session_revision !== null
+      ? mapSession({
+          id: row.session_id_join,
+          project_id: row.project_id,
+          agent_adapter_id: row.agent_adapter_id,
+          external_session_id: row.external_session_id,
+          title: row.title,
+          intent: row.intent,
+          status: row.session_status,
+          started_at: row.session_started_at,
+          completed_at: row.completed_at,
+          last_activity_at: row.last_activity_at,
+          created_at: row.session_created_at,
+          updated_at: row.session_updated_at,
+          revision: row.session_revision,
+          archived_at: row.archived_at
+        })
+      : null
+  };
 }
 
 type ReviewItemRow = { id: string; project_id: string; source_type: string; source_id: string; trigger_type: string; status: ReviewItemStatus; priority: ReviewItemPriority; summary: string; proposed_resolution: string | null; reviewer_id: string | null; resolution_type: string | null; resolution_reason: string | null; resolved_at: number | null; created_at: number; updated_at: number; revision: number };

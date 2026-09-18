@@ -156,6 +156,60 @@ describe("core resource APIs", () => {
     expect(done.json().status).toBe("DONE");
   });
 
+  test("starts an agent session from a ready work item and records the attempt", async () => {
+    const create = await server!.inject({
+      method: "POST",
+      url: "/api/work-items",
+      payload: {
+        projectId,
+        title: "Productize work execution",
+        description: "Connect work items to agent sessions",
+        acceptance: ["session is created", "attempt is visible"],
+        executionContract: "Run build and tests"
+      }
+    });
+    expect(create.statusCode).toBe(201);
+
+    const ready = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${create.json().id}/mark-ready`,
+      payload: { expectedRevision: create.json().revision }
+    });
+    expect(ready.statusCode).toBe(200);
+
+    const started = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${create.json().id}/start-session`,
+      payload: { expectedRevision: ready.json().revision }
+    });
+    expect(started.statusCode).toBe(201);
+    expect(started.json().workItem).toMatchObject({ id: create.json().id, status: "IN_PROGRESS" });
+    expect(started.json().session).toMatchObject({ projectId, agentAdapterId: "codex", title: "Work: Productize work execution" });
+    expect(started.json().session.intent).toContain("Connect work items to agent sessions");
+    expect(started.json().session.intent).toContain("session is created");
+    expect(started.json().attempt).toMatchObject({ workItemId: create.json().id, sessionId: started.json().session.id, status: "STARTED" });
+
+    const attempts = await server!.inject({ method: "GET", url: `/api/work-items/${create.json().id}/attempts` });
+    expect(attempts.statusCode).toBe(200);
+    expect(attempts.json().items).toEqual([
+      expect.objectContaining({
+        id: started.json().attempt.id,
+        sessionId: started.json().session.id,
+        session: expect.objectContaining({ id: started.json().session.id, title: "Work: Productize work execution" })
+      })
+    ]);
+
+    const stale = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${create.json().id}/start-session`,
+      payload: { expectedRevision: ready.json().revision }
+    });
+    expect(stale.statusCode).toBe(409);
+
+    const sessions = await server!.inject({ method: "GET", url: "/api/sessions" });
+    expect(sessions.json().items.filter((session: { title: string }) => session.title === "Work: Productize work execution")).toHaveLength(1);
+  });
+
   test("creates and resolves review items with a written reason", async () => {
     const create = await server!.inject({
       method: "POST",

@@ -5,7 +5,7 @@ import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
 import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
 import { adapterTranscriptImportInputSchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
-import { workItemInputSchema, workItemPatchSchema } from "../../../../../packages/contracts/src/work-items.js";
+import { workItemInputSchema, workItemPatchSchema, workItemStartSessionSchema } from "../../../../../packages/contracts/src/work-items.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
 const listWithProjectSchema = listQuerySchema.extend({ projectId: z.string().optional() });
@@ -100,7 +100,14 @@ export async function registerCoreResourceRoutes(
   server.get("/api/work-items/:id", async (request) => services.workItems.get(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/work-items/:id/readiness", async (request) => services.workItems.readiness(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/work-items/:id/dependencies", async (request) => ({ items: services.workItems.dependencies(paramsWithIdSchema.parse(request.params).id) }));
+  server.get("/api/work-items/:id/attempts", async (request) => ({ items: services.workItems.attempts(paramsWithIdSchema.parse(request.params).id) }));
   server.patch("/api/work-items/:id", async (request) => services.workItems.patch(paramsWithIdSchema.parse(request.params).id, workItemPatchSchema.parse(request.body)));
+  server.post("/api/work-items/:id/start-session", async (request, reply) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const result = services.workItems.startSession(id, workItemStartSessionSchema.parse(request.body));
+    reply.code(201);
+    return result;
+  });
   for (const action of ["mark-ready", "start", "block", "resolve-blocker", "send-to-review", "complete", "reopen", "cancel"] as const) {
     server.post(`/api/work-items/:id/${action}`, async (request) => {
       const { id } = paramsWithIdSchema.parse(request.params);
