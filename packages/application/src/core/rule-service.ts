@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
-import type { RuleDto, RuleEvaluationDto, RuleEvaluationInput, RuleInput, RulePatch, RuleStatus, RuleValidationResult, RuleVersionDto, RuleVersionInput } from "../../../contracts/src/rules.js";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import type { RuleDto, RuleEvaluationDto, RuleEvaluationInput, RuleInput, RuleInstructionRenderDto, RuleInstructionRenderInput, RulePatch, RuleStatus, RuleValidationResult, RuleVersionDto, RuleVersionInput } from "../../../contracts/src/rules.js";
 import type { SessionDto } from "../../../contracts/src/sessions.js";
 import type { SqliteReviewItemRepository } from "../../../infrastructure/src/sqlite/core-repositories.js";
+import type { SqliteProjectRepository } from "../../../infrastructure/src/sqlite/project-repository.js";
 import type { SqliteRuleRepository } from "../../../infrastructure/src/sqlite/rule-repository.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
@@ -11,7 +15,8 @@ const evaluatorVersion = "contextos.rules.v1";
 export class RuleService {
   constructor(
     private readonly rules: SqliteRuleRepository,
-    private readonly reviewItems?: SqliteReviewItemRepository
+    private readonly reviewItems?: SqliteReviewItemRepository,
+    private readonly projects?: SqliteProjectRepository
   ) {}
 
   create(input: RuleInput): RuleDto {
@@ -66,6 +71,21 @@ export class RuleService {
     return this.rules.getUsage(id);
   }
 
+  renderInstructions(input: RuleInstructionRenderInput): RuleInstructionRenderDto {
+    if (!this.projects) throw new Error("Project repository is not configured");
+    const project = this.projects.getByIdOrThrow(input.projectId);
+    const activeRules = this.rules.listActiveWithVersions(project.id);
+    const path = instructionTargetPath(input.target, project.rootPath);
+    const existingContent = readTextIfExists(path);
+    const content = renderInstructionBlock(project.name, activeRules);
+    const nextContent = mergeManagedBlock(existingContent ?? "", content);
+    if (input.apply) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, nextContent, "utf8");
+    }
+    return { projectId: project.id, target: input.target, path, content, existingContent, nextContent, activeRuleCount: activeRules.length, applied: input.apply };
+  }
+
   evaluateSessionContinue(session: SessionDto): void {
     const sample: RuleEvaluationInput = {
       eventType: "session.continue",
@@ -114,6 +134,69 @@ export class RuleService {
       evaluatorVersion
     }, nowMs());
   }
+}
+
+const managedStart = "<!-- CONTEXTOS_RULES_START -->";
+const managedEnd = "<!-- CONTEXTOS_RULES_END -->";
+
+function instructionTargetPath(target: string, projectRoot: string): string {
+  switch (target) {
+    case "PROJECT_AGENTS": return join(projectRoot, "AGENTS.md");
+    case "PROJECT_CLAUDE": return join(projectRoot, "CLAUDE.md");
+    case "GLOBAL_AGENTS": return join(homedir(), ".codex", "AGENTS.md");
+    case "GLOBAL_CLAUDE": return join(homedir(), ".claude", "CLAUDE.md");
+    default: throw new ContextOsError("INVALID_ARGUMENT", "Unknown instruction target", { target });
+  }
+}
+
+function readTextIfExists(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function mergeManagedBlock(existingContent: string, content: string): string {
+  const block = `${managedStart}\n${content.trim()}\n${managedEnd}`;
+  const pattern = new RegExp(`${escapeRegExp(managedStart)}[\\s\\S]*?${escapeRegExp(managedEnd)}`);
+  if (pattern.test(existingContent)) return existingContent.replace(pattern, block);
+  const trimmed = existingContent.trimEnd();
+  return trimmed ? `${trimmed}\n\n${block}\n` : `${block}\n`;
+}
+
+function renderInstructionBlock(projectName: string, items: Array<{ rule: RuleDto; version: RuleVersionDto }>): string {
+  const lines = [
+    "## ContextOS Rules",
+    "",
+    `Project: ${projectName}`,
+    `Generated: ${new Date().toISOString()}`,
+    "",
+    "These instructions are generated from ACTIVE ContextOS rules. Edit rules in ContextOS, then re-apply this block.",
+    ""
+  ];
+  if (!items.length) {
+    lines.push("- No active ContextOS rules.");
+    return lines.join("\n");
+  }
+  for (const { rule, version } of items) {
+    lines.push(`- [${version.enforcementMode}] ${rule.title}`);
+    if (rule.description) lines.push(`  - Description: ${rule.description}`);
+    lines.push(`  - Precedence: ${version.precedence}`);
+    const reason = stringValue(version.effect.reason);
+    const action = stringValue(version.effect.action);
+    if (reason) lines.push(`  - Reason: ${reason}`);
+    if (action) lines.push(`  - Required action: ${action}`);
+    lines.push(`  - Scope: \`${stableJson(version.scope)}\``);
+    if (version.conditions.length) lines.push(`  - Conditions: \`${stableJson(version.conditions)}\``);
+    if (version.exceptions.length) lines.push(`  - Exceptions: \`${stableJson(version.exceptions)}\``);
+  }
+  return lines.join("\n");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function evaluateRule(version: RuleVersionDto, sample: RuleEvaluationInput): { matched: boolean; explanation: string } {

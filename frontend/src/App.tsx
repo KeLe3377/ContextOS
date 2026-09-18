@@ -279,12 +279,15 @@ export function App() {
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null);
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
+  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   const [selectedContextSourceId, setSelectedContextSourceId] = useState<string | null>(null);
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [reviewActionLog, setReviewActionLog] = useState<{ reviewId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [decisionVersions, setDecisionVersions] = useState<{ decisionId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [workItemDetail, setWorkItemDetail] = useState<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
+  const [ruleDetail, setRuleDetail] = useState<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
+  const [ruleInstructionPreview, setRuleInstructionPreview] = useState<AnyRecord | null>(null);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string; decisionId?: string; workItemId?: string; sourceId?: string; sourceSnapshotId?: string; contextItemId?: string }>({ kind: null });
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [evidenceCompare, setEvidenceCompare] = useState<{ base: AnyRecord; other: AnyRecord; metadata: AnyRecord | null; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
@@ -293,6 +296,7 @@ export function App() {
   const preferredReviewIdRef = useRef<string | null>(null);
   const preferredDecisionIdRef = useRef<string | null>(null);
   const preferredWorkItemIdRef = useRef<string | null>(null);
+  const preferredRuleIdRef = useRef<string | null>(null);
   const preferredContextSourceIdRef = useRef<string | null>(null);
 
   const availableAdapters = useCallback(() => data.adapters.filter((adapter) => adapter.available), [data.adapters]);
@@ -352,6 +356,17 @@ export function App() {
     return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], loading: false, error };
   }, []);
 
+  const loadRuleDetail = useCallback(async (ruleId: string | null): Promise<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null> => {
+    if (!ruleId) return null;
+    const [versions, evaluations, usage] = await Promise.all([
+      settle(fetchJson(`/api/rules/${ruleId}/versions`)),
+      settle(fetchJson(`/api/rules/${ruleId}/evaluations`)),
+      settle(fetchJson(`/api/rules/${ruleId}/usage`))
+    ]);
+    const error = !versions.ok ? versions.error.message : !evaluations.ok ? evaluations.error.message : !usage.ok ? usage.error.message : null;
+    return { ruleId, versions: versions.ok ? versions.value.items : [], evaluations: evaluations.ok ? evaluations.value.items : [], usage: usage.ok ? usage.value : null, loading: false, error };
+  }, []);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -387,6 +402,7 @@ export function App() {
     const selectedReview = next.reviews.find((review) => review.id === preferredReviewIdRef.current) || next.reviews.find((review) => ["OPEN", "IN_PROGRESS"].includes(review.status)) || next.reviews[0];
     const selectedDecision = next.decisions.find((decision) => decision.id === preferredDecisionIdRef.current) || next.decisions[0];
     const selectedWorkItem = next.workItems.find((item) => item.id === preferredWorkItemIdRef.current) || next.workItems.find((item) => ["READY", "IN_PROGRESS", "BLOCKED"].includes(item.status)) || next.workItems[0];
+    const selectedRule = next.rules.find((rule) => rule.id === preferredRuleIdRef.current) || next.rules[0];
     const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
@@ -394,11 +410,13 @@ export function App() {
     preferredReviewIdRef.current = selectedReview?.id || null;
     preferredDecisionIdRef.current = selectedDecision?.id || null;
     preferredWorkItemIdRef.current = selectedWorkItem?.id || null;
+    preferredRuleIdRef.current = selectedRule?.id || null;
     preferredContextSourceIdRef.current = selectedContextSource?.id || null;
     setSelectedSessionId(selectedSession?.id || null);
     setSelectedReviewId(selectedReview?.id || null);
     setSelectedDecisionId(selectedDecision?.id || null);
     setSelectedWorkItemId(selectedWorkItem?.id || null);
+    setSelectedRuleId(selectedRule?.id || null);
     setSelectedContextSourceId(selectedContextSource?.id || null);
     setSessionDetailsLoading(Boolean(selectedSession));
     setSessionDetails(await loadSessionDetails(selectedSession));
@@ -406,8 +424,9 @@ export function App() {
     setReviewActionLog(await loadReviewActionLog(selectedReview?.id || null));
     setDecisionVersions(await loadDecisionVersions(selectedDecision?.id || null));
     setWorkItemDetail(await loadWorkItemDetail(selectedWorkItem?.id || null));
+    setRuleDetail(await loadRuleDetail(selectedRule?.id || null));
     setLoading(false);
-  }, [loadDecisionVersions, loadReviewActionLog, loadSessionDetails, loadWorkItemDetail]);
+  }, [loadDecisionVersions, loadReviewActionLog, loadRuleDetail, loadSessionDetails, loadWorkItemDetail]);
 
   useEffect(() => {
     void loadData();
@@ -477,6 +496,13 @@ export function App() {
     setWorkItemDetail({ workItemId, readiness: null, dependencies: [], loading: true, error: null });
     setWorkItemDetail(await loadWorkItemDetail(workItemId));
   }, [loadWorkItemDetail]);
+
+  const selectRule = useCallback(async (ruleId: string) => {
+    preferredRuleIdRef.current = ruleId;
+    setSelectedRuleId(ruleId);
+    setRuleDetail({ ruleId, versions: [], evaluations: [], usage: null, loading: true, error: null });
+    setRuleDetail(await loadRuleDetail(ruleId));
+  }, [loadRuleDetail]);
 
   const selectContextSource = useCallback((sourceId: string) => {
     preferredContextSourceIdRef.current = sourceId;
@@ -616,6 +642,12 @@ export function App() {
     if (!rule) throw new Error("No rule is available");
     await sendJson(`/api/rules/${rule.id}/${action}`, "POST", { expectedRevision: rule.revision });
   }, [ruleById]);
+  const renderRuleInstructions = useCallback(async (target: string, apply: boolean) => {
+    const project = data.projects[0];
+    if (!project) throw new Error("Create a project before rendering rule instructions");
+    const result = await sendJson("/api/rules/render-instructions", "POST", { projectId: project.id, target, apply });
+    setRuleInstructionPreview(result);
+  }, [data.projects]);
   const transitionDecision = useCallback(async (decisionId: string, action: string) => {
     const decision = decisionById(decisionId);
     if (!decision) throw new Error("No decision is available");
@@ -719,7 +751,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -1106,8 +1138,63 @@ function ContextPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function RulesPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, validateRule, testRule, transitionRule } = props;
-  return <>{header}<Panel title="Rule Set" iconName="policy" meta={data.projects[0]?.name || "Workspace"}><Table headers={["Rule", "Version", "State", "Action"]} rows={data.rules.map((rule: AnyRecord) => [<><strong>{rule.title}</strong><div className="muted">{rule.description || ""}</div></>, rule.currentVersionId || "-", <Badge text={rule.status} tone={toneForStatus(rule.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="Validate rule" disabled={actionLoading} onClick={() => runAction(() => validateRule(rule.id), "Rule validated")}>{icon("rule")}</button><button className="icon-btn table-action" title="Test against session.continue" disabled={actionLoading} onClick={() => runAction(() => testRule(rule.id), "Rule tested")}>{icon("science")}</button><button className="icon-btn table-action" title="Activate rule" disabled={!["DRAFT", "DISABLED"].includes(rule.status) || actionLoading} onClick={() => runAction(() => transitionRule(rule.id, "activate"), "Rule activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="Disable rule" disabled={rule.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionRule(rule.id, "disable"), "Rule disabled")}>{icon("toggle_off")}</button></div>])} empty="No rules yet." /></Panel></>;
+  const { data, header, actionLoading, runAction, validateRule, testRule, transitionRule, renderRuleInstructions, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview } = props;
+  const selectedRule = data.rules.find((rule: AnyRecord) => rule.id === selectedRuleId) || data.rules[0];
+  const detail = selectedRule && ruleDetail?.ruleId === selectedRule.id ? ruleDetail : null;
+  const currentVersion = selectedRule ? detail?.versions.find((version: AnyRecord) => version.id === selectedRule.currentVersionId) || detail?.versions[0] : null;
+  return <>{header}<div className="grid cols-12"><div className="span-8 stack">
+    <Panel title="Rule Set" iconName="policy" meta={data.projects[0]?.name || "Workspace"}><Table headers={["Rule", "Version", "State", "Action"]} rows={data.rules.map((rule: AnyRecord) => [
+      <div className={`session-cell ${rule.id === selectedRule?.id ? "selected" : ""}`}><strong>{rule.title}</strong><div className="muted">{rule.description || ""}</div></div>,
+      rule.currentVersionId || "-",
+      <Badge text={rule.status} tone={toneForStatus(rule.status)} />,
+      <div className="row-actions">
+        <button className="icon-btn table-action" title="View rule detail" disabled={actionLoading} onClick={() => void selectRule(rule.id)}>{icon("visibility")}</button>
+        <button className="icon-btn table-action" title="Validate rule" disabled={actionLoading} onClick={() => runAction(() => validateRule(rule.id), "Rule validated")}>{icon("rule")}</button>
+        <button className="icon-btn table-action" title="Test against session.continue" disabled={actionLoading} onClick={() => runAction(() => testRule(rule.id), "Rule tested")}>{icon("science")}</button>
+        <button className="icon-btn table-action" title="Activate rule" disabled={!["DRAFT", "DISABLED"].includes(rule.status) || actionLoading} onClick={() => runAction(() => transitionRule(rule.id, "activate"), "Rule activated")}>{icon("toggle_on")}</button>
+        <button className="icon-btn table-action" title="Disable rule" disabled={rule.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionRule(rule.id, "disable"), "Rule disabled")}>{icon("toggle_off")}</button>
+      </div>
+    ])} empty="No rules yet." /></Panel>
+    <Panel title="Agent Instruction Export" iconName="upload_file" meta={ruleInstructionPreview?.path || "AGENTS.md / CLAUDE.md"}>
+      <div className="row-actions">
+        <button className="btn" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_AGENTS", false), "Project AGENTS.md preview rendered")}>{icon("visibility")}<span>Preview AGENTS.md</span></button>
+        <button className="btn primary" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_AGENTS", true), "Project AGENTS.md updated")}>{icon("check_circle")}<span>Apply AGENTS.md</span></button>
+        <button className="btn" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_CLAUDE", false), "Project CLAUDE.md preview rendered")}>{icon("visibility")}<span>Preview CLAUDE.md</span></button>
+        <button className="btn" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_CLAUDE", true), "Project CLAUDE.md updated")}>{icon("check_circle")}<span>Apply CLAUDE.md</span></button>
+      </div>
+      {ruleInstructionPreview ? <div className="stack compact"><div className="metric-row"><span>Target</span><strong>{ruleInstructionPreview.target}</strong></div><div className="metric-row"><span>Active rules</span><strong>{ruleInstructionPreview.activeRuleCount}</strong></div><div className="metric-row"><span>Applied</span><Badge text={ruleInstructionPreview.applied ? "YES" : "NO"} tone={ruleInstructionPreview.applied ? "green" : "blue"} /></div><pre className="evidence-metadata">{ruleInstructionPreview.nextContent}</pre></div> : <EmptyNote>Render a preview before applying generated instructions.</EmptyNote>}
+    </Panel>
+  </div><div className="span-4 stack">
+    <Panel title="Selected Rule" iconName="policy" meta={selectedRule?.id || "No rule"}>
+      {selectedRule ? <div className="session-detail">
+        <div className="detail-grid source-detail-grid">
+          <div><span className="mono muted">STATUS</span><strong>{selectedRule.status}</strong></div>
+          <div><span className="mono muted">REVISION</span><strong>{selectedRule.revision}</strong></div>
+          <div><span className="mono muted">VALIDATION</span><strong>{currentVersion?.validationState || "UNKNOWN"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">TITLE</span><strong>{selectedRule.title}</strong></div>
+          <div className="detail-wide"><span className="mono muted">DESCRIPTION</span><strong>{selectedRule.description || "-"}</strong></div>
+          <div><span className="mono muted">ENFORCEMENT</span><strong>{currentVersion?.enforcementMode || "-"}</strong></div>
+          <div><span className="mono muted">PRECEDENCE</span><strong>{currentVersion?.precedence ?? "-"}</strong></div>
+          <div><span className="mono muted">USAGE</span><strong>{detail?.usage ? `${detail.usage.matchedCount}/${detail.usage.evaluationCount}` : "-"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">EFFECT</span><pre className="evidence-metadata">{prettyJson(currentVersion?.effect || {})}</pre></div>
+          <div className="detail-wide"><span className="mono muted">SCOPE</span><pre className="evidence-metadata">{prettyJson(currentVersion?.scope || {})}</pre></div>
+        </div>
+        <div className="row-actions">
+          <button className="btn" disabled={actionLoading} onClick={() => runAction(() => validateRule(selectedRule.id), "Rule validated")}>{icon("rule")}<span>Validate</span></button>
+          <button className="btn" disabled={actionLoading} onClick={() => runAction(() => testRule(selectedRule.id), "Rule tested")}>{icon("science")}<span>Test</span></button>
+          <button className="btn primary" disabled={!["DRAFT", "DISABLED"].includes(selectedRule.status) || actionLoading} onClick={() => runAction(() => transitionRule(selectedRule.id, "activate"), "Rule activated")}>{icon("toggle_on")}<span>Activate</span></button>
+          <button className="btn" disabled={selectedRule.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionRule(selectedRule.id, "disable"), "Rule disabled")}>{icon("toggle_off")}<span>Disable</span></button>
+        </div>
+      </div> : <EmptyNote>No rule selected.</EmptyNote>}
+    </Panel>
+    <Panel title="Versions & Evaluations" iconName="history" meta={detail ? `${detail.versions.length} versions` : ""}>
+      {detail?.loading ? <EmptyNote>Loading rule detail...</EmptyNote> : null}
+      {detail?.error ? <EmptyNote>{detail.error}</EmptyNote> : null}
+      {detail?.versions?.length ? <div className="version-list">{detail.versions.slice(0, 4).map((version: AnyRecord) => <div className="version-row" key={version.id}><div><div className="title-sm">v{version.versionNumber} · {version.validationState}</div><div className="muted mono">{version.enforcementMode} · precedence {version.precedence}</div><div className="muted">{version.validationErrors?.join("; ") || "No validation errors"}</div></div></div>)}</div> : null}
+      {detail?.evaluations?.length ? <div className="version-list">{detail.evaluations.slice(0, 4).map((entry: AnyRecord) => <div className="version-row" key={entry.id}><div><div className="title-sm">{entry.result}</div><div className="muted">{entry.explanation}</div><div className="muted mono">{fmtDate(entry.createdAt)}</div></div></div>)}</div> : null}
+      {detail && !detail.versions.length && !detail.evaluations.length ? <EmptyNote>No versions or evaluations recorded.</EmptyNote> : null}
+    </Panel>
+  </div></div></>;
 }
 
 function SettingsPage(props: AnyRecord & { header: ReactNode }) {

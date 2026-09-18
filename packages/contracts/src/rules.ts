@@ -91,6 +91,25 @@ export const ruleEvaluationDtoSchema = z.object({
   createdAt: z.string()
 });
 
+export const ruleInstructionTargetSchema = z.enum(["PROJECT_AGENTS", "PROJECT_CLAUDE", "GLOBAL_AGENTS", "GLOBAL_CLAUDE"]);
+
+export const ruleInstructionRenderInputSchema = z.object({
+  projectId: z.string().min(1),
+  target: ruleInstructionTargetSchema,
+  apply: z.boolean().default(false)
+});
+
+export const ruleInstructionRenderDtoSchema = z.object({
+  projectId: z.string(),
+  target: ruleInstructionTargetSchema,
+  path: z.string(),
+  content: z.string(),
+  existingContent: z.string().nullable(),
+  nextContent: z.string(),
+  activeRuleCount: z.number().int().nonnegative(),
+  applied: z.boolean()
+});
+
 export type RuleStatus = z.infer<typeof ruleStatusSchema>;
 export type RuleEnforcementMode = z.infer<typeof ruleEnforcementModeSchema>;
 export type RuleValidationState = z.infer<typeof ruleValidationStateSchema>;
@@ -102,3 +121,6 @@ export type RuleVersionDto = z.infer<typeof ruleVersionDtoSchema>;
 export type RuleValidationResult = z.infer<typeof ruleValidationResultSchema>;
 export type RuleEvaluationInput = z.infer<typeof ruleEvaluationInputSchema>;
 export type RuleEvaluationDto = z.infer<typeof ruleEvaluationDtoSchema>;
+export type RuleInstructionTarget = z.infer<typeof ruleInstructionTargetSchema>;
+export type RuleInstructionRenderInput = z.infer<typeof ruleInstructionRenderInputSchema>;
+export type RuleInstructionRenderDto = z.infer<typeof ruleInstructionRenderDtoSchema>;

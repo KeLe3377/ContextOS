@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -26,7 +26,7 @@ beforeEach(async () => {
   const projectResponse = await server.inject({
     method: "POST",
     url: "/api/projects",
-    payload: { name: "Rules", rootPath: "D:/project/ContextOS" }
+    payload: { name: "Rules", rootPath: process.cwd() }
   });
   projectId = projectResponse.json().id;
 });
@@ -157,6 +157,51 @@ describe("rules API", () => {
     expect(reviews.json().items).toEqual([
       expect.objectContaining({ sourceType: "RULE", triggerType: "SESSION_CONTINUE", summary: "Human review required" })
     ]);
+  });
+
+  test("renders and applies active rules to project agent instruction files", async () => {
+    const renderRoot = await mkdtemp(join(tmpdir(), "contextos-rules-render-"));
+    const renderProject = await server!.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Render Rules", rootPath: renderRoot }
+    });
+    const renderProjectId = renderProject.json().id;
+    await activateRule(await createRule({
+      projectId: renderProjectId,
+      title: "Keep evidence immutable",
+      description: "Never rewrite raw evidence files.",
+      scope: { eventTypes: ["session.continue"] },
+      conditions: [{ field: "adapterId", operator: "equals", value: "codex" }],
+      effect: { reason: "Evidence must stay auditable", action: "Create derived context instead" },
+      enforcementMode: "WARNING",
+      precedence: 20
+    }));
+    const file = join(renderRoot, "AGENTS.md");
+    await writeFile(file, "# Existing instructions\n\nKeep this line.\n", "utf8");
+
+    const preview = await server!.inject({
+      method: "POST",
+      url: "/api/rules/render-instructions",
+      payload: { projectId: renderProjectId, target: "PROJECT_AGENTS", apply: false }
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({ target: "PROJECT_AGENTS", activeRuleCount: 1, applied: false });
+    expect(preview.json().content).toContain("Keep evidence immutable");
+    expect(preview.json().nextContent).toContain("Keep this line.");
+
+    const applied = await server!.inject({
+      method: "POST",
+      url: "/api/rules/render-instructions",
+      payload: { projectId: renderProjectId, target: "PROJECT_AGENTS", apply: true }
+    });
+    expect(applied.statusCode).toBe(200);
+    expect(applied.json()).toMatchObject({ applied: true });
+    const written = await readFile(file, "utf8");
+    expect(written).toContain("<!-- CONTEXTOS_RULES_START -->");
+    expect(written).toContain("Keep evidence immutable");
+    expect(written).toContain("Keep this line.");
+    await rm(renderRoot, { recursive: true, force: true });
   });
 });
 

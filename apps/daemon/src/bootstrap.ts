@@ -106,7 +106,7 @@ export async function createDaemonServer(
     const continueSessionService = new ContinueSessionService(runtimeRepository, adapterRegistry, new ProcessSupervisor(), evidenceStore);
 
     const projectRepository = new SqliteProjectRepository(sqlite.db);
-    const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db), reviewItemRepository);
+    const ruleService = new RuleService(new SqliteRuleRepository(sqlite.db), reviewItemRepository, projectRepository);
     const projectService = new ProjectService(projectRepository);
     const sessionService = new SessionService(new SqliteSessionRepository(sqlite.db), continueSessionService, projectRepository, ruleService);
     const decisionService = new DecisionService(new SqliteDecisionRepository(sqlite.db));

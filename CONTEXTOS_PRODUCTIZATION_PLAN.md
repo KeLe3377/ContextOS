@@ -389,4 +389,13 @@ Phase 6 first increment completed on 2026-09-18:
 - Extended Work Item PATCH contract/backend so definition fields are actually persisted.
 - Verified with `npm run build:all`, targeted Work Item tests, full `npm test`, and `git diff --check`.
 
+Phase 7 first increment completed on 2026-09-18:
+
+- Added Rules detail workspace with current version, validation state, enforcement, effect, scope, usage, versions, and recent evaluations.
+- Added `POST /api/rules/render-instructions` to render active ContextOS Rules into managed `AGENTS.md` / `CLAUDE.md` blocks.
+- Supported project and global instruction targets: `PROJECT_AGENTS`, `PROJECT_CLAUDE`, `GLOBAL_AGENTS`, and `GLOBAL_CLAUDE`.
+- Added frontend preview/apply controls for project `AGENTS.md` and `CLAUDE.md`.
+- Preserved existing file content by replacing only the `CONTEXTOS_RULES` managed block.
+- Verified with `npm run build:all`, targeted Rules tests, full `npm test`, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
