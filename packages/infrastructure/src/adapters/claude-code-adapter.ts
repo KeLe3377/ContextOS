@@ -205,7 +205,7 @@ function parseClaudeTranscript(path: string, externalSessionId: string): AgentTr
     externalSessionId,
     contentText: selected.formatted.join("\n\n"),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "claude-code-jsonl.v3",
+    parserVersion: "claude-code-jsonl.v4",
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,
@@ -228,6 +228,7 @@ type ClaudeJsonRow = {
   tool_use_id?: string;
   name?: string;
   summary?: string;
+  timestamp?: unknown;
   message?: {
     role?: string;
     content?: string | Array<{ type?: string; text?: string; content?: string; id?: string; tool_use_id?: string; name?: string; input?: unknown }>;
@@ -240,17 +241,20 @@ function readSessionId(row: ClaudeJsonRow): string | undefined {
 }
 
 function readClaudeEvents(row: ClaudeJsonRow, previousOrdinal: number): AgentTranscriptEvent[] {
-  if (row.type === "summary" && row.summary?.trim()) return [{ ordinal: previousOrdinal + 1, kind: "summary", text: row.summary.trim() }];
+  const timestamp = normalizeEventTimestamp(row.timestamp);
+  const timing = timestamp ? { timestamp } : {};
+  if (row.type === "summary" && row.summary?.trim()) return [{ ordinal: previousOrdinal + 1, ...timing, kind: "summary", text: row.summary.trim() }];
   const role = row.message?.role ?? row.role ?? row.type;
   if (role !== "user" && role !== "assistant") return [];
   const content = row.message?.content ?? row.content;
   const events: AgentTranscriptEvent[] = [];
   const text = messageText(content).trim();
-  if (text) events.push({ ordinal: previousOrdinal + events.length + 1, kind: "message", role, text });
+  if (text) events.push({ ordinal: previousOrdinal + events.length + 1, ...timing, kind: "message", role, text });
   for (const item of Array.isArray(content) ? content : []) {
     if (item.type === "tool_use") {
       events.push({
         ordinal: previousOrdinal + events.length + 1,
+        ...timing,
         kind: "tool_call",
         name: item.name ?? "tool",
         callId: item.id,
@@ -260,6 +264,7 @@ function readClaudeEvents(row: ClaudeJsonRow, previousOrdinal: number): AgentTra
     if (item.type === "tool_result") {
       events.push({
         ordinal: previousOrdinal + events.length + 1,
+        ...timing,
         kind: "tool_result",
         callId: item.tool_use_id,
         ...truncateToolText(stringifyToolPayload(item.content ?? item.text))
@@ -267,6 +272,12 @@ function readClaudeEvents(row: ClaudeJsonRow, previousOrdinal: number): AgentTra
     }
   }
   return events;
+}
+
+function normalizeEventTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
 function messageText(content: ClaudeJsonRow["content"]): string {

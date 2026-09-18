@@ -44,6 +44,7 @@ export type AgentTranscriptImportResult = {
 
 export type AgentTranscriptEvent = {
   ordinal: number;
+  timestamp?: string;
   kind: "message" | "tool_call" | "tool_result" | "summary";
   role?: "user" | "assistant" | "system";
   text?: string;

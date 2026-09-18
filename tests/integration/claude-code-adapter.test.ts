@@ -38,7 +38,7 @@ describe("ClaudeCodeAdapter", () => {
       expect(latest).toMatchObject({
         externalSessionId: "claude-latest",
         contentText: "SUMMARY:\nSummary for claude-latest\n\nUSER:\nnew question\n\nASSISTANT:\nnew answer\n\nTOOL CALL shell (tool_shell):\n{\"command\":\"npm test\"}\n\nTOOL RESULT (tool_shell):\ntool output",
-        parserVersion: "claude-code-jsonl.v3",
+        parserVersion: "claude-code-jsonl.v4",
         eventCount: 5,
         eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
         messageCount: 2,
@@ -50,7 +50,7 @@ describe("ClaudeCodeAdapter", () => {
       });
       expect(latest.events).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: "summary", text: "Summary for claude-latest" }),
-        expect.objectContaining({ kind: "tool_call", name: "shell", callId: "tool_shell" }),
+        expect.objectContaining({ kind: "tool_call", name: "shell", callId: "tool_shell", timestamp: "2026-09-18T06:00:02.000Z" }),
         expect.objectContaining({ kind: "tool_result", callId: "tool_shell", text: "tool output" })
       ]));
 
@@ -100,7 +100,7 @@ async function writeClaudeTranscript(path: string, id: string, cwd: string, user
   const rows = [
     { sessionId: id, cwd, type: "summary", summary: `Summary for ${id}` },
     { sessionId: id, cwd, type: "user", message: { role: "user", content: userText } },
-    { sessionId: id, cwd, type: "assistant", message: { role: "assistant", content: [{ type: "text", text: assistantText }, { type: "tool_use", id: "tool_shell", name: "shell", input: { command: "npm test" } }, { type: "tool_result", tool_use_id: "tool_shell", content: "tool output" }] } }
+    { sessionId: id, cwd, type: "assistant", timestamp: "2026-09-18T14:00:02+08:00", message: { role: "assistant", content: [{ type: "text", text: assistantText }, { type: "tool_use", id: "tool_shell", name: "shell", input: { command: "npm test" } }, { type: "tool_result", tool_use_id: "tool_shell", content: "tool output" }] } }
   ];
   await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
 }

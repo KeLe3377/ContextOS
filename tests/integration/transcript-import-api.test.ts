@@ -230,7 +230,7 @@ describe("transcript import API", () => {
     expect(result.adapter).toMatchObject({
       id: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v4",
+      parserVersion: "codex-jsonl.v5",
       eventCount: 205,
       eventCounts: { message: 2, toolCall: 203, toolResult: 0, summary: 0 },
       messageCount: 2,
@@ -246,7 +246,7 @@ describe("transcript import API", () => {
       stream: "imported-transcript",
       adapterId: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v4",
+      parserVersion: "codex-jsonl.v5",
       eventCount: 205,
       eventCounts: { message: 2, toolCall: 203, toolResult: 0, summary: 0 },
       messageCount: 2,
@@ -269,7 +269,7 @@ describe("transcript import API", () => {
       evidenceSnapshotId: result.evidence.id,
       adapterId: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v4",
+      parserVersion: "codex-jsonl.v5",
       eventCount: 205,
       returnedEventCount: 200,
       eventsTruncated: true,
@@ -450,7 +450,7 @@ describe("transcript import API", () => {
     expect(imported.json().adapter).toMatchObject({
       id: "claude-code",
       externalSessionId,
-      parserVersion: "claude-code-jsonl.v3",
+      parserVersion: "claude-code-jsonl.v4",
       eventCount: 5,
       eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
       messageCount: 2,
@@ -466,7 +466,7 @@ describe("transcript import API", () => {
       metadata: expect.objectContaining({
         adapterId: "claude-code",
         externalSessionId,
-        parserVersion: "claude-code-jsonl.v3",
+        parserVersion: "claude-code-jsonl.v4",
         eventCount: 5,
         eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 }
       })
@@ -484,7 +484,7 @@ describe("transcript import API", () => {
       evidenceSnapshotId: imported.json().evidence.id,
       adapterId: "claude-code",
       externalSessionId,
-      parserVersion: "claude-code-jsonl.v3",
+      parserVersion: "claude-code-jsonl.v4",
       eventCount: 5,
       eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
       events: expect.arrayContaining([

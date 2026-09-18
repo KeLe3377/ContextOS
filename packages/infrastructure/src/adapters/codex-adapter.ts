@@ -145,6 +145,7 @@ type CodexSessionMetadata = { id: string; cwd: string };
 type CodexTranscriptMessage = AgentTranscriptEvent & { kind: "message"; role: "user" | "assistant"; text: string };
 type CodexJsonRow = {
   type?: string;
+  timestamp?: unknown;
   payload?: {
     id?: string;
     call_id?: string;
@@ -233,7 +234,7 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
     externalSessionId,
     contentText: selected.join(separator),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "codex-jsonl.v4",
+    parserVersion: "codex-jsonl.v5",
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,
@@ -248,24 +249,32 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
 
 function readCodexEvent(row: CodexJsonRow, ordinal: number): AgentTranscriptEvent | null {
   const payload = row.payload;
+  const timestamp = normalizeEventTimestamp(row.timestamp);
+  const timing = timestamp ? { timestamp } : {};
   if (row.type === "summary" || payload?.type === "summary" || payload?.type === "reasoning") {
     const text = contentToText(payload?.summary ?? payload?.content);
-    return text ? { ordinal, kind: "summary", text } : null;
+    return text ? { ordinal, ...timing, kind: "summary", text } : null;
   }
   if (row.type !== "response_item" || !payload?.type) return null;
   if (payload.type === "message" && ["user", "assistant"].includes(payload.role ?? "")) {
     const text = contentToText(payload.content).trim();
-    return text ? { ordinal, kind: "message", role: payload.role as "user" | "assistant", text } : null;
+    return text ? { ordinal, ...timing, kind: "message", role: payload.role as "user" | "assistant", text } : null;
   }
   if (["function_call", "tool_call", "custom_tool_call"].includes(payload.type)) {
     const text = stringifyToolPayload(payload.arguments ?? payload.input ?? payload.content);
-    return { ordinal, kind: "tool_call", name: payload.name ?? "tool", callId: payload.call_id ?? payload.callId, ...truncateToolText(text) };
+    return { ordinal, ...timing, kind: "tool_call", name: payload.name ?? "tool", callId: payload.call_id ?? payload.callId, ...truncateToolText(text) };
   }
   if (["function_call_output", "tool_result", "custom_tool_call_output"].includes(payload.type)) {
     const text = stringifyToolPayload(payload.output ?? payload.content);
-    return { ordinal, kind: "tool_result", callId: payload.call_id ?? payload.callId, ...truncateToolText(text) };
+    return { ordinal, ...timing, kind: "tool_result", callId: payload.call_id ?? payload.callId, ...truncateToolText(text) };
   }
   return null;
+}
+
+function normalizeEventTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
 function stringifyToolPayload(value: unknown): string {

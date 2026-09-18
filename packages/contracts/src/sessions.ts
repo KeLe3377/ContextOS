@@ -69,6 +69,7 @@ export type TranscriptImportInput = z.infer<typeof transcriptImportInputSchema>;
 export type AdapterTranscriptImportInput = z.infer<typeof adapterTranscriptImportInputSchema>;
 export type AgentTranscriptEventDto = {
   ordinal: number;
+  timestamp?: string;
   kind: "message" | "tool_call" | "tool_result" | "summary";
   role?: "user" | "assistant" | "system";
   text?: string;
