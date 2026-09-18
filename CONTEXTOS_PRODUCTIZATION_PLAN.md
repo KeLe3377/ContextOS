@@ -362,6 +362,8 @@ Phase 3 first increment completed on 2026-09-17:
 - Added source-level Sync/Pause/Resume/Archive and evidence open/verify actions inside the selected-source workflow.
 - Added Evidence compare UI for comparing a Source snapshot against the latest snapshot using existing metadata/content compare APIs.
 - Added Evidence-to-Context derivation entry points so a snapshot can prefill the Context Item creation flow.
+- Added Context Item edit flow backed by `PATCH /api/context-items/:id`, preserving provenance while creating backend versions.
+- Added Context Source edit flow backed by `PATCH /api/context-sources/:id` for mutable source fields, keeping locator/type immutable in the UI.
 - Verified with `npm run build:all`, `npm test`, and `git diff --check`.
 
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
