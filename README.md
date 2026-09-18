@@ -167,7 +167,7 @@ npm run dev
 4. 点击该 session 行内的 `Continue in Agent`，ContextOS 会生成 Context Package 和 handoff evidence，然后启动 Codex CLI。
 5. 回到 Sessions 页面刷新，可以在 Latest Session Context 里看到 Context Package ID 和 `ContextOS handoff prompt` evidence。
 
-当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录或 Claude Code projects 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定外部 agent session ID，后续只读取同一会话。Codex / Claude Code transcript 解析会保留 user/assistant 正文，并在 Evidence metadata 中记录 role counts、turn count 和消息序号范围。受管 agent 进程运行期间会 best-effort 轮询同一 transcript，内容变化时导入新的 Evidence；进程退出后仍会 final reconcile 兜底。
+当前版本可通过 `POST /api/sessions/:id/import-transcript/auto` 从本机 Codex session 目录或 Claude Code projects 目录发现并导入 transcript。发现范围严格限制在 Session 所属 Project root；首次导入绑定外部 agent session ID，后续只读取同一会话。Codex / Claude Code transcript 解析会规范化 message、tool call、tool result、summary 和事件时间戳，并在 Evidence metadata 中记录结构计数、消息范围和截断状态。单个超大工具事件会有界保留首尾内容。受管 agent 进程运行期间会 best-effort 轮询同一 transcript，内容变化时导入新的 Evidence；进程退出后仍会 final reconcile 兜底。
 
 运行中的 Codex Session 可通过 `GET /api/sessions/:id/runtime-status` 查询当前 Run 和受管进程状态，并通过 `POST /api/sessions/:id/interrupt`（请求体包含 `expectedRevision`）终止进程树。中断后 Session 进入 `PAUSED`，Job 和 Run 记录为 `CANCELED`。
 
@@ -183,7 +183,7 @@ $env:CONTEXTOS_CODEX_ARGS='["--help"]'
 npm run dev
 ```
 
-Claude Code 可用 `CONTEXTOS_CLAUDE_COMMAND`、`CONTEXTOS_CLAUDE_ARGS`、`CONTEXTOS_CLAUDE_PROJECTS_DIR` 覆盖命令、参数和 transcript 目录。Codex 和 Claude Code adapters 均已实现 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt` 和 `importTranscript` first pass，并通过共享 adapter contract tests。
+Claude Code 可用 `CONTEXTOS_CLAUDE_COMMAND`、`CONTEXTOS_CLAUDE_ARGS`、`CONTEXTOS_CLAUDE_PROJECTS_DIR` 覆盖命令、参数和 transcript 目录。Codex 和 Claude Code adapters 均已实现 `discover`、`launch`、`resume`、`inspectStatus`、`interrupt` 和 `importTranscript`，并通过共享 adapter contract tests。当前规范化版本为 Codex JSONL v5、Claude Code JSONL v4。
 
 ## 验证
 

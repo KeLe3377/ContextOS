@@ -203,6 +203,8 @@ No managed process
 
 `Run History` 会保留这个 Session 的每次 Agent 运行，包括状态、Run ID、开始/结束时间、PID、退出码和失败原因。失败后再次 Continue 不会覆盖之前的失败记录。Settings 的 `Runtime Health` 也可以从失败记录直接打开所属 Session。
 
+`Transcript Events` 会显示 adapter 从原始 JSONL 规范化出的最新事件，包括 user/assistant message、tool call、tool result 和 summary。事件带原始发生时间；详情优先显示最新 12 条。单个超大工具输入或输出会保留首尾并标记 `output truncated`，避免一条日志挤掉整段会话。页面会分别提示 transcript 是否触及 1 MB 导入限制，以及事件列表是否来自最新 200 条窗口。
+
 ### Evidence 列表
 
 Evidence 里常见项目：
@@ -319,6 +321,8 @@ Rules 是治理规则。当前 UI 支持基础链路：
 
 当前最实用的规则场景是拦截或标记 `session.continue`。
 
+选中 Rule 后可以查看当前版本、校验状态、scope、effect、使用位置、版本历史和最近 evaluation。`Preview AGENTS` / `Preview CLAUDE` 用于预览 ACTIVE Rules 生成的托管规则块；确认内容后可 Apply 到项目根目录的 `AGENTS.md` 或 `CLAUDE.md`。ContextOS 只替换 `CONTEXTOS_RULES` 标记块，不覆盖文件里的其他人工内容。全局目标也由后端支持，但日常应优先使用项目级规则文件。
+
 ## Review Inbox
 
 Review Inbox 展示需要人工处理的事项。
@@ -329,13 +333,20 @@ Review Inbox 展示需要人工处理的事项。
 - Evidence hash 不匹配；
 - Rule 要求 review。
 
-当前前端主要是查看列表，resolve/dismiss UI 还未完整做完。
+选择 Review Item 后可以查看 source、trigger、priority、reviewer、proposed resolution 和操作历史。可执行：
+
+- `Start`：进入处理中状态；
+- `Assign`：指定 reviewer ID；
+- `Resolve`：以 `APPROVED`、`FIXED` 或 `ACKNOWLEDGED` 结案，并填写原因；
+- `Dismiss`：说明不再适用的原因后关闭。
+
+Review 的 start、assign、resolve、dismiss 都会保留 Activity/Audit 记录。
 
 ## Decisions
 
 Decisions 是长期决策登记。
 
-当前前端主要是查看已有 Decision。创建、编辑、状态流转后续还需要补 UI。
+可以通过 `Record Decision` 创建 Decision，填写 statement、rationale、problem context、alternatives、consequences 和 references。Draft/Proposed Decision 可以编辑，每次正文修改都会生成新版本；详情中可以查看版本历史。当前 UI 提供 Propose、Accept 和 Archive 生命周期动作，已接受或关闭的版本不会被静默改写。
 
 适合记录：
 
@@ -346,13 +357,13 @@ Decisions 是长期决策登记。
 
 ## Work Items
 
+通过 `Create Item` 创建 Work Item，填写描述、验收条件、执行契约和可选父项。选中后可以编辑父项、依赖、描述、验收条件和执行契约，并执行 Ready、Start、Block、Resolve Blocker、Send to Review、Done、Reopen、Cancel 等状态动作。
+
 进行中的 Work Item 可以点击 `Block` 并填写无法继续的原因。阻塞原因会显示在详情中；问题处理后点击 `Resolve Blocker`，填写处理结果，Work Item 会回到 `IN_PROGRESS`，原始原因和解决说明都会保留。
 
 父 Work Item 的详情会列出 Child Work Items，可直接进入子项。`Work Item Activity` 汇总创建、编辑、状态变化、阻塞处理和 Agent Attempt 的活动及审计记录。
 
-Work Items 是可执行工作项。
-
-当前前端主要是查看列表。完整创建、编辑、状态流转 UI 后续还需要补。
+Ready Work Item 可以点击 `Start Session` 创建与工作项绑定的 Agent Session。之后从 Attempt 打开 Session、执行 `Continue`；Session 成功、失败或取消后，Attempt 会同步为 `SUCCEEDED`、`FAILED` 或 `CANCELED`，失败码、Run ID 和完成时间会显示在 Work Item 详情中。
 
 适合记录：
 
@@ -390,8 +401,14 @@ Codex adapter 正常应显示 `Available` 和版本号。
 - 创建 Evidence Snapshot；
 - 校验 Evidence 文件完整性；
 - 创建、验证、测试、激活、禁用 Rule；
-- 查看 Review Items、Decisions、Work Items；
-- 使用 Codex 和 Claude Code adapter first pass。
+- 将 ACTIVE Rules 预览并应用到项目 `AGENTS.md` / `CLAUDE.md` 托管块；
+- 完整处理 Review Item 的 start、assign、resolve、dismiss；
+- 创建、编辑、版本化并流转 Decision；
+- 创建、编辑、分层、阻塞并执行 Work Item；
+- 从 Work Item 启动 Session，并回写 Agent Attempt 结果；
+- 查看带时间戳和截断标记的规范化 transcript 事件；
+- 使用 Codex 和 Claude Code adapter；
+- 运行隔离数据目录的桌面/移动端 Playwright 主流程测试。
 
 ## 当前限制
 
@@ -399,12 +416,10 @@ Codex adapter 正常应显示 `Available` 和版本号。
 
 - `Continue in Agent` 启动的后台进程不是当前 Codex UI 对话本身；
 - 已有 Codex 对话需要通过 `Import Existing Session` 绑定；
-- Review Inbox 还缺少完整 resolve/dismiss 操作 UI；
-- Decisions 还缺少完整创建/编辑/状态流转 UI；
-- Work Items 还缺少完整创建/编辑/状态流转 UI；
-- Context Item 派生和编辑 UI 仍是 first pass；
-- `Export Capsule` 按钮还不是完整产品功能；
-- 没有浏览器 E2E 自动验收。
+- Cursor adapter 尚未启用；
+- Claude Code 已具备共享 adapter 生命周期和 transcript 规范化，但真实日常主链路仍以 Codex 验证为主；
+- 当前是本地开发版，没有安装器、系统服务或开机自启动交付；
+- transcript 同步是运行期间轮询和退出后 reconcile，不是 Codex Desktop 当前任务的实时双向 UI 镜像。
 
 ## 常见问题
 
@@ -495,5 +510,5 @@ git diff --check
 
 ```text
 Test Files  19 passed
-Tests       84 passed
+Tests       97 passed
 ```

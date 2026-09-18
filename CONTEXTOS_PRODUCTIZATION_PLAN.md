@@ -492,4 +492,10 @@ Phase 10 transcript timestamp increment completed on 2026-09-18:
 - Displayed event time in the Session transcript event feed.
 - Upgraded Codex normalization to v5 and Claude Code normalization to v4, with real Codex transcript timestamp coverage verified read-only.
 
+Phase 11 user-guide synchronization completed on 2026-09-18:
+
+- Updated the usage guide to match completed Review, Decision, Work Item, Rule instruction, transcript event, and browser E2E workflows.
+- Removed obsolete limitations that described already completed product features as unavailable.
+- Updated README adapter normalization details and the verified 97-test baseline.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
