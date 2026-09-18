@@ -318,6 +318,7 @@ export function App() {
   const [actionLoading, setActionLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [data, setData] = useState<WorkspaceData>(() => emptyData());
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null);
@@ -335,6 +336,7 @@ export function App() {
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [evidenceCompare, setEvidenceCompare] = useState<{ base: AnyRecord; other: AnyRecord; metadata: AnyRecord | null; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [contextItemDetail, setContextItemDetail] = useState<{ item: AnyRecord; versions: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
+  const preferredProjectIdRef = useRef<string | null>(null);
   const preferredSessionIdRef = useRef<string | null>(null);
   const preferredReviewIdRef = useRef<string | null>(null);
   const preferredDecisionIdRef = useRef<string | null>(null);
@@ -452,6 +454,7 @@ export function App() {
     next.sessions = next.sessions.filter((session) => !isArchived(session));
     next.contextSources = next.contextSources.filter((source) => !isArchived(source));
     next.contextItems = next.contextItems.filter((item) => !isArchived(item));
+    const selectedProject = next.projects.find((project) => project.id === preferredProjectIdRef.current) || next.projects[0];
     const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
     const selectedReview = next.reviews.find((review) => review.id === preferredReviewIdRef.current) || next.reviews.find((review) => ["OPEN", "IN_PROGRESS"].includes(review.status)) || next.reviews[0];
     const selectedDecision = next.decisions.find((decision) => decision.id === preferredDecisionIdRef.current) || next.decisions[0];
@@ -460,12 +463,14 @@ export function App() {
     const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
+    preferredProjectIdRef.current = selectedProject?.id || null;
     preferredSessionIdRef.current = selectedSession?.id || null;
     preferredReviewIdRef.current = selectedReview?.id || null;
     preferredDecisionIdRef.current = selectedDecision?.id || null;
     preferredWorkItemIdRef.current = selectedWorkItem?.id || null;
     preferredRuleIdRef.current = selectedRule?.id || null;
     preferredContextSourceIdRef.current = selectedContextSource?.id || null;
+    setSelectedProjectId(selectedProject?.id || null);
     setSelectedSessionId(selectedSession?.id || null);
     setSelectedReviewId(selectedReview?.id || null);
     setSelectedDecisionId(selectedDecision?.id || null);
@@ -527,6 +532,11 @@ export function App() {
   const workItemById = useCallback((workItemId: string) => data.workItems.find((item) => item.id === workItemId), [data.workItems]);
   const reviewById = useCallback((reviewId: string) => data.reviews.find((item) => item.id === reviewId), [data.reviews]);
 
+  const selectProject = useCallback((projectId: string) => {
+    preferredProjectIdRef.current = projectId;
+    setSelectedProjectId(projectId);
+  }, []);
+
   const selectSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
     preferredSessionIdRef.current = sessionId;
@@ -580,6 +590,13 @@ export function App() {
     if (!project) throw new Error("No project is available to archive");
     if (!confirmDestructiveAction(`Archive project "${project.name}"?`)) return;
     await sendJson(`/api/projects/${project.id}/archive`, "POST", { expectedRevision: project.revision });
+  }, [confirmDestructiveAction, projectById]);
+
+  const transitionProject = useCallback(async (projectId: string, action: string) => {
+    const project = projectById(projectId);
+    if (!project) throw new Error("No project is available");
+    if (action === "archive" && !confirmDestructiveAction(`Archive project "${project.name}"?`)) return;
+    await sendJson(`/api/projects/${project.id}/${action}`, "POST", { expectedRevision: project.revision });
   }, [confirmDestructiveAction, projectById]);
 
   const archiveSession = useCallback(async (sessionId: string) => {
@@ -835,7 +852,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -954,8 +971,66 @@ function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode
 }
 
 function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, archiveProject } = props;
-  return <>{header}<Panel title="Project Register" iconName="folder_open"><Table headers={["Project", "Boundary", "Rules", "Health", "Activity", "Action"]} rows={data.projects.map((project: AnyRecord) => [<><strong>{project.name}</strong><div className="muted">{project.description || "Agent workspace"}</div></>, <span className="mono">{project.rootPath}</span>, <Badge text={`${project.defaultRuleIds?.length || 0} defaults`} tone="blue" />, <Badge text={project.status} tone={toneForStatus(project.status)} />, `rev ${project.revision}`, <button className="icon-btn table-action" title="Archive project" disabled={actionLoading} onClick={() => runAction(() => archiveProject(project.id), "Project archived")}>{icon("archive")}</button>])} empty="No projects yet." /></Panel></>;
+  const { data, header, actionLoading, runAction, archiveProject, transitionProject, selectedProjectId, selectProject } = props;
+  const selectedProject = data.projects.find((project: AnyRecord) => project.id === selectedProjectId) || data.projects[0];
+  const projectSessions = selectedProject ? data.sessions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const projectWork = selectedProject ? data.workItems.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const projectSources = selectedProject ? data.contextSources.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const projectEvidence = selectedProject ? data.evidenceSnapshots.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const projectRules = selectedProject ? data.rules.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const projectDecisions = selectedProject ? data.decisions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const latestSessions = [...projectSessions].sort((a: AnyRecord, b: AnyRecord) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, 5);
+  const activeWork = projectWork.filter((item: AnyRecord) => ["READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW"].includes(item.status)).slice(0, 5);
+  return <>{header}<div className="grid cols-12"><div className="span-8 stack">
+    <Panel title="Project Register" iconName="folder_open"><Table headers={["Project", "Boundary", "Rules", "Health", "Action"]} rows={data.projects.map((project: AnyRecord) => [
+      <div className={`session-cell ${project.id === selectedProject?.id ? "selected" : ""}`}><strong>{project.name}</strong><div className="muted">{project.description || "Agent workspace"}</div></div>,
+      <span className="mono">{project.rootPath}</span>,
+      <Badge text={`${project.defaultRuleIds?.length || 0} defaults`} tone="blue" />,
+      <Badge text={project.status} tone={toneForStatus(project.status)} />,
+      <div className="row-actions">
+        <button className="icon-btn table-action" title="View project detail" disabled={actionLoading} onClick={() => selectProject(project.id)}>{icon("visibility")}</button>
+        <button className="icon-btn table-action" title="Pause project" disabled={project.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionProject(project.id, "pause"), "Project paused")}>{icon("pause_circle")}</button>
+        <button className="icon-btn table-action" title="Activate project" disabled={project.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionProject(project.id, "activate"), "Project activated")}>{icon("toggle_on")}</button>
+        <button className="icon-btn table-action" title="Archive project" disabled={actionLoading} onClick={() => runAction(() => archiveProject(project.id), "Project archived")}>{icon("archive")}</button>
+      </div>
+    ])} empty="No projects yet." /></Panel>
+  </div><div className="span-4 stack">
+    <Panel title="Selected Project" iconName="folder_open" meta={selectedProject?.id || "No project"}>
+      {selectedProject ? <div className="session-detail">
+        <div className="detail-grid source-detail-grid">
+          <div><span className="mono muted">STATUS</span><strong>{selectedProject.status}</strong></div>
+          <div><span className="mono muted">REVISION</span><strong>{selectedProject.revision}</strong></div>
+          <div><span className="mono muted">UPDATED</span><strong>{fmtDate(selectedProject.updatedAt)}</strong></div>
+          <div className="detail-wide"><span className="mono muted">NAME</span><strong>{selectedProject.name}</strong></div>
+          <div className="detail-wide"><span className="mono muted">ROOT PATH</span><strong className="mono">{selectedProject.rootPath}</strong></div>
+          <div className="detail-wide"><span className="mono muted">DESCRIPTION</span><strong>{selectedProject.description || "-"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">AGENT ADAPTERS</span><strong>{selectedProject.agentAdapterIds?.length ? selectedProject.agentAdapterIds.join(", ") : "Workspace default"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">DEFAULT RULES</span><strong>{selectedProject.defaultRuleIds?.length ? selectedProject.defaultRuleIds.join(", ") : "No defaults"}</strong></div>
+        </div>
+        <div className="row-actions">
+          <button className="btn" disabled={selectedProject.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionProject(selectedProject.id, "pause"), "Project paused")}>{icon("pause_circle")}<span>Pause</span></button>
+          <button className="btn primary" disabled={selectedProject.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionProject(selectedProject.id, "activate"), "Project activated")}>{icon("toggle_on")}<span>Activate</span></button>
+          <button className="btn" disabled={actionLoading} onClick={() => runAction(() => archiveProject(selectedProject.id), "Project archived")}>{icon("archive")}<span>Archive</span></button>
+        </div>
+      </div> : <EmptyNote>Select or create a project to inspect its workspace boundary.</EmptyNote>}
+    </Panel>
+    <Panel title="Workspace Footprint" iconName="inventory_2" meta={selectedProject ? selectedProject.name : ""}>
+      {selectedProject ? <div className="kpi-grid compact-kpis">
+        <div className="kpi"><div className="kpi-value">{projectSessions.length}</div><div className="kpi-label mono">Sessions</div></div>
+        <div className="kpi"><div className="kpi-value">{projectWork.length}</div><div className="kpi-label mono">Work</div></div>
+        <div className="kpi"><div className="kpi-value">{projectSources.length}</div><div className="kpi-label mono">Sources</div></div>
+        <div className="kpi"><div className="kpi-value">{projectEvidence.length}</div><div className="kpi-label mono">Evidence</div></div>
+        <div className="kpi"><div className="kpi-value">{projectRules.length}</div><div className="kpi-label mono">Rules</div></div>
+        <div className="kpi"><div className="kpi-value">{projectDecisions.length}</div><div className="kpi-label mono">Decisions</div></div>
+      </div> : <EmptyNote>No project selected.</EmptyNote>}
+    </Panel>
+    <Panel title="Recent Sessions" iconName="terminal" meta={`${latestSessions.length} shown`}>
+      {latestSessions.length ? <div className="stack compact">{latestSessions.map((session: AnyRecord) => <div className="metric-row evidence-row" key={session.id}><div className="evidence-row-main"><div className="title-sm">{session.title || session.id}</div><div className="muted mono">{session.agentAdapterId} · {fmtDate(session.updatedAt)}</div></div><Badge text={session.status} tone={toneForStatus(session.status)} /></div>)}</div> : <EmptyNote>No sessions for this project yet.</EmptyNote>}
+    </Panel>
+    <Panel title="Active Work" iconName="task_alt" meta={`${activeWork.length} active`}>
+      {activeWork.length ? <div className="stack compact">{activeWork.map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted">{item.description || item.id}</div></div><Badge text={item.status} tone={toneForStatus(item.status)} /></div>)}</div> : <EmptyNote>No active work for this project.</EmptyNote>}
+    </Panel>
+  </div></div></>;
 }
 
 function SessionsPage(props: AnyRecord & { header: ReactNode }) {

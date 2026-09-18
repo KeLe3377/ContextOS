@@ -505,4 +505,11 @@ P1 product-closeout increment completed on 2026-09-18:
 - Kept cancellation quiet so backing out of a confirmation does not show a false success state.
 - Verified with `npm run build:all`, targeted runtime/transcript integration tests, and `git diff --check`.
 
+P1 Projects workspace increment completed on 2026-09-18:
+
+- Added a selected Project detail workspace instead of leaving Projects as a list-only page.
+- Surfaced project boundary, revision, adapters, default rules, related resource counts, recent Sessions, and active Work Items.
+- Added Project pause/activate controls alongside existing archive behavior, reusing the existing backend transition contract.
+- Verified with `npm run build:all`, targeted Project API tests, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
