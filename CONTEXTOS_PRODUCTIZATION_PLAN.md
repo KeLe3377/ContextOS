@@ -454,4 +454,10 @@ Phase 11 browser-smoke increment completed on 2026-09-18:
 - Added desktop and mobile Chromium smoke coverage for Sessions, failed Run History, Runtime Health, and cross-page navigation.
 - Captured a full-page screenshot for each viewport as a layout regression artifact.
 
+Phase 11 user-flow E2E increment completed on 2026-09-18:
+
+- Extended browser smoke coverage to create a Project and Session through the actual UI before exercising runtime behavior.
+- Added Session and Settings screenshots plus horizontal-overflow assertions for desktop and mobile viewports.
+- Documented the stable build, integration-test, and isolated browser-test commands in README.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

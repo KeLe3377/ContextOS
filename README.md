@@ -190,9 +190,11 @@ Claude Code 可用 `CONTEXTOS_CLAUDE_COMMAND`、`CONTEXTOS_CLAUDE_ARGS`、`CONTE
 提交前建议运行：
 
 ```powershell
-npm run frontend:build
-npm run build
+npm run build:all
 npm test
+npm run test:e2e
 ```
+
+`npm run test:e2e` 会在 `127.0.0.1:4722` 启动使用临时数据目录的隔离 daemon，并用 Chromium 验证桌面和移动视口。首次运行前执行 `npx playwright install chromium`。测试不会读写日常使用的 `.contextos/` 数据。
 
 
