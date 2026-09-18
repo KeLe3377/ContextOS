@@ -512,4 +512,11 @@ P1 Projects workspace increment completed on 2026-09-18:
 - Added Project pause/activate controls alongside existing archive behavior, reusing the existing backend transition contract.
 - Verified with `npm run build:all`, targeted Project API tests, and `git diff --check`.
 
+P1 Decision action-surface increment completed on 2026-09-18:
+
+- Exposed the existing Decision `review`, `supersede`, and `reverse` backend transitions in the Decisions workspace.
+- Added table and selected-detail actions with status-aware enablement matching backend transition rules.
+- Routed supersede/reverse through the saved destructive-action confirmation setting.
+- Verified with `npm run build:all`, targeted core resource integration tests, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

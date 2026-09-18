@@ -746,6 +746,8 @@ export function App() {
     const decision = decisionById(decisionId);
     if (!decision) throw new Error("No decision is available");
     if (action === "archive" && !confirmDestructiveAction(`Archive decision "${decision.title}"?`)) return;
+    if (action === "supersede" && !confirmDestructiveAction(`Supersede accepted decision "${decision.title}"?`)) return;
+    if (action === "reverse" && !confirmDestructiveAction(`Reverse accepted decision "${decision.title}"?`)) return;
     await sendJson(`/api/decisions/${decision.id}/${action}`, "POST", { expectedRevision: decision.revision });
   }, [confirmDestructiveAction, decisionById]);
   const transitionWorkItem = useCallback(async (workItemId: string, action: string) => {
@@ -1191,8 +1193,11 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
       <div className="row-actions">
         <button className="icon-btn table-action" title="View decision detail" disabled={actionLoading} onClick={() => void selectDecision(item.id)}>{icon("visibility")}</button>
         <button className="icon-btn table-action" title="Edit decision" disabled={!["DRAFT", "PROPOSED"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "decisionEdit", decisionId: item.id })}>{icon("edit_note")}</button>
+        <button className="icon-btn table-action" title="Send decision to review" disabled={!["DRAFT", "PROPOSED"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "review"), "Decision sent to review")}>{icon("rate_review")}</button>
         <button className="icon-btn table-action" title="Propose decision" disabled={item.status !== "DRAFT" || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "propose"), "Decision proposed")}>{icon("publish")}</button>
         <button className="icon-btn table-action" title="Accept decision" disabled={!["DRAFT", "PROPOSED"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "accept"), "Decision accepted")}>{icon("check_circle")}</button>
+        <button className="icon-btn table-action" title="Supersede accepted decision" disabled={item.status !== "ACCEPTED" || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "supersede"), "Decision superseded")}>{icon("history")}</button>
+        <button className="icon-btn table-action" title="Reverse accepted decision" disabled={item.status !== "ACCEPTED" || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "reverse"), "Decision reversed")}>{icon("undo")}</button>
         <button className="icon-btn table-action" title="Archive decision" disabled={!["DRAFT", "PROPOSED", "SUPERSEDED", "REVERSED"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "archive"), "Decision archived")}>{icon("archive")}</button>
       </div>
     ])} empty="No decisions yet." /></Panel>
@@ -1213,8 +1218,11 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
         </div>
         <div className="row-actions">
           <button className="btn" disabled={!["DRAFT", "PROPOSED"].includes(selectedDecision.status) || actionLoading} onClick={() => setModal({ kind: "decisionEdit", decisionId: selectedDecision.id })}>{icon("edit_note")}<span>Edit</span></button>
+          <button className="btn" disabled={!["DRAFT", "PROPOSED"].includes(selectedDecision.status) || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "review"), "Decision sent to review")}>{icon("rate_review")}<span>Review</span></button>
           <button className="btn primary" disabled={selectedDecision.status !== "DRAFT" || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "propose"), "Decision proposed")}>{icon("publish")}<span>Propose</span></button>
           <button className="btn" disabled={!["DRAFT", "PROPOSED"].includes(selectedDecision.status) || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "accept"), "Decision accepted")}>{icon("check_circle")}<span>Accept</span></button>
+          <button className="btn" disabled={selectedDecision.status !== "ACCEPTED" || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "supersede"), "Decision superseded")}>{icon("history")}<span>Supersede</span></button>
+          <button className="btn" disabled={selectedDecision.status !== "ACCEPTED" || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "reverse"), "Decision reversed")}>{icon("undo")}<span>Reverse</span></button>
           <button className="btn" disabled={!["DRAFT", "PROPOSED", "SUPERSEDED", "REVERSED"].includes(selectedDecision.status) || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "archive"), "Decision archived")}>{icon("archive")}<span>Archive</span></button>
         </div>
       </div> : <EmptyNote>No decision selected.</EmptyNote>}
