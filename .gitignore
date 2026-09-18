@@ -9,3 +9,4 @@ dist/
 !.env.example
 playwright-report/
 test-results/
+scripts/probe-output/
