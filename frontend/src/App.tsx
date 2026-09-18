@@ -15,6 +15,7 @@ type PageDef = {
 
 type WorkspaceData = {
   health: AnyRecord | null;
+  overview: AnyRecord | null;
   projects: AnyRecord[];
   sessions: AnyRecord[];
   reviews: AnyRecord[];
@@ -59,6 +60,7 @@ const enabledActions = new Set(["refresh-context", "add-project", "new-session",
 function emptyData(): WorkspaceData {
   return {
     health: null,
+    overview: null,
     projects: [],
     sessions: [],
     reviews: [],
@@ -372,6 +374,7 @@ export function App() {
     setError(null);
     const requests = {
       health: fetchJson("/api/health"),
+      overview: fetchJson("/api/workspace/overview"),
       projects: fetchJson("/api/projects"),
       sessions: fetchJson("/api/sessions"),
       reviews: fetchJson("/api/review-items"),
@@ -840,20 +843,28 @@ function ProjectPill({ project }: { project?: AnyRecord }) {
 }
 
 function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode }) {
-  const activeProject = data.projects[0];
-  const readyWork = data.workItems.filter((item) => ["READY", "IN_PROGRESS"].includes(item.status));
+  const overview = data.overview;
+  const activeProject = overview?.project || data.projects[0];
+  const nextWork = overview?.nextWorkItems || data.workItems.filter((item) => ["READY", "IN_PROGRESS"].includes(item.status)).map((item) => ({ id: item.id, title: item.title, status: item.status, subtitle: item.description || "", updatedAt: item.updatedAt }));
+  const pendingReviews = overview?.pendingReviews || data.reviews.map((item) => ({ id: item.id, title: item.summary, status: item.status, subtitle: item.proposedResolution || "", updatedAt: item.updatedAt }));
+  const kpis = overview?.kpis || { sessions: data.sessions.length, pendingReviews: data.reviews.length, readyWorkItems: nextWork.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, activeRules: data.rules.filter((item) => item.status === "ACTIVE").length };
+  const contextHealth = overview?.contextHealth || { activeSources: data.contextSources.filter((item) => item.status === "ACTIVE").length, pausedSources: data.contextSources.filter((item) => item.status === "PAUSED").length, evidenceSnapshots: data.evidenceSnapshots.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, staleContextItems: data.contextItems.filter((item) => item.status === "STALE").length };
+  const latestPackage = overview?.latestContextPackage;
   return (
     <>
       {header}
-      <div className="kpi-grid">{[[data.sessions.length, "Sessions indexed"], [data.decisions.length, "Decisions active"], [data.workItems.length, "Work items"], [data.reviews.length, "Review required"]].map(([value, label]) => <div className="kpi" key={String(label)}><div className="kpi-value">{value}</div><div className="kpi-label mono">{label}</div></div>)}</div>
+      <div className="kpi-grid">{[[kpis.sessions, "Sessions"], [kpis.readyWorkItems, "Ready work"], [kpis.pendingReviews, "Review required"], [kpis.activeContextItems, "Active context"], [kpis.activeRules, "Active rules"]].map(([value, label]) => <div className="kpi" key={String(label)}><div className="kpi-value">{value}</div><div className="kpi-label mono">{label}</div></div>)}</div>
       <div className="grid cols-12" style={{ marginTop: 16 }}>
         <div className="span-8 stack">
           <Panel title="Current Project" iconName="folder_open">{activeProject ? <div className="pad stack"><div className="split"><div><div className="title-sm">{activeProject.name}</div><div className="muted">{activeProject.description || "Agent workspace governance"}</div></div><Badge text={activeProject.status} tone={toneForStatus(activeProject.status)} /></div><div className="progress"><span style={{ width: "72%" }} /></div><div className="split mono muted"><span>Boundary: {activeProject.rootPath}</span><span>Revision: {activeProject.revision}</span></div></div> : <EmptyNote>Create a project to start using ContextOS.</EmptyNote>}</Panel>
-          <Panel title="Next Work Items" iconName="task_alt" meta={`${readyWork.length} ready signals`}><Rows rows={readyWork.slice(0, 4).map((item) => [item.title, item.status, toneForStatus(item.status), item.description || ""])} empty="No ready work items." /></Panel>
+          <Panel title="Next Work Items" iconName="task_alt" meta={`${nextWork.length} ready signals`}><Rows rows={nextWork.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="No ready work items." /></Panel>
+          <Panel title="Latest Context Package" iconName="inventory_2" meta={latestPackage?.id || "No package"}>
+            {latestPackage ? <div className="stack compact"><div className="metric-row"><span>Purpose</span><strong>{latestPackage.purpose}</strong></div><div className="metric-row"><span>Context items</span><strong>{latestPackage.contextItems.length}</strong></div><div className="metric-row"><span>Evidence snapshots</span><strong>{latestPackage.evidenceSnapshots.length}</strong></div>{latestPackage.contextItems.slice(0, 4).map((item: AnyRecord) => <div className="metric-row" key={item.id}><span>{item.title}</span><Badge text={item.selectionReason} tone="blue" /></div>)}</div> : <EmptyNote>Continue a Session to generate a context package.</EmptyNote>}
+          </Panel>
         </div>
         <div className="span-4 stack">
-          <Panel title="Governance Queue" iconName="inbox"><Rows rows={data.reviews.slice(0, 4).map((item) => [item.summary, item.status, toneForStatus(item.status), item.proposedResolution || ""])} empty="No pending review items." /></Panel>
-          <Panel title="Linked Activity" iconName="link"><div className="metric-row"><span>Sessions</span><strong>{data.sessions.length}</strong></div><div className="metric-row"><span>Decisions</span><strong>{data.decisions.length}</strong></div><div className="metric-row"><span>Context Items</span><strong>{data.contextItems.length}</strong></div></Panel>
+          <Panel title="Governance Queue" iconName="inbox"><Rows rows={pendingReviews.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="No pending review items." /></Panel>
+          <Panel title="Context Health" iconName="link"><div className="metric-row"><span>Active sources</span><strong>{contextHealth.activeSources}</strong></div><div className="metric-row"><span>Paused sources</span><strong>{contextHealth.pausedSources}</strong></div><div className="metric-row"><span>Evidence snapshots</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>Stale context</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
         </div>
       </div>
     </>

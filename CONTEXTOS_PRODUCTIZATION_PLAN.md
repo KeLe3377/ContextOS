@@ -398,4 +398,13 @@ Phase 7 first increment completed on 2026-09-18:
 - Preserved existing file content by replacing only the `CONTEXTOS_RULES` managed block.
 - Verified with `npm run build:all`, targeted Rules tests, full `npm test`, and `git diff --check`.
 
+Phase 8 first increment completed on 2026-09-18:
+
+- Added `/api/workspace/overview` as a real daily-start endpoint composed from Project, Session, Review, Work Item, Context, and Rule services.
+- Added Overview KPIs for sessions, pending reviews, ready work, active context, and active rules.
+- Added next-work, governance queue, context-health, last-session, and latest-context-package data to the overview DTO.
+- Updated the frontend Overview page to use the backend overview endpoint with local fallback.
+- Surfaced latest context package selection reasons on Overview.
+- Verified with `npm run build:all`, targeted Overview tests, full `npm test`, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

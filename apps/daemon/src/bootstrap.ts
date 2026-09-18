@@ -41,6 +41,7 @@ import { registerIdempotencyHooks } from "./http/idempotency.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
 import { registerRuleRoutes } from "./http/routes/rules.js";
 import { registerRuntimeRoutes } from "./http/routes/runtime.js";
+import { registerWorkspaceRoutes } from "./http/routes/workspace.js";
 
 export type DaemonConfig = {
   host: string;
@@ -166,6 +167,17 @@ export async function createDaemonServer(
     contextItems: contextItemService
   });
     await registerRuleRoutes(server, ruleService);
+    await registerWorkspaceRoutes(server, {
+    projects: projectService,
+    sessions: sessionService,
+    decisions: decisionService,
+    workItems: workItemService,
+    reviewItems: reviewItemService,
+    contextSources: contextSourceService,
+    evidenceSnapshots: evidenceSnapshotService,
+    contextItems: contextItemService,
+    rules: ruleService
+  });
     await registerRuntimeRoutes(server, {
     settings: settingsService,
     agentAdapters: agentAdapterService

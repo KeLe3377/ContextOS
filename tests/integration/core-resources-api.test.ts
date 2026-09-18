@@ -359,6 +359,40 @@ describe("core resource APIs", () => {
       expect.objectContaining({ action: "START" })
     ]);
   });
+
+  test("returns workspace overview with next work, reviews, and context health", async () => {
+    const work = await server!.inject({
+      method: "POST",
+      url: "/api/work-items",
+      payload: { projectId, title: "Next implementation slice", acceptance: ["build passes"] }
+    });
+    const ready = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${work.json().id}/mark-ready`,
+      payload: { expectedRevision: work.json().revision }
+    });
+    expect(ready.statusCode).toBe(200);
+    await server!.inject({
+      method: "POST",
+      url: "/api/review-items",
+      payload: { projectId, sourceType: "RULE", sourceId: "rule_overview", triggerType: "REQUIRE_REVIEW", summary: "Review overview work" }
+    });
+    await server!.inject({
+      method: "POST",
+      url: "/api/context-items",
+      payload: { projectId, itemType: "FACT", title: "Active context", summary: "Context available", confidence: "HIGH" }
+    });
+
+    const overview = await server!.inject({ method: "GET", url: "/api/workspace/overview" });
+    expect(overview.statusCode).toBe(200);
+    expect(overview.json()).toMatchObject({
+      project: { id: projectId },
+      kpis: { pendingReviews: 1, readyWorkItems: 1 },
+      contextHealth: { activeContextItems: 0 }
+    });
+    expect(overview.json().nextWorkItems).toEqual([expect.objectContaining({ title: "Next implementation slice", status: "READY" })]);
+    expect(overview.json().pendingReviews).toEqual([expect.objectContaining({ title: "Review overview work", status: "OPEN" })]);
+  });
 });
 
 
