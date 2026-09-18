@@ -86,10 +86,10 @@ describe("CodexAdapter command resolution", () => {
       const latest = adapter.importTranscript({ cwd: projectRoot });
       expect(latest).toMatchObject({
         externalSessionId: "codex-latest",
-        contentText: "USER:\nnew question\n\nTOOL CALL shell (call_shell):\ntool output\n\nTOOL RESULT (call_shell):\ncommand finished\n\nASSISTANT:\nnew answer",
-        parserVersion: "codex-jsonl.v2",
-        eventCount: 4,
-        eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 0 },
+        contentText: "USER:\nnew question\n\nTOOL CALL shell (call_shell):\ntool output\n\nTOOL RESULT (call_shell):\ncommand finished\n\nSUMMARY:\nChecked the workspace state.\n\nTOOL CALL apply_patch (call_patch):\n*** Begin Patch\n*** End Patch\n\nTOOL RESULT (call_patch):\npatch applied\n\nASSISTANT:\nnew answer",
+        parserVersion: "codex-jsonl.v3",
+        eventCount: 7,
+        eventCounts: { message: 2, toolCall: 2, toolResult: 2, summary: 1 },
         messageCount: 2,
         roleCounts: { user: 1, assistant: 1 },
         turnCount: 1,
@@ -100,7 +100,10 @@ describe("CodexAdapter command resolution", () => {
       expect(latest.contentText).not.toContain("developer instructions");
       expect(latest.events).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: "tool_call", name: "shell", callId: "call_shell", text: "tool output" }),
-        expect.objectContaining({ kind: "tool_result", callId: "call_shell", text: "command finished" })
+        expect.objectContaining({ kind: "tool_result", callId: "call_shell", text: "command finished" }),
+        expect.objectContaining({ kind: "summary", text: "Checked the workspace state." }),
+        expect.objectContaining({ kind: "tool_call", name: "apply_patch", callId: "call_patch", text: "*** Begin Patch\n*** End Patch" }),
+        expect.objectContaining({ kind: "tool_result", callId: "call_patch", text: "patch applied" })
       ]));
 
       const explicit = adapter.importTranscript({ cwd: projectRoot, externalSessionId: "codex-old" });
@@ -140,7 +143,7 @@ describe("CodexAdapter command resolution", () => {
 
       const transcript = new CodexAdapter(process.execPath, ["--version"], process.platform, sessionsDir).importTranscript({ cwd: projectRoot });
       expect(transcript).toMatchObject({
-        parserVersion: "codex-jsonl.v2",
+        parserVersion: "codex-jsonl.v3",
         eventCount: 3,
         eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 1 },
         messageCount: 2
@@ -159,6 +162,9 @@ async function writeCodexTranscript(path: string, id: string, cwd: string, userT
     { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: userText }] } },
     { type: "response_item", payload: { type: "function_call", name: "shell", call_id: "call_shell", arguments: "tool output" } },
     { type: "response_item", payload: { type: "function_call_output", call_id: "call_shell", output: "command finished" } },
+    { type: "response_item", payload: { type: "reasoning", summary: [{ type: "summary_text", text: "Checked the workspace state." }] } },
+    { type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", call_id: "call_patch", input: "*** Begin Patch\n*** End Patch" } },
+    { type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call_patch", output: "patch applied" } },
     { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: assistantText }] } }
   ];
   await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");

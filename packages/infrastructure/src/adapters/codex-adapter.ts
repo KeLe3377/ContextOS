@@ -153,6 +153,7 @@ type CodexJsonRow = {
     role?: string;
     name?: string;
     arguments?: string;
+    input?: unknown;
     output?: string;
     summary?: string | Array<{ text?: string }>;
     content?: string | Array<{ type?: string; text?: string; content?: string }>;
@@ -232,7 +233,7 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
     externalSessionId,
     contentText: selected.join(separator),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "codex-jsonl.v2",
+    parserVersion: "codex-jsonl.v3",
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,
@@ -247,7 +248,7 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
 
 function readCodexEvent(row: CodexJsonRow, ordinal: number): AgentTranscriptEvent | null {
   const payload = row.payload;
-  if (row.type === "summary" || payload?.type === "summary") {
+  if (row.type === "summary" || payload?.type === "summary" || payload?.type === "reasoning") {
     const text = contentToText(payload?.summary ?? payload?.content);
     return text ? { ordinal, kind: "summary", text } : null;
   }
@@ -256,22 +257,29 @@ function readCodexEvent(row: CodexJsonRow, ordinal: number): AgentTranscriptEven
     const text = contentToText(payload.content).trim();
     return text ? { ordinal, kind: "message", role: payload.role as "user" | "assistant", text } : null;
   }
-  if (payload.type === "function_call" || payload.type === "tool_call") {
-    const text = typeof payload.arguments === "string" ? payload.arguments : contentToText(payload.content);
+  if (["function_call", "tool_call", "custom_tool_call"].includes(payload.type)) {
+    const text = stringifyToolPayload(payload.arguments ?? payload.input ?? payload.content);
     return { ordinal, kind: "tool_call", name: payload.name ?? "tool", callId: payload.call_id ?? payload.callId, text };
   }
-  if (payload.type === "function_call_output" || payload.type === "tool_result") {
-    const text = typeof payload.output === "string" ? payload.output : contentToText(payload.content);
+  if (["function_call_output", "tool_result", "custom_tool_call_output"].includes(payload.type)) {
+    const text = stringifyToolPayload(payload.output ?? payload.content);
     return { ordinal, kind: "tool_result", callId: payload.call_id ?? payload.callId, text };
   }
   return null;
+}
+
+function stringifyToolPayload(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return contentToText(value as Array<{ type?: string; text?: string; content?: string }>);
+  if (value === undefined || value === null) return "";
+  return JSON.stringify(value);
 }
 
 function contentToText(content: string | Array<{ type?: string; text?: string; content?: string }> | undefined): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .filter((item) => !item.type || ["input_text", "output_text", "text"].includes(item.type))
+    .filter((item) => !item.type || ["input_text", "output_text", "summary_text", "text"].includes(item.type))
     .map((item) => item.text ?? item.content ?? "")
     .join("\n")
     .trim();

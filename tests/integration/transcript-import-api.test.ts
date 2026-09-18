@@ -229,7 +229,7 @@ describe("transcript import API", () => {
     expect(result.adapter).toMatchObject({
       id: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v2",
+      parserVersion: "codex-jsonl.v3",
       eventCount: 2,
       eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
       messageCount: 2,
@@ -245,7 +245,7 @@ describe("transcript import API", () => {
       stream: "imported-transcript",
       adapterId: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v2",
+      parserVersion: "codex-jsonl.v3",
       eventCount: 2,
       eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
       messageCount: 2,
@@ -267,7 +267,7 @@ describe("transcript import API", () => {
       evidenceSnapshotId: result.evidence.id,
       adapterId: "codex",
       externalSessionId,
-      parserVersion: "codex-jsonl.v2",
+      parserVersion: "codex-jsonl.v3",
       eventCount: 2,
       eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
       events: [

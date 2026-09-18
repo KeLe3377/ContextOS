@@ -465,4 +465,10 @@ Phase 11 Work Item E2E increment completed on 2026-09-18:
 - Added browser coverage for Work Item creation, readiness transition, linked Session creation, Agent Continue, and failed-attempt reconciliation.
 - Added desktop and mobile Work Item attempt screenshots and horizontal-overflow checks.
 
+Phase 10 Codex transcript compatibility increment completed on 2026-09-18:
+
+- Upgraded the Codex JSONL parser to v3 for current `custom_tool_call` and `custom_tool_call_output` records.
+- Normalized Codex reasoning summaries into transcript summary events, including `summary_text` content blocks.
+- Verified the parser against fixed integration fixtures and a read-only metadata probe of a real local Codex transcript.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.
