@@ -6,6 +6,7 @@ import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
 import type { SqliteRuntimeRepository } from "../../../infrastructure/src/sqlite/runtime-repository.js";
+import type { StartupRegistration } from "../ports/startup-registration.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { newId } from "../../../shared/src/id.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
@@ -18,14 +19,23 @@ export type SessionContinueRuntime = {
 };
 
 export class SettingsService {
-  constructor(private readonly runtime: SqliteRuntimeRepository) {}
+  constructor(private readonly runtime: SqliteRuntimeRepository, private readonly startupRegistration: StartupRegistration) {}
 
   get(): SettingsDto {
     return this.runtime.getSettings();
   }
 
   patch(input: SettingsPatch): SettingsDto {
-    return this.runtime.patchSettings(input, nowMs());
+    const current = this.runtime.getSettings();
+    const launchAtStartup = input.launchAtStartup;
+    const startupChanged = launchAtStartup !== undefined && launchAtStartup !== current.launchAtStartup;
+    if (startupChanged) this.startupRegistration.sync(launchAtStartup);
+    try {
+      return this.runtime.patchSettings(input, nowMs());
+    } catch (error) {
+      if (startupChanged) this.startupRegistration.sync(current.launchAtStartup);
+      throw error;
+    }
   }
 
   runtimeHealth(): RuntimeHealthDto {

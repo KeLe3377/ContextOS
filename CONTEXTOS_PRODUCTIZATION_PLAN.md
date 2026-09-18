@@ -534,4 +534,12 @@ P1 browser workflow coverage completed on 2026-09-18:
 - Bound Rule creation and instruction-file rendering to the selected Project so concurrent workspaces cannot target the first project in list order.
 - Verified with `npm run build:all`, the full desktop/mobile Playwright suite, and `git diff --check`.
 
+P1 Windows startup integration completed on 2026-09-18:
+
+- Connected the saved `launchAtStartup` setting to a removable `ContextOS.cmd` entry in the current user's Windows Startup folder.
+- Reused `scripts/start-contextos.ps1` with the configured host, port, data directory, hidden window, and no automatic browser launch.
+- Kept startup registration behind an injectable boundary so tests write only to temporary directories.
+- Kept this as local login startup rather than adding a Windows service, installer, or scheduled task.
+- Verified with `npm run build:all`, targeted runtime/startup tests, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

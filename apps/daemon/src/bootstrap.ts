@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { ZodError } from "zod";
@@ -10,12 +11,14 @@ import { DecisionService, ReviewItemService, SessionService, WorkItemService } f
 import { RuleService } from "../../../packages/application/src/core/rule-service.js";
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
+import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
 import { ClaudeCodeAdapter } from "../../../packages/infrastructure/src/adapters/claude-code-adapter.js";
 import { CodexAdapter } from "../../../packages/infrastructure/src/adapters/codex-adapter.js";
 import { AgentAdapterRegistry } from "../../../packages/infrastructure/src/adapters/registry.js";
 import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
 import { ProcessSupervisor } from "../../../packages/infrastructure/src/process-supervisor.js";
+import { WindowsStartupRegistration } from "../../../packages/infrastructure/src/startup/windows-startup-registration.js";
 import {
   SqliteDecisionRepository,
   SqliteReviewItemRepository,
@@ -54,6 +57,7 @@ export type CreateDaemonServerOptions = {
   config?: Partial<DaemonConfig>;
   agentAdapter?: AgentAdapter;
   agentAdapters?: AgentAdapter[];
+  startupRegistration?: StartupRegistration;
 };
 
 const packageVersion = "0.1.0";
@@ -116,7 +120,16 @@ export async function createDaemonServer(
     const contextSourceRepository = new SqliteContextSourceRepository(sqlite.db);
     const contextSourceService = new ContextSourceService(contextSourceRepository, evidenceSnapshotRepository, projectRepository, evidenceStore);
     const contextItemService = new ContextItemService(new SqliteContextItemRepository(sqlite.db));
-    const settingsService = new SettingsService(runtimeRepository);
+    const startupRegistration = options.startupRegistration ?? new WindowsStartupRegistration({
+      platform: process.platform,
+      startupDirectory: process.env.CONTEXTOS_STARTUP_DIR,
+      appDataDirectory: process.env.APPDATA,
+      startupScript: fileURLToPath(new URL("../../../scripts/start-contextos.ps1", import.meta.url)),
+      host: config.host,
+      port: config.port,
+      dataDirectory: config.dataDir
+    });
+    const settingsService = new SettingsService(runtimeRepository, startupRegistration);
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
     const server = Fastify({

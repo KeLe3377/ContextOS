@@ -15,6 +15,47 @@ afterEach(async () => {
 });
 
 describe("runtime APIs", () => {
+  test("synchronizes Windows startup registration when the setting changes", async () => {
+    const calls: boolean[] = [];
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-settings-"));
+    const server = await createDaemonServer({
+      config: { port: 0, dataDir: tempDir, databaseFile: join(tempDir, "contextos.sqlite") },
+      startupRegistration: { sync: (enabled) => calls.push(enabled) }
+    });
+    cleanupTasks.push(async () => { await server.close(); await rm(tempDir, { recursive: true, force: true }); });
+    const current = (await server.inject({ method: "GET", url: "/api/settings" })).json();
+
+    const updated = await server.inject({
+      method: "PATCH",
+      url: "/api/settings",
+      payload: { launchAtStartup: true, expectedRevision: current.revision }
+    });
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().launchAtStartup).toBe(true);
+    expect(calls).toEqual([true]);
+  });
+
+  test("keeps startup setting unchanged when registration fails", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-runtime-settings-failure-"));
+    const server = await createDaemonServer({
+      config: { port: 0, dataDir: tempDir, databaseFile: join(tempDir, "contextos.sqlite") },
+      startupRegistration: { sync: () => { throw new Error("Startup folder unavailable"); } }
+    });
+    cleanupTasks.push(async () => { await server.close(); await rm(tempDir, { recursive: true, force: true }); });
+    const current = (await server.inject({ method: "GET", url: "/api/settings" })).json();
+
+    const failed = await server.inject({
+      method: "PATCH",
+      url: "/api/settings",
+      payload: { launchAtStartup: true, expectedRevision: current.revision }
+    });
+    const unchanged = await server.inject({ method: "GET", url: "/api/settings" });
+
+    expect(failed.statusCode).toBe(500);
+    expect(unchanged.json()).toMatchObject({ launchAtStartup: false, revision: current.revision });
+  });
+
   test("returns settings and codex adapter status", async () => {
     const { server } = await createTestServer(["-e", ""]);
 

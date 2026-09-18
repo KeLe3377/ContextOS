@@ -380,7 +380,7 @@ Settings 管理本地默认设置。
 
 - Default adapter：默认 agent adapter；
 - Review gate：破坏性操作是否要求确认；
-- Launch at startup：是否开机启动；
+- Launch at startup：是否在 Windows 登录后通过 Startup 文件夹启动本地 daemon；关闭后会删除 ContextOS 自己的启动项；
 - Agent Adapters：查看 Codex / Claude Code 是否可用。
 
 Codex adapter 正常应显示 `Available` 和版本号。
@@ -408,6 +408,7 @@ Codex adapter 正常应显示 `Available` 和版本号。
 - 从 Work Item 启动 Session，并回写 Agent Attempt 结果；
 - 查看带时间戳和截断标记的规范化 transcript 事件；
 - 使用 Codex 和 Claude Code adapter；
+- 在 Windows 登录后自动启动本地 daemon；
 - 运行隔离数据目录的桌面/移动端 Playwright 主流程测试。
 
 ## 当前限制
@@ -418,7 +419,7 @@ Codex adapter 正常应显示 `Available` 和版本号。
 - 已有 Codex 对话需要通过 `Import Existing Session` 绑定；
 - Cursor adapter 尚未启用；
 - Claude Code 已具备共享 adapter 生命周期和 transcript 规范化，但真实日常主链路仍以 Codex 验证为主；
-- 当前是本地开发版，没有安装器、系统服务或开机自启动交付；
+- 当前是本地开发版，没有安装器或系统服务；开机启动依赖当前仓库路径和现有 PowerShell 启动脚本；
 - transcript 同步是运行期间轮询和退出后 reconcile，不是 Codex Desktop 当前任务的实时双向 UI 镜像。
 
 ## 常见问题
