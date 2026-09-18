@@ -382,4 +382,11 @@ Phase 5 first increment completed on 2026-09-18:
 - Added Decision edit flow for mutable draft/proposed decisions while preserving the existing accepted/closed immutability rule.
 - Verified with `npm run build:all`, targeted Decision tests, full `npm test`, and `git diff --check`.
 
+Phase 6 first increment completed on 2026-09-18:
+
+- Added Work Item detail workspace with description, acceptance criteria, execution contract, readiness, and blocking dependencies.
+- Added Work Item edit flow for mutable items, including parent, dependencies, acceptance criteria, and execution contract.
+- Extended Work Item PATCH contract/backend so definition fields are actually persisted.
+- Verified with `npm run build:all`, targeted Work Item tests, full `npm test`, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

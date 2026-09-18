@@ -240,8 +240,8 @@ export class SqliteWorkItemRepository {
     const setParent = input.parentId !== undefined ? 1 : 0;
     const before = this.getById(id);
     this.db.transaction(() => {
-      const result = this.db.prepare("UPDATE work_items SET parent_id = CASE WHEN ? = 1 THEN ? ELSE parent_id END, title = COALESCE(?, title), description = COALESCE(?, description), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-        .run(setParent, input.parentId ?? null, input.title ?? null, input.description ?? null, now, id, input.expectedRevision);
+      const result = this.db.prepare("UPDATE work_items SET parent_id = CASE WHEN ? = 1 THEN ? ELSE parent_id END, title = COALESCE(?, title), description = COALESCE(?, description), acceptance_json = COALESCE(?, acceptance_json), execution_contract = COALESCE(?, execution_contract), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(setParent, input.parentId ?? null, input.title ?? null, input.description ?? null, input.acceptance ? JSON.stringify(input.acceptance) : null, input.executionContract ?? null, now, id, input.expectedRevision);
       ensureChanged(result.changes, before, "Work Item", id, input.expectedRevision);
       if (input.dependencyIds !== undefined) {
         this.db.prepare("DELETE FROM work_item_dependencies WHERE work_item_id = ?").run(id);

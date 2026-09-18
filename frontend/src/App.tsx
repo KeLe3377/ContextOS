@@ -4,7 +4,7 @@ const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:
 
 type AnyRecord = Record<string, any>;
 type PageId = "overview" | "projects" | "sessions" | "review" | "decisions" | "work" | "context" | "rules" | "settings";
-type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "resumeCapsule" | "source" | "sourceEdit" | "contextItem" | "contextItemEdit" | "decision" | "decisionEdit" | "workItem" | "reviewAssign" | "reviewResolve" | "reviewDismiss";
+type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "resumeCapsule" | "source" | "sourceEdit" | "contextItem" | "contextItemEdit" | "decision" | "decisionEdit" | "workItem" | "workItemEdit" | "reviewAssign" | "reviewResolve" | "reviewDismiss";
 
 type PageDef = {
   title: string;
@@ -278,18 +278,21 @@ export function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null);
+  const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
   const [selectedContextSourceId, setSelectedContextSourceId] = useState<string | null>(null);
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [reviewActionLog, setReviewActionLog] = useState<{ reviewId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [decisionVersions, setDecisionVersions] = useState<{ decisionId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
-  const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string; decisionId?: string; sourceId?: string; sourceSnapshotId?: string; contextItemId?: string }>({ kind: null });
+  const [workItemDetail, setWorkItemDetail] = useState<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
+  const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string; decisionId?: string; workItemId?: string; sourceId?: string; sourceSnapshotId?: string; contextItemId?: string }>({ kind: null });
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [evidenceCompare, setEvidenceCompare] = useState<{ base: AnyRecord; other: AnyRecord; metadata: AnyRecord | null; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [contextItemDetail, setContextItemDetail] = useState<{ item: AnyRecord; versions: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const preferredSessionIdRef = useRef<string | null>(null);
   const preferredReviewIdRef = useRef<string | null>(null);
   const preferredDecisionIdRef = useRef<string | null>(null);
+  const preferredWorkItemIdRef = useRef<string | null>(null);
   const preferredContextSourceIdRef = useRef<string | null>(null);
 
   const availableAdapters = useCallback(() => data.adapters.filter((adapter) => adapter.available), [data.adapters]);
@@ -339,6 +342,16 @@ export function App() {
     };
   }, []);
 
+  const loadWorkItemDetail = useCallback(async (workItemId: string | null): Promise<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; loading: boolean; error: string | null } | null> => {
+    if (!workItemId) return null;
+    const [readiness, dependencies] = await Promise.all([
+      settle(fetchJson(`/api/work-items/${workItemId}/readiness`)),
+      settle(fetchJson(`/api/work-items/${workItemId}/dependencies`))
+    ]);
+    const error = !readiness.ok ? readiness.error.message : !dependencies.ok ? dependencies.error.message : null;
+    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], loading: false, error };
+  }, []);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -373,24 +386,28 @@ export function App() {
     const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
     const selectedReview = next.reviews.find((review) => review.id === preferredReviewIdRef.current) || next.reviews.find((review) => ["OPEN", "IN_PROGRESS"].includes(review.status)) || next.reviews[0];
     const selectedDecision = next.decisions.find((decision) => decision.id === preferredDecisionIdRef.current) || next.decisions[0];
+    const selectedWorkItem = next.workItems.find((item) => item.id === preferredWorkItemIdRef.current) || next.workItems.find((item) => ["READY", "IN_PROGRESS", "BLOCKED"].includes(item.status)) || next.workItems[0];
     const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
     preferredSessionIdRef.current = selectedSession?.id || null;
     preferredReviewIdRef.current = selectedReview?.id || null;
     preferredDecisionIdRef.current = selectedDecision?.id || null;
+    preferredWorkItemIdRef.current = selectedWorkItem?.id || null;
     preferredContextSourceIdRef.current = selectedContextSource?.id || null;
     setSelectedSessionId(selectedSession?.id || null);
     setSelectedReviewId(selectedReview?.id || null);
     setSelectedDecisionId(selectedDecision?.id || null);
+    setSelectedWorkItemId(selectedWorkItem?.id || null);
     setSelectedContextSourceId(selectedContextSource?.id || null);
     setSessionDetailsLoading(Boolean(selectedSession));
     setSessionDetails(await loadSessionDetails(selectedSession));
     setSessionDetailsLoading(false);
     setReviewActionLog(await loadReviewActionLog(selectedReview?.id || null));
     setDecisionVersions(await loadDecisionVersions(selectedDecision?.id || null));
+    setWorkItemDetail(await loadWorkItemDetail(selectedWorkItem?.id || null));
     setLoading(false);
-  }, [loadDecisionVersions, loadReviewActionLog, loadSessionDetails]);
+  }, [loadDecisionVersions, loadReviewActionLog, loadSessionDetails, loadWorkItemDetail]);
 
   useEffect(() => {
     void loadData();
@@ -453,6 +470,13 @@ export function App() {
     setDecisionVersions({ decisionId, items: [], loading: true, error: null });
     setDecisionVersions(await loadDecisionVersions(decisionId));
   }, [loadDecisionVersions]);
+
+  const selectWorkItem = useCallback(async (workItemId: string) => {
+    preferredWorkItemIdRef.current = workItemId;
+    setSelectedWorkItemId(workItemId);
+    setWorkItemDetail({ workItemId, readiness: null, dependencies: [], loading: true, error: null });
+    setWorkItemDetail(await loadWorkItemDetail(workItemId));
+  }, [loadWorkItemDetail]);
 
   const selectContextSource = useCallback((sourceId: string) => {
     preferredContextSourceIdRef.current = sourceId;
@@ -695,7 +719,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -749,6 +773,7 @@ export function App() {
         adapterList={adapterList}
         sessionDetails={sessionDetails}
         decisionVersions={decisionVersions}
+        workItemDetail={workItemDetail}
         runAction={runAction}
       />
       <EvidenceDetail detail={evidenceDetail} onClose={() => setEvidenceDetail(null)} />
@@ -981,14 +1006,19 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function WorkPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, transitionWorkItem } = props;
-  return <>{header}<Panel title="Execution Readiness" iconName="task_alt"><Table headers={["Work item", "Parent", "Acceptance", "Updated", "Status", "Action"]} rows={data.workItems.map((item: AnyRecord) => [
-    <><strong>{item.title}</strong><div className="muted">{item.description || ""}</div></>,
+  const { data, header, actionLoading, runAction, transitionWorkItem, selectedWorkItemId, selectWorkItem, workItemDetail, setModal } = props;
+  const selectedItem = data.workItems.find((item: AnyRecord) => item.id === selectedWorkItemId) || data.workItems[0];
+  const detail = selectedItem && workItemDetail?.workItemId === selectedItem.id ? workItemDetail : null;
+  return <>{header}<div className="grid cols-12"><div className="span-8 stack">
+  <Panel title="Execution Readiness" iconName="task_alt"><Table headers={["Work item", "Parent", "Acceptance", "Updated", "Status", "Action"]} rows={data.workItems.map((item: AnyRecord) => [
+    <div className={`session-cell ${item.id === selectedItem?.id ? "selected" : ""}`}><strong>{item.title}</strong><div className="muted">{item.description || ""}</div></div>,
     item.parentId || "-",
     `${item.acceptance?.length || 0}`,
     fmtDate(item.updatedAt),
     <Badge text={item.status} tone={toneForStatus(item.status)} />,
     <div className="row-actions">
+      <button className="icon-btn table-action" title="View work detail" disabled={actionLoading} onClick={() => void selectWorkItem(item.id)}>{icon("visibility")}</button>
+      <button className="icon-btn table-action" title="Edit work item" disabled={["DONE", "CANCELED"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "workItemEdit", workItemId: item.id })}>{icon("edit_note")}</button>
       <button className="icon-btn table-action" title="Mark ready" disabled={item.status !== "BACKLOG" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "mark-ready"), "Work item marked ready")}>{icon("playlist_add_check")}</button>
       <button className="icon-btn table-action" title="Start work" disabled={item.status !== "READY" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "start"), "Work item started")}>{icon("play_arrow")}</button>
       <button className="icon-btn table-action" title="Block work" disabled={item.status !== "IN_PROGRESS" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "block"), "Work item blocked")}>{icon("pause_circle")}</button>
@@ -997,7 +1027,36 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
       <button className="icon-btn table-action" title="Reopen work" disabled={!["DONE", "CANCELED"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "reopen"), "Work item reopened")}>{icon("undo")}</button>
       <button className="icon-btn table-action" title="Cancel work" disabled={!["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "cancel"), "Work item canceled")}>{icon("cancel")}</button>
     </div>
-  ])} empty="No work items yet." /></Panel></>;
+  ])} empty="No work items yet." /></Panel>
+  </div><div className="span-4 stack">
+    <Panel title="Selected Work Item" iconName="check_box" meta={selectedItem?.id || "No work item"}>
+      {selectedItem ? <div className="session-detail">
+        <div className="detail-grid source-detail-grid">
+          <div><span className="mono muted">STATUS</span><strong>{selectedItem.status}</strong></div>
+          <div><span className="mono muted">REVISION</span><strong>{selectedItem.revision}</strong></div>
+          <div><span className="mono muted">READY</span><strong>{detail?.readiness?.ready ? "YES" : "NO"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">TITLE</span><strong>{selectedItem.title}</strong></div>
+          <div className="detail-wide"><span className="mono muted">DESCRIPTION</span><strong>{selectedItem.description || "-"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">ACCEPTANCE</span><strong>{selectedItem.acceptance?.length ? selectedItem.acceptance.join("; ") : "-"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">EXECUTION CONTRACT</span><strong>{selectedItem.executionContract || "-"}</strong></div>
+        </div>
+        <div className="row-actions">
+          <button className="btn" disabled={["DONE", "CANCELED"].includes(selectedItem.status) || actionLoading} onClick={() => setModal({ kind: "workItemEdit", workItemId: selectedItem.id })}>{icon("edit_note")}<span>Edit</span></button>
+          <button className="btn primary" disabled={selectedItem.status !== "BACKLOG" || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "mark-ready"), "Work item marked ready")}>{icon("playlist_add_check")}<span>Ready</span></button>
+          <button className="btn" disabled={selectedItem.status !== "READY" || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "start"), "Work item started")}>{icon("play_arrow")}<span>Start</span></button>
+          <button className="btn" disabled={selectedItem.status !== "IN_PROGRESS" || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "block"), "Work item blocked")}>{icon("pause_circle")}<span>Block</span></button>
+          <button className="btn" disabled={!["IN_PROGRESS", "IN_REVIEW"].includes(selectedItem.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "complete"), "Work item completed")}>{icon("check_circle")}<span>Done</span></button>
+        </div>
+      </div> : <EmptyNote>No work item selected.</EmptyNote>}
+    </Panel>
+    <Panel title="Readiness & Dependencies" iconName="account_tree" meta={detail ? `${detail.dependencies.length} dependencies` : ""}>
+      {detail?.loading ? <EmptyNote>Loading work item readiness...</EmptyNote> : null}
+      {detail?.error ? <EmptyNote>{detail.error}</EmptyNote> : null}
+      {detail?.readiness ? <div className="metric-row"><span>Ready to start</span><strong>{detail.readiness.ready ? "Yes" : "No"}</strong></div> : null}
+      {detail?.readiness?.blockers?.length ? detail.readiness.blockers.map((blocker: AnyRecord) => <div className="metric-row" key={blocker.dependsOnId}><span className="mono">{blocker.dependsOnId}</span><Badge text={blocker.status} tone={toneForStatus(blocker.status)} /></div>) : null}
+      {detail && !detail.dependencies.length && !detail.readiness?.blockers?.length ? <EmptyNote>No blocking dependencies.</EmptyNote> : null}
+    </Panel>
+  </div></div></>;
 }
 
 function ContextPage(props: AnyRecord & { header: ReactNode }) {
@@ -1182,13 +1241,14 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
   );
 }
 
-function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, runAction }: AnyRecord) {
+function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, runAction }: AnyRecord) {
   const project = data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
   const decision = modal.decisionId ? data.decisions.find((item: AnyRecord) => item.id === modal.decisionId) : data.decisions[0];
   const modalDecisionVersions = decisionVersions?.decisionId === decision?.id ? decisionVersions.items : [];
   const decisionVersion = decision ? modalDecisionVersions.find((item: AnyRecord) => item.id === decision.currentVersionId) || modalDecisionVersions[0] : null;
+  const workItem = modal.workItemId ? data.workItems.find((item: AnyRecord) => item.id === modal.workItemId) : data.workItems[0];
   const source = modal.sourceId ? data.contextSources.find((item: AnyRecord) => item.id === modal.sourceId) : null;
   const contextItem = modal.contextItemId ? data.contextItems.find((item: AnyRecord) => item.id === modal.contextItemId) : null;
   const selectedSnapshot = modal.sourceSnapshotId ? data.evidenceSnapshots.find((item: AnyRecord) => item.id === modal.sourceSnapshotId) : null;
@@ -1218,6 +1278,17 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
     }
     if (kind === "workItem") {
       void runAction(() => sendJson("/api/work-items", "POST", { projectId: values.get("projectId"), parentId: values.get("parentId") || undefined, title: values.get("title"), description: values.get("description") || undefined, acceptance: linesValue(values.get("acceptance")), executionContract: values.get("executionContract") || undefined }), "Work item created");
+    }
+    if (kind === "workItemEdit") {
+      void runAction(() => sendJson(`/api/work-items/${workItem.id}`, "PATCH", {
+        parentId: values.get("parentId") || null,
+        dependencyIds: linesValue(values.get("dependencyIds")),
+        title: values.get("title"),
+        description: values.get("description") || null,
+        acceptance: linesValue(values.get("acceptance")),
+        executionContract: values.get("executionContract") || null,
+        expectedRevision: workItem.revision
+      }), "Work item updated");
     }
     if (kind === "contextItem") {
       void runAction(() => sendJson("/api/context-items", "POST", { projectId: values.get("projectId"), sourceSnapshotId: values.get("sourceSnapshotId") || undefined, itemType: values.get("itemType"), title: values.get("title"), summary: values.get("summary"), body: values.get("body") || undefined, confidence: values.get("confidence"), metadata: {} }), "Context item created");
@@ -1279,8 +1350,8 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
   };
 
   if (!modal.kind) return null;
-  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "sourceEdit" ? "Edit Context Source" : modal.kind === "contextItem" ? "Add Context Item" : modal.kind === "contextItemEdit" ? "Edit Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "decisionEdit" ? "Edit Decision" : modal.kind === "workItem" ? "Create Work Item" : modal.kind === "reviewAssign" ? "Assign Review" : modal.kind === "reviewResolve" ? "Resolve Review" : modal.kind === "reviewDismiss" ? "Dismiss Review" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : modal.kind === "resumeCapsule" ? "Edit Resume Capsule" : "Import Transcript";
-  const submitLabel = modal.kind === "project" ? "Create Project" : modal.kind === "session" ? "Create Session" : modal.kind === "rule" ? "Create Rule" : modal.kind === "source" ? "Create Source" : modal.kind === "sourceEdit" ? "Save Source" : modal.kind === "contextItem" ? "Create Context Item" : modal.kind === "contextItemEdit" ? "Save Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "decisionEdit" ? "Save Decision" : modal.kind === "workItem" ? "Create Item" : modal.kind === "reviewAssign" ? "Assign" : modal.kind === "reviewResolve" ? "Resolve" : modal.kind === "reviewDismiss" ? "Dismiss" : modal.kind === "existingTranscript" ? "Import Existing Session" : modal.kind === "resumeCapsule" ? "Save Capsule" : "Import Transcript";
+  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "sourceEdit" ? "Edit Context Source" : modal.kind === "contextItem" ? "Add Context Item" : modal.kind === "contextItemEdit" ? "Edit Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "decisionEdit" ? "Edit Decision" : modal.kind === "workItem" ? "Create Work Item" : modal.kind === "workItemEdit" ? "Edit Work Item" : modal.kind === "reviewAssign" ? "Assign Review" : modal.kind === "reviewResolve" ? "Resolve Review" : modal.kind === "reviewDismiss" ? "Dismiss Review" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : modal.kind === "resumeCapsule" ? "Edit Resume Capsule" : "Import Transcript";
+  const submitLabel = modal.kind === "project" ? "Create Project" : modal.kind === "session" ? "Create Session" : modal.kind === "rule" ? "Create Rule" : modal.kind === "source" ? "Create Source" : modal.kind === "sourceEdit" ? "Save Source" : modal.kind === "contextItem" ? "Create Context Item" : modal.kind === "contextItemEdit" ? "Save Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "decisionEdit" ? "Save Decision" : modal.kind === "workItem" ? "Create Item" : modal.kind === "workItemEdit" ? "Save Work Item" : modal.kind === "reviewAssign" ? "Assign" : modal.kind === "reviewResolve" ? "Resolve" : modal.kind === "reviewDismiss" ? "Dismiss" : modal.kind === "existingTranscript" ? "Import Existing Session" : modal.kind === "resumeCapsule" ? "Save Capsule" : "Import Transcript";
   return (
     <div className="dialog-backdrop">
       <form className="dialog-form dialog-card" onSubmit={submit}>
@@ -1292,6 +1363,7 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
           {modal.kind === "decision" ? <><label>Project<select name="projectId" defaultValue={defaultProjectId} required>{data.projects.map((item: AnyRecord) => <option value={item.id} key={item.id}>{item.name} · {item.rootPath}</option>)}</select></label><label>Title<input className="field" name="title" required placeholder="Adopt SQLite for local storage" /></label><label>Statement<textarea className="field" name="statement" required rows={3} placeholder="What decision is being made?" /></label><label>Rationale<textarea className="field" name="rationale" required rows={3} placeholder="Why is this the right choice now?" /></label><label>Problem context<input className="field" name="problemContext" /></label><label>Alternatives<textarea className="field" name="alternatives" rows={3} placeholder="One alternative per line" /></label><label>Consequences<textarea className="field" name="consequences" rows={3} /></label><label>References<textarea className="field" name="references" rows={2} placeholder="One reference per line" /></label></> : null}
           {modal.kind === "decisionEdit" && decision ? <><label>Status<input className="field mono" value={`${decision.status} · rev ${decision.revision}`} disabled /></label><label>Title<input className="field" name="title" required defaultValue={decision.title} /></label><label>Statement<textarea className="field" name="statement" required rows={3} defaultValue={decisionVersion?.statement || ""} /></label><label>Rationale<textarea className="field" name="rationale" required rows={3} defaultValue={decisionVersion?.rationale || ""} /></label><label>Problem context<input className="field" name="problemContext" defaultValue={decisionVersion?.problemContext || ""} /></label><label>Alternatives<textarea className="field" name="alternatives" rows={3} defaultValue={(decisionVersion?.alternatives || []).join("\n")} /></label><label>Consequences<textarea className="field" name="consequences" rows={3} defaultValue={decisionVersion?.consequences || ""} /></label><label>References<textarea className="field" name="references" rows={2} defaultValue={(decisionVersion?.references || []).join("\n")} /></label></> : null}
           {modal.kind === "workItem" ? <><label>Project<select name="projectId" defaultValue={defaultProjectId} required>{data.projects.map((item: AnyRecord) => <option value={item.id} key={item.id}>{item.name} · {item.rootPath}</option>)}</select></label><label>Parent<select name="parentId" defaultValue=""><option value="">No parent</option>{data.workItems.map((item: AnyRecord) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><label>Title<input className="field" name="title" required placeholder="Build review workflow UI" /></label><label>Description<textarea className="field" name="description" rows={3} /></label><label>Acceptance<textarea className="field" name="acceptance" rows={4} placeholder="One acceptance criterion per line" /></label><label>Execution contract<textarea className="field" name="executionContract" rows={3} placeholder="What must be true when this work is done?" /></label></> : null}
+          {modal.kind === "workItemEdit" && workItem ? <><label>Status<input className="field mono" value={`${workItem.status} · rev ${workItem.revision}`} disabled /></label><label>Parent<select name="parentId" defaultValue={workItem.parentId || ""}><option value="">No parent</option>{data.workItems.filter((item: AnyRecord) => item.id !== workItem.id).map((item: AnyRecord) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><label>Title<input className="field" name="title" required defaultValue={workItem.title} /></label><label>Description<textarea className="field" name="description" rows={3} defaultValue={workItem.description || ""} /></label><label>Acceptance<textarea className="field" name="acceptance" rows={4} defaultValue={(workItem.acceptance || []).join("\n")} /></label><label>Execution contract<textarea className="field" name="executionContract" rows={3} defaultValue={workItem.executionContract || ""} /></label><label>Dependencies<textarea className="field mono" name="dependencyIds" rows={3} defaultValue={(workItemDetail?.workItemId === workItem.id ? workItemDetail.dependencies : []).map((item: AnyRecord) => item.dependsOnId).join("\n")} placeholder="One Work Item ID per line" /></label></> : null}
           {modal.kind === "contextItem" ? <><label>Project<select name="projectId" defaultValue={defaultProjectId} required>{data.projects.map((item: AnyRecord) => <option value={item.id} key={item.id}>{item.name} · {item.rootPath}</option>)}</select></label><label>Source evidence<select name="sourceSnapshotId" defaultValue={modal.sourceSnapshotId || ""}><option value="">No source snapshot</option>{data.evidenceSnapshots.map((snapshot: AnyRecord) => <option value={snapshot.id} key={snapshot.id}>{snapshot.title}</option>)}</select></label><label>Type<select name="itemType" defaultValue="FACT"><option>FACT</option><option>SUMMARY</option><option>CONSTRAINT</option><option>OPEN_QUESTION</option><option>RISK</option><option>HANDOFF</option></select></label><label>Confidence<select name="confidence" defaultValue="MEDIUM"><option>LOW</option><option>MEDIUM</option><option>HIGH</option></select></label><label>Title<input className="field" name="title" required defaultValue={selectedSnapshot ? `Context from ${selectedSnapshot.title}` : ""} placeholder="Context item title" /></label><label>Summary<textarea className="field" name="summary" required rows={3} placeholder="Short reusable context statement" /></label><label>Body<textarea className="field" name="body" rows={5} defaultValue={selectedSnapshot ? `Source evidence: ${selectedSnapshot.id}\nHash: ${selectedSnapshot.contentHash}\nStorage: ${selectedSnapshot.storageRef || "inline"}` : ""} placeholder="Details, rationale, constraints, or handoff notes" /></label></> : null}
           {modal.kind === "contextItemEdit" && contextItem ? <><label>Source evidence<input className="field mono" value={contextItem.sourceSnapshotId || "manual"} disabled /></label><label>Confidence<select name="confidence" defaultValue={contextItem.confidence}><option>LOW</option><option>MEDIUM</option><option>HIGH</option></select></label><label>Title<input className="field" name="title" required defaultValue={contextItem.title} /></label><label>Summary<textarea className="field" name="summary" required rows={3} defaultValue={contextItem.summary} /></label><label>Body<textarea className="field" name="body" rows={5} defaultValue={contextItem.body || ""} /></label><div className="muted mono">rev {contextItem.revision} · {contextItem.status}</div></> : null}
           {modal.kind === "source" ? <><label>Project<input className="field" value={project?.name || ""} disabled /></label><label>Type<select name="sourceType" defaultValue="FILE"><option>FILE</option><option>DIRECTORY</option><option>URL</option><option>USER_NOTE</option><option>AGENT_OUTPUT</option></select></label><label>Name<input className="field" name="name" required placeholder="README, docs folder, design note..." /></label><label>Locator<input className="field mono" name="locator" required placeholder="README.md or docs/ or https://..." /></label><label>Description<input className="field" name="description" /></label></> : null}

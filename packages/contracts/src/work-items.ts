@@ -17,6 +17,8 @@ export const workItemPatchSchema = z.object({
   dependencyIds: z.array(z.string().min(1)).optional(),
   title: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
+  acceptance: z.array(z.string()).optional(),
+  executionContract: z.string().nullable().optional(),
   expectedRevision: z.number().int().positive()
 });
 

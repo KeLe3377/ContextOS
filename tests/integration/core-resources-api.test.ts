@@ -269,6 +269,37 @@ describe("core resource APIs", () => {
     expect(cycle.json().error.code).toBe("INVALID_ARGUMENT");
   });
 
+  test("patches work item definition fields and dependencies", async () => {
+    const dependency = (await server!.inject({
+      method: "POST",
+      url: "/api/work-items",
+      payload: { projectId, title: "Dependency", acceptance: ["done"] }
+    })).json();
+    const item = (await server!.inject({
+      method: "POST",
+      url: "/api/work-items",
+      payload: { projectId, title: "Original", acceptance: [] }
+    })).json();
+
+    const patched = await server!.inject({
+      method: "PATCH",
+      url: `/api/work-items/${item.id}`,
+      payload: {
+        title: "Updated",
+        description: "Runnable by an agent",
+        acceptance: ["passes tests", "updates docs"],
+        executionContract: "Run build and tests",
+        dependencyIds: [dependency.id],
+        expectedRevision: item.revision
+      }
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).toMatchObject({ title: "Updated", description: "Runnable by an agent", acceptance: ["passes tests", "updates docs"], executionContract: "Run build and tests" });
+
+    const dependencies = await server!.inject({ method: "GET", url: `/api/work-items/${item.id}/dependencies` });
+    expect(dependencies.json().items).toEqual([expect.objectContaining({ dependsOnId: dependency.id })]);
+  });
+
   test("requires a dismissal reason and records review action history", async () => {
     const create = await server!.inject({
       method: "POST",
