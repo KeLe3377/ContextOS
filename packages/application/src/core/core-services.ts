@@ -1,5 +1,5 @@
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
-import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus } from "../../../contracts/src/decisions.js";
+import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus, DecisionVersionDto } from "../../../contracts/src/decisions.js";
 import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/review-items.js";
 import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
 import type { SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
@@ -138,6 +138,11 @@ export class DecisionService {
 
   get(id: string): DecisionDto {
     return this.decisions.getByIdOrThrow(id);
+  }
+
+  versions(id: string): DecisionVersionDto[] {
+    this.decisions.getByIdOrThrow(id);
+    return this.decisions.listVersions(id);
   }
 
   patch(id: string, input: DecisionPatch): DecisionDto {

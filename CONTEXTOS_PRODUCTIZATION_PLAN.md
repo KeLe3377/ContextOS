@@ -374,4 +374,12 @@ Phase 4 first increment completed on 2026-09-18:
 - Extended Review audit history so assignment and start actions are recorded, not only final resolve/dismiss actions.
 - Verified with targeted Review tests, frontend build, full build/test, and `git diff --check`.
 
+Phase 5 first increment completed on 2026-09-18:
+
+- Added Decision version DTOs and `/api/decisions/:id/versions`.
+- Extended draft/proposed Decision PATCH so body edits create a new `decision_versions` row and move `currentVersionId`.
+- Added Decision detail workspace with statement, rationale, context, consequences, alternatives, references, and version history.
+- Added Decision edit flow for mutable draft/proposed decisions while preserving the existing accepted/closed immutability rule.
+- Verified with `npm run build:all`, targeted Decision tests, full `npm test`, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

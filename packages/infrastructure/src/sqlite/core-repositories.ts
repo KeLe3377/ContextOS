@@ -1,6 +1,6 @@
 import type { Database } from "better-sqlite3";
 import type { SessionDto, SessionInput, SessionPatch, SessionStatus } from "../../../contracts/src/sessions.js";
-import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus } from "../../../contracts/src/decisions.js";
+import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus, DecisionVersionDto } from "../../../contracts/src/decisions.js";
 import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type { ReviewItemDto, ReviewItemInput, ReviewItemPriority, ReviewItemStatus } from "../../../contracts/src/review-items.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
@@ -94,6 +94,11 @@ function mapSession(row: SessionRow): SessionDto {
 }
 
 type DecisionRow = { id: string; project_id: string; current_version_id: string | null; status: DecisionStatus; title: string; created_at: number; updated_at: number; revision: number; archived_at: number | null };
+type DecisionVersionRow = {
+  id: string; decision_id: string; version_number: number; state: Exclude<DecisionStatus, "ARCHIVED">; statement: string; problem_context: string | null; rationale: string;
+  alternatives_json: string; consequences: string | null; references_json: string; content_hash: string; created_by_type: string; created_by_id: string | null;
+  created_at: number; accepted_at: number | null; supersedes_version_id: string | null; reverses_version_id: string | null;
+};
 
 export class SqliteDecisionRepository {
   constructor(private readonly db: Database) {}
@@ -133,10 +138,32 @@ export class SqliteDecisionRepository {
     return item;
   }
 
+  listVersions(id: string): DecisionVersionDto[] {
+    return (this.db.prepare("SELECT * FROM decision_versions WHERE decision_id = ? ORDER BY version_number DESC").all(id) as DecisionVersionRow[]).map(mapDecisionVersion);
+  }
+
   patch(id: string, input: DecisionPatch, now: number): DecisionDto {
-    const result = this.db.prepare("UPDATE decisions SET title = COALESCE(?, title), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(input.title ?? null, now, id, input.expectedRevision);
-    ensureChanged(result.changes, this.getById(id), "Decision", id, input.expectedRevision);
+    const before = this.getById(id);
+    const currentVersion = this.db.prepare("SELECT * FROM decision_versions WHERE decision_id = ? ORDER BY version_number DESC LIMIT 1").get(id) as DecisionVersionRow | undefined;
+    const changesVersion = input.statement !== undefined || input.rationale !== undefined || input.problemContext !== undefined || input.alternatives !== undefined || input.consequences !== undefined || input.references !== undefined;
+    this.db.transaction(() => {
+      let nextVersionId = before?.currentVersionId ?? null;
+      if (changesVersion && currentVersion) {
+        nextVersionId = newId("decv");
+        const statement = input.statement ?? currentVersion.statement;
+        const rationale = input.rationale ?? currentVersion.rationale;
+        const problemContext = input.problemContext ?? currentVersion.problem_context;
+        const alternatives = input.alternatives ?? JSON.parse(currentVersion.alternatives_json);
+        const consequences = input.consequences ?? currentVersion.consequences;
+        const references = input.references ?? JSON.parse(currentVersion.references_json);
+        const contentHash = `${statement}\n${rationale}`;
+        this.db.prepare("INSERT INTO decision_versions (id, decision_id, version_number, state, statement, problem_context, rationale, alternatives_json, consequences, references_json, content_hash, created_by_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'USER', ?)")
+          .run(nextVersionId, id, currentVersion.version_number + 1, before?.status === "PROPOSED" ? "PROPOSED" : "DRAFT", statement, problemContext || null, rationale, JSON.stringify(alternatives), consequences || null, JSON.stringify(references), contentHash, now);
+      }
+      const result = this.db.prepare("UPDATE decisions SET title = COALESCE(?, title), current_version_id = COALESCE(?, current_version_id), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(input.title ?? null, nextVersionId, now, id, input.expectedRevision);
+      ensureChanged(result.changes, before, "Decision", id, input.expectedRevision);
+    })();
     return this.getByIdOrThrow(id);
   }
 
@@ -151,6 +178,28 @@ export class SqliteDecisionRepository {
 
 function mapDecision(row: DecisionRow): DecisionDto {
   return { id: row.id, projectId: row.project_id, status: row.status, title: row.title, currentVersionId: row.current_version_id, createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), revision: row.revision, archivedAt: iso(row.archived_at) };
+}
+
+function mapDecisionVersion(row: DecisionVersionRow): DecisionVersionDto {
+  return {
+    id: row.id,
+    decisionId: row.decision_id,
+    versionNumber: row.version_number,
+    state: row.state,
+    statement: row.statement,
+    problemContext: row.problem_context,
+    rationale: row.rationale,
+    alternatives: JSON.parse(row.alternatives_json),
+    consequences: row.consequences,
+    references: JSON.parse(row.references_json),
+    contentHash: row.content_hash,
+    createdByType: row.created_by_type,
+    createdById: row.created_by_id,
+    createdAt: new Date(row.created_at).toISOString(),
+    acceptedAt: iso(row.accepted_at),
+    supersedesVersionId: row.supersedes_version_id,
+    reversesVersionId: row.reverses_version_id
+  };
 }
 
 type WorkItemRow = { id: string; project_id: string; parent_id: string | null; title: string; description: string | null; status: WorkItemStatus; acceptance_json: string; execution_contract: string | null; readiness_state: string; completed_at: number | null; created_at: number; updated_at: number; revision: number };

@@ -90,6 +90,37 @@ describe("core resource APIs", () => {
     expect(accepted.json().status).toBe("ACCEPTED");
   });
 
+  test("lists and versions draft decision content edits", async () => {
+    const create = await server!.inject({
+      method: "POST",
+      url: "/api/decisions",
+      payload: { projectId, title: "Versioned decision", statement: "Use A", rationale: "Fast", alternatives: ["Use B"] }
+    });
+    expect(create.statusCode).toBe(201);
+    const decision = create.json();
+
+    const initialVersions = await server!.inject({ method: "GET", url: `/api/decisions/${decision.id}/versions` });
+    expect(initialVersions.statusCode).toBe(200);
+    expect(initialVersions.json().items).toEqual([
+      expect.objectContaining({ versionNumber: 1, statement: "Use A", rationale: "Fast", alternatives: ["Use B"] })
+    ]);
+
+    const patched = await server!.inject({
+      method: "PATCH",
+      url: `/api/decisions/${decision.id}`,
+      payload: { title: "Versioned decision updated", statement: "Use C", rationale: "Safer", references: ["evidence_1"], expectedRevision: decision.revision }
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).toMatchObject({ title: "Versioned decision updated" });
+    expect(patched.json().currentVersionId).not.toBe(decision.currentVersionId);
+
+    const versions = await server!.inject({ method: "GET", url: `/api/decisions/${decision.id}/versions` });
+    expect(versions.json().items).toEqual([
+      expect.objectContaining({ versionNumber: 2, statement: "Use C", rationale: "Safer", alternatives: ["Use B"], references: ["evidence_1"] }),
+      expect.objectContaining({ versionNumber: 1, statement: "Use A" })
+    ]);
+  });
+
   test("creates and completes work items", async () => {
     const create = await server!.inject({
       method: "POST",

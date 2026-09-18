@@ -76,6 +76,7 @@ export async function registerCoreResourceRoutes(
     return services.decisions.create(decisionInputSchema.parse(request.body));
   });
   server.get("/api/decisions/:id", async (request) => services.decisions.get(paramsWithIdSchema.parse(request.params).id));
+  server.get("/api/decisions/:id/versions", async (request) => ({ items: services.decisions.versions(paramsWithIdSchema.parse(request.params).id) }));
   server.patch("/api/decisions/:id", async (request) => services.decisions.patch(paramsWithIdSchema.parse(request.params).id, decisionPatchSchema.parse(request.body)));
   for (const action of ["propose", "accept", "supersede", "reverse", "archive", "review"] as const) {
     server.post(`/api/decisions/:id/${action}`, async (request) => {
