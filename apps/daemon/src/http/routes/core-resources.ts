@@ -100,7 +100,9 @@ export async function registerCoreResourceRoutes(
   server.get("/api/work-items/:id", async (request) => services.workItems.get(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/work-items/:id/readiness", async (request) => services.workItems.readiness(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/work-items/:id/dependencies", async (request) => ({ items: services.workItems.dependencies(paramsWithIdSchema.parse(request.params).id) }));
+  server.get("/api/work-items/:id/children", async (request) => ({ items: services.workItems.children(paramsWithIdSchema.parse(request.params).id) }));
   server.get("/api/work-items/:id/attempts", async (request) => ({ items: services.workItems.attempts(paramsWithIdSchema.parse(request.params).id) }));
+  server.get("/api/work-items/:id/activity", async (request) => ({ items: services.workItems.activity(paramsWithIdSchema.parse(request.params).id) }));
   server.patch("/api/work-items/:id", async (request) => services.workItems.patch(paramsWithIdSchema.parse(request.params).id, workItemPatchSchema.parse(request.body)));
   server.post("/api/work-items/:id/start-session", async (request, reply) => {
     const { id } = paramsWithIdSchema.parse(request.params);

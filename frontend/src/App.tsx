@@ -135,6 +135,7 @@ const iconPaths: Record<string, ReactNode> = {
   folder_managed: <><path d="M3 8h7l2 2h9l-2 9H4zM3 8V6h7l2 2" /><path d="M14 15l2 2 4-5" /></>,
   gavel: <><path d="M13 5l6 6M11 7l6 6M5 19l6-6" /><path d="M9 5l10 10-3 3L6 8z" /></>,
   hub: <><circle cx="12" cy="12" r="3" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="20" r="2" /><path d="M7 7l3 3M17 7l-3 3M12 15v3" /></>,
+  history: <><path d="M4 12a8 8 0 1 0 2-5" /><path d="M4 5v5h5M12 8v5l3 2" /></>,
   inbox: <><path d="M4 5h16l-2 14H6z" /><path d="M4 13h5l2 3h2l2-3h5" /></>,
   inventory_2: <><path d="M4 7h16v13H4z" /><path d="M4 7l3-4h10l3 4M9 11h6" /></>,
   link: <><path d="M10 7l1-1a4 4 0 0 1 6 6l-1 1M14 17l-1 1a4 4 0 0 1-6-6l1-1M9 15l6-6" /></>,
@@ -319,7 +320,7 @@ export function App() {
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
   const [reviewActionLog, setReviewActionLog] = useState<{ reviewId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [decisionVersions, setDecisionVersions] = useState<{ decisionId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
-  const [workItemDetail, setWorkItemDetail] = useState<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; attempts: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
+  const [workItemDetail, setWorkItemDetail] = useState<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; children: AnyRecord[]; attempts: AnyRecord[]; activity: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [ruleDetail, setRuleDetail] = useState<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [ruleInstructionPreview, setRuleInstructionPreview] = useState<AnyRecord | null>(null);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string; decisionId?: string; workItemId?: string; sourceId?: string; sourceSnapshotId?: string; contextItemId?: string }>({ kind: null });
@@ -384,15 +385,17 @@ export function App() {
     };
   }, []);
 
-  const loadWorkItemDetail = useCallback(async (workItemId: string | null): Promise<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; attempts: AnyRecord[]; loading: boolean; error: string | null } | null> => {
+  const loadWorkItemDetail = useCallback(async (workItemId: string | null): Promise<{ workItemId: string; readiness: AnyRecord | null; dependencies: AnyRecord[]; children: AnyRecord[]; attempts: AnyRecord[]; activity: AnyRecord[]; loading: boolean; error: string | null } | null> => {
     if (!workItemId) return null;
-    const [readiness, dependencies, attempts] = await Promise.all([
+    const [readiness, dependencies, children, attempts, activity] = await Promise.all([
       settle(fetchJson(`/api/work-items/${workItemId}/readiness`)),
       settle(fetchJson(`/api/work-items/${workItemId}/dependencies`)),
-      settle(fetchJson(`/api/work-items/${workItemId}/attempts`))
+      settle(fetchJson(`/api/work-items/${workItemId}/children`)),
+      settle(fetchJson(`/api/work-items/${workItemId}/attempts`)),
+      settle(fetchJson(`/api/work-items/${workItemId}/activity`))
     ]);
-    const error = !readiness.ok ? readiness.error.message : !dependencies.ok ? dependencies.error.message : !attempts.ok ? attempts.error.message : null;
-    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], attempts: attempts.ok ? attempts.value.items : [], loading: false, error };
+    const error = !readiness.ok ? readiness.error.message : !dependencies.ok ? dependencies.error.message : !children.ok ? children.error.message : !attempts.ok ? attempts.error.message : !activity.ok ? activity.error.message : null;
+    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], children: children.ok ? children.value.items : [], attempts: attempts.ok ? attempts.value.items : [], activity: activity.ok ? activity.value.items : [], loading: false, error };
   }, []);
 
   const loadRuleDetail = useCallback(async (ruleId: string | null): Promise<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null> => {
@@ -539,7 +542,7 @@ export function App() {
   const selectWorkItem = useCallback(async (workItemId: string) => {
     preferredWorkItemIdRef.current = workItemId;
     setSelectedWorkItemId(workItemId);
-    setWorkItemDetail({ workItemId, readiness: null, dependencies: [], attempts: [], loading: true, error: null });
+    setWorkItemDetail({ workItemId, readiness: null, dependencies: [], children: [], attempts: [], activity: [], loading: true, error: null });
     setWorkItemDetail(await loadWorkItemDetail(workItemId));
   }, [loadWorkItemDetail]);
 
@@ -1177,6 +1180,9 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
       {detail?.readiness?.blockers?.length ? detail.readiness.blockers.map((blocker: AnyRecord) => <div className="metric-row" key={blocker.dependsOnId}><span className="mono">{blocker.dependsOnId}</span><Badge text={blocker.status} tone={toneForStatus(blocker.status)} /></div>) : null}
       {detail && !detail.dependencies.length && !detail.readiness?.blockers?.length ? <EmptyNote>No blocking dependencies.</EmptyNote> : null}
     </Panel>
+    <Panel title="Child Work Items" iconName="account_tree" meta={detail ? `${detail.children.length} children` : ""}>
+      {detail?.children?.length ? <div className="stack compact">{detail.children.map((child: AnyRecord) => <div className="metric-row evidence-row" key={child.id}><div className="evidence-row-main"><div className="title-sm">{child.title}</div><div className="muted">{child.description || child.id}</div></div><div className="row-actions"><Badge text={child.status} tone={toneForStatus(child.status)} /><button className="icon-btn table-action" title="Open child Work Item" disabled={actionLoading} onClick={() => void selectWorkItem(child.id)}>{icon("visibility")}</button></div></div>)}</div> : detail && !detail.loading ? <EmptyNote>No child Work Items.</EmptyNote> : null}
+    </Panel>
     <Panel title="Agent Attempts" iconName="terminal" meta={detail ? `${detail.attempts.length} attempts` : ""}>
       {detail?.loading ? <EmptyNote>Loading agent attempts...</EmptyNote> : null}
       {detail?.attempts?.length ? <div className="stack compact">{detail.attempts.map((attempt: AnyRecord) => <div className="metric-row evidence-row" key={attempt.id}>
@@ -1191,6 +1197,9 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
           <button className="icon-btn table-action" title="Open linked session" disabled={!attempt.sessionId || actionLoading} onClick={() => attempt.sessionId ? void openSession(attempt.sessionId) : undefined}>{icon("visibility")}</button>
         </div>
       </div>)}</div> : detail && !detail.loading ? <EmptyNote>No agent sessions have been started for this work item yet.</EmptyNote> : null}
+    </Panel>
+    <Panel title="Work Item Activity" iconName="history" meta={detail ? `${detail.activity.length} events` : ""}>
+      {detail?.activity?.length ? <div className="stack compact">{detail.activity.slice(0, 20).map((entry: AnyRecord) => <div className="metric-row evidence-row" key={`${entry.kind}-${entry.id}`}><div className="evidence-row-main"><div className="title-sm">{entry.summary || entry.eventType}</div><div className="muted mono">{fmtDate(entry.createdAt)} · {entry.kind}{entry.actorType ? ` · ${entry.actorType}` : ""}</div></div><Badge text={entry.eventType} tone={entry.kind === "AUDIT" ? "blue" : toneForStatus(entry.eventType)} /></div>)}</div> : detail && !detail.loading ? <EmptyNote>No Work Item activity recorded.</EmptyNote> : null}
     </Panel>
   </div></div></>;
 }

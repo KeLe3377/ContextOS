@@ -342,6 +342,8 @@ Decisions 是长期决策登记。
 
 进行中的 Work Item 可以点击 `Block` 并填写无法继续的原因。阻塞原因会显示在详情中；问题处理后点击 `Resolve Blocker`，填写处理结果，Work Item 会回到 `IN_PROGRESS`，原始原因和解决说明都会保留。
 
+父 Work Item 的详情会列出 Child Work Items，可直接进入子项。`Work Item Activity` 汇总创建、编辑、状态变化、阻塞处理和 Agent Attempt 的活动及审计记录。
+
 Work Items 是可执行工作项。
 
 当前前端主要是查看列表。完整创建、编辑、状态流转 UI 后续还需要补。

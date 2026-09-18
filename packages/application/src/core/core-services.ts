@@ -232,6 +232,16 @@ export class WorkItemService {
     return this.workItems.listDependencies(id);
   }
 
+  children(id: string): WorkItemDto[] {
+    this.workItems.getByIdOrThrow(id);
+    return this.workItems.listChildren(id);
+  }
+
+  activity(id: string): ResourceActivityEventDto[] {
+    this.workItems.getByIdOrThrow(id);
+    return this.workItems.listActivity(id);
+  }
+
   attempts(id: string): WorkItemAttemptDto[] {
     this.workItems.getByIdOrThrow(id);
     return this.workItems.listAttempts(id);

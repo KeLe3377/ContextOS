@@ -403,6 +403,12 @@ Phase 6 blocker-flow increment completed on 2026-09-18:
 - Persisted blocker history in readiness state and recorded both transitions in Work Item activity and audit history.
 - Added blocker detail and Block/Resolve Blocker dialogs to the Work Item workspace.
 
+Phase 6 hierarchy-and-history increment completed on 2026-09-18:
+
+- Added child Work Item and combined Activity/Audit endpoints for the selected Work Item.
+- Recorded create, definition edit, and all standard lifecycle transitions in Work Item activity and audit history.
+- Added Child Work Items navigation and a chronological Work Item Activity panel to the Work workspace.
+
 Phase 7 first increment completed on 2026-09-18:
 
 - Added Rules detail workspace with current version, validation state, enforcement, effect, scope, usage, versions, and recent evaluations.

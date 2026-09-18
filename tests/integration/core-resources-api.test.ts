@@ -131,6 +131,16 @@ describe("core resource APIs", () => {
     const workItem = create.json();
     expect(workItem.status).toBe("BACKLOG");
 
+    const child = await server!.inject({
+      method: "POST",
+      url: "/api/work-items",
+      payload: { projectId, parentId: workItem.id, title: "Wire child flow", acceptance: [] }
+    });
+    expect(child.statusCode).toBe(201);
+    const children = await server!.inject({ method: "GET", url: `/api/work-items/${workItem.id}/children` });
+    expect(children.statusCode).toBe(200);
+    expect(children.json().items).toEqual([expect.objectContaining({ id: child.json().id, parentId: workItem.id })]);
+
     const ready = await server!.inject({
       method: "POST",
       url: `/api/work-items/${workItem.id}/mark-ready`,
@@ -187,6 +197,16 @@ describe("core resource APIs", () => {
     });
     expect(done.statusCode).toBe(200);
     expect(done.json().status).toBe("DONE");
+
+    const timeline = await server!.inject({ method: "GET", url: `/api/work-items/${workItem.id}/activity` });
+    expect(timeline.statusCode).toBe(200);
+    expect(timeline.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "WORK_ITEM_CREATED" }),
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "WORK_ITEM_READY" }),
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "WORK_ITEM_BLOCKED" }),
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "WORK_ITEM_BLOCKER_RESOLVED" }),
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "WORK_ITEM_DONE" })
+    ]));
 
     const db = new Database(join(tempDir!, "contextos.sqlite"), { readonly: true });
     try {

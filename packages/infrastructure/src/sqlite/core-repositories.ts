@@ -3,6 +3,7 @@ import type { SessionDto, SessionInput, SessionPatch, SessionStatus } from "../.
 import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus, DecisionVersionDto } from "../../../contracts/src/decisions.js";
 import type { WorkItemAttemptDto, WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type { ReviewItemDto, ReviewItemInput, ReviewItemPriority, ReviewItemStatus } from "../../../contracts/src/review-items.js";
+import type { ResourceActivityEventDto } from "../../../contracts/src/runtime.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
 
@@ -216,8 +217,15 @@ export class SqliteWorkItemRepository {
 
   create(input: WorkItemInput, now: number): WorkItemDto {
     const id = newId("work");
-    this.db.prepare("INSERT INTO work_items (id, project_id, parent_id, title, description, status, acceptance_json, execution_contract, readiness_state, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'BACKLOG', ?, ?, '{}', ?, ?, 1)")
-      .run(id, input.projectId, input.parentId ?? null, input.title, input.description ?? null, JSON.stringify(input.acceptance), input.executionContract ?? null, now, now);
+    this.db.transaction(() => {
+      this.db.prepare("INSERT INTO work_items (id, project_id, parent_id, title, description, status, acceptance_json, execution_contract, readiness_state, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'BACKLOG', ?, ?, '{}', ?, ?, 1)")
+        .run(id, input.projectId, input.parentId ?? null, input.title, input.description ?? null, JSON.stringify(input.acceptance), input.executionContract ?? null, now, now);
+      const created = this.getByIdOrThrow(id);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'WORK_ITEM', ?, 'WORK_ITEM_CREATED', ?, ?, ?)")
+        .run(newId("act"), input.projectId, id, `Created Work Item: ${input.title}`, JSON.stringify({ status: "BACKLOG", parentId: input.parentId ?? null }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'USER', 'WORK_ITEM', ?, 'CREATE', ?, ?)")
+        .run(newId("audit"), input.projectId, id, JSON.stringify(created), now);
+    })();
     return this.getByIdOrThrow(id);
   }
 
@@ -255,6 +263,11 @@ export class SqliteWorkItemRepository {
         const insert = this.db.prepare("INSERT INTO work_item_dependencies (work_item_id, depends_on_id, dependency_type, created_at) VALUES (?, ?, 'BLOCKING', ?)");
         for (const dependencyId of input.dependencyIds) insert.run(id, dependencyId, now);
       }
+      const after = this.getByIdOrThrow(id);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'WORK_ITEM', ?, 'WORK_ITEM_UPDATED', 'Updated Work Item definition', ?, ?)")
+        .run(newId("act"), after.projectId, id, JSON.stringify({ dependencyIds: input.dependencyIds ?? null }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'WORK_ITEM', ?, 'UPDATE', ?, ?, ?)")
+        .run(newId("audit"), after.projectId, id, JSON.stringify(before), JSON.stringify(after), now);
     })();
     return this.getByIdOrThrow(id);
   }
@@ -320,6 +333,22 @@ export class SqliteWorkItemRepository {
     `).all(id) as WorkItemDependencyDto[];
   }
 
+  listChildren(id: string): WorkItemDto[] {
+    return (this.db.prepare("SELECT * FROM work_items WHERE parent_id = ? ORDER BY updated_at DESC, id DESC").all(id) as WorkItemRow[]).map(mapWorkItem);
+  }
+
+  listActivity(id: string, limit = 50): ResourceActivityEventDto[] {
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    const activities = this.db.prepare("SELECT id, project_id AS projectId, resource_type AS resourceType, resource_id AS resourceId, event_type AS eventType, summary, metadata_json AS metadataJson, created_at AS createdAt FROM activity_events WHERE resource_type = 'WORK_ITEM' AND resource_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(id, safeLimit) as Array<{ id: string; projectId: string | null; resourceType: string; resourceId: string; eventType: string; summary: string; metadataJson: string; createdAt: number }>;
+    const audits = this.db.prepare("SELECT id, project_id AS projectId, resource_type AS resourceType, resource_id AS resourceId, action AS eventType, actor_type AS actorType, after_json AS metadataJson, created_at AS createdAt FROM audit_events WHERE resource_type = 'WORK_ITEM' AND resource_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(id, safeLimit) as Array<{ id: string; projectId: string | null; resourceType: string; resourceId: string; eventType: string; actorType: string; metadataJson: string | null; createdAt: number }>;
+    return [
+      ...activities.map((row) => ({ id: row.id, kind: "ACTIVITY" as const, projectId: row.projectId, resourceType: row.resourceType, resourceId: row.resourceId, eventType: row.eventType, summary: row.summary, actorType: null, metadata: JSON.parse(row.metadataJson), createdAt: new Date(row.createdAt).toISOString() })),
+      ...audits.map((row) => ({ id: row.id, kind: "AUDIT" as const, projectId: row.projectId, resourceType: row.resourceType, resourceId: row.resourceId, eventType: row.eventType, summary: row.eventType, actorType: row.actorType, metadata: row.metadataJson ? JSON.parse(row.metadataJson) : {}, createdAt: new Date(row.createdAt).toISOString() }))
+    ].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)).slice(0, safeLimit);
+  }
+
   listAttempts(id: string): WorkItemAttemptDto[] {
     return (this.db.prepare(`
       SELECT attempts.*,
@@ -369,10 +398,19 @@ export class SqliteWorkItemRepository {
   }
 
   updateStatus(id: string, status: WorkItemStatus, expectedRevision: number, now: number): WorkItemDto {
+    const before = this.getById(id);
     const completedAt = status === "DONE" ? now : null;
-    const result = this.db.prepare("UPDATE work_items SET status = ?, completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? IN ('BACKLOG', 'CANCELED') THEN NULL ELSE completed_at END, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(status, completedAt, completedAt, status, now, id, expectedRevision);
-    ensureChanged(result.changes, this.getById(id), "Work Item", id, expectedRevision);
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE work_items SET status = ?, completed_at = CASE WHEN ? IS NOT NULL THEN ? WHEN ? IN ('BACKLOG', 'CANCELED') THEN NULL ELSE completed_at END, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(status, completedAt, completedAt, status, now, id, expectedRevision);
+      ensureChanged(result.changes, before, "Work Item", id, expectedRevision);
+      const after = this.getByIdOrThrow(id);
+      const eventType = `WORK_ITEM_${status}`;
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'WORK_ITEM', ?, ?, ?, ?, ?)")
+        .run(newId("act"), after.projectId, id, eventType, `Work Item moved to ${status}`, JSON.stringify({ beforeStatus: before?.status, afterStatus: status }), now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'WORK_ITEM', ?, ?, ?, ?, ?)")
+        .run(newId("audit"), after.projectId, id, eventType, JSON.stringify(before), JSON.stringify(after), now);
+    })();
     return this.getByIdOrThrow(id);
   }
 
