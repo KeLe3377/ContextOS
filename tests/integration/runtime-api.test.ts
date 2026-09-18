@@ -153,6 +153,28 @@ describe("runtime APIs", () => {
     const failed = await waitForSessionStatus(server, session.id, "FAILED");
     expect(failed.status).toBe("FAILED");
     expect(failed.completedAt).toBeTruthy();
+
+    const health = await server.inject({ method: "GET", url: "/api/runtime/health" });
+    expect(health.statusCode).toBe(200);
+    expect(health.json()).toMatchObject({
+      jobs: {
+        byStatus: expect.objectContaining({ FAILED: 1 }),
+        latestFailed: [expect.objectContaining({ status: "FAILED", failureCode: "PROCESS_EXITED" })]
+      },
+      sessionRuns: {
+        failed: 1,
+        latestFailed: [expect.objectContaining({ sessionId: session.id, status: "FAILED", failureCode: "PROCESS_EXITED" })]
+      }
+    });
+
+    const activity = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/activity` });
+    expect(activity.statusCode).toBe(200);
+    expect(activity.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "CONTINUE_FAILED", metadata: expect.objectContaining({ failureCode: "PROCESS_EXITED" }) }),
+      expect.objectContaining({ kind: "AUDIT", eventType: "CONTINUE_FAILED", actorType: "SYSTEM" }),
+      expect.objectContaining({ kind: "ACTIVITY", eventType: "CONTINUE_QUEUED" }),
+      expect.objectContaining({ kind: "AUDIT", eventType: "CONTINUE_QUEUED", actorType: "SYSTEM" })
+    ]));
   });
 
   test("automatically binds the Codex session created by the first launch", async () => {

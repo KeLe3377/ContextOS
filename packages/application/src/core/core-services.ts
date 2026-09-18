@@ -2,7 +2,7 @@ import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/
 import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus, DecisionVersionDto } from "../../../contracts/src/decisions.js";
 import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/review-items.js";
 import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
-import type { SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
+import type { ResourceActivityEventDto, SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionInput, SessionPatch, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type {
@@ -81,6 +81,12 @@ export class SessionService {
   runtimeStatus(id: string): SessionRuntimeStatusDto {
     if (!this.continueSession) throw new Error("Continue session runtime is not configured");
     return this.continueSession.inspectStatus(this.sessions.getByIdOrThrow(id));
+  }
+
+  activity(id: string): ResourceActivityEventDto[] {
+    if (!this.continueSession) throw new Error("Continue session runtime is not configured");
+    this.sessions.getByIdOrThrow(id);
+    return this.continueSession.listActivity(id);
   }
 
   interrupt(id: string, expectedRevision: number): SessionInterruptResult {

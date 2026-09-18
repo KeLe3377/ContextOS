@@ -32,6 +32,8 @@ export type RuntimeJobDto = {
   resourceId: string;
   payload: Record<string, unknown>;
   availableAt: string;
+  failureCode: string | null;
+  failureMessage: string | null;
   createdAt: string;
   updatedAt: string;
   revision: number;
@@ -91,6 +93,38 @@ export type SessionRuntimeStatusDto = {
   adapterId: string;
   run: SessionRunDto | null;
   process: { pid: number; managed: boolean; running: boolean } | null;
+};
+
+export type RuntimeHealthDto = {
+  generatedAt: string;
+  jobs: {
+    total: number;
+    byStatus: Record<RuntimeJobDto["status"], number>;
+    latestFailed: RuntimeJobDto[];
+  };
+  sessionRuns: {
+    total: number;
+    running: number;
+    failed: number;
+    latestFailed: SessionRunDto[];
+  };
+  outbox: {
+    pending: number;
+    failed: number;
+  };
+};
+
+export type ResourceActivityEventDto = {
+  id: string;
+  kind: "ACTIVITY" | "AUDIT";
+  projectId: string | null;
+  resourceType: string;
+  resourceId: string;
+  eventType: string;
+  summary: string;
+  actorType: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
 };
 
 export type SessionInterruptRuntimeDto = {

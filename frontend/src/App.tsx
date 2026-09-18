@@ -26,6 +26,7 @@ type WorkspaceData = {
   contextItems: AnyRecord[];
   rules: AnyRecord[];
   settings: AnyRecord | null;
+  runtimeHealth: AnyRecord | null;
   adapters: AnyRecord[];
 };
 
@@ -35,6 +36,7 @@ type SessionDetails = {
   evidence: AnyRecord[];
   resumeCapsule: AnyRecord | null;
   runtimeStatus: AnyRecord | null;
+  activity: AnyRecord[];
 };
 
 const navGroups: Array<{ label: string; items: Array<[PageId, string, string]> }> = [
@@ -71,6 +73,7 @@ function emptyData(): WorkspaceData {
     contextItems: [],
     rules: [],
     settings: null,
+    runtimeHealth: null,
     adapters: []
   };
 }
@@ -136,6 +139,7 @@ const iconPaths: Record<string, ReactNode> = {
   link: <><path d="M10 7l1-1a4 4 0 0 1 6 6l-1 1M14 17l-1 1a4 4 0 0 1-6-6l1-1M9 15l6-6" /></>,
   lock: <><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
   manage_search: <><circle cx="10" cy="10" r="5" /><path d="M14 14l5 5M4 20h7" /></>,
+  monitor_heart: <><path d="M4 6h16v11H4z" /><path d="M8 21h8M12 17v4" /><path d="M7 12h3l1-3 2 6 1-3h3" /></>,
   pause_circle: <><circle cx="12" cy="12" r="8" /><path d="M10 9v6M14 9v6" /></>,
   play_arrow: <path d="M8 5v14l11-7z" />,
   playlist_add_check: <><path d="M4 7h9M4 12h8M4 17h6" /><path d="M14 15l2 2 4-5" /></>,
@@ -311,18 +315,20 @@ export function App() {
 
   const loadSessionDetails = useCallback(async (session: AnyRecord | undefined): Promise<SessionDetails | null> => {
     if (!session) return null;
-    const [contextPack, evidence, resumeCapsule, runtimeStatus] = await Promise.all([
+    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
       settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
-      settle(fetchJson(`/api/sessions/${session.id}/runtime-status`))
+      settle(fetchJson(`/api/sessions/${session.id}/runtime-status`)),
+      settle(fetchJson(`/api/sessions/${session.id}/activity`))
     ]);
     return {
       sessionId: session.id,
       contextPack: contextPack.ok ? contextPack.value : null,
       evidence: evidence.ok ? evidence.value.items : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
-      runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null
+      runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
+      activity: activity.ok ? activity.value.items : []
     };
   }, []);
 
@@ -385,6 +391,7 @@ export function App() {
       contextItems: fetchJson("/api/context-items"),
       rules: fetchJson("/api/rules"),
       settings: fetchJson("/api/settings"),
+      runtimeHealth: fetchJson("/api/runtime/health"),
       adapters: fetchJson("/api/agent-adapters")
     };
     const entries = await Promise.all(Object.entries(requests).map(async ([key, promise]) => [key, await settle(promise)] as const));
@@ -552,11 +559,12 @@ export function App() {
   const exportSessionCapsule = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
     if (!session) throw new Error("No session is available to export");
-    const [contextPack, evidence, resumeCapsule, runtimeStatus] = await Promise.all([
+    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
       settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
-      settle(fetchJson(`/api/sessions/${session.id}/runtime-status`))
+      settle(fetchJson(`/api/sessions/${session.id}/runtime-status`)),
+      settle(fetchJson(`/api/sessions/${session.id}/activity`))
     ]);
     const capsule = {
       schemaVersion: "contextos.session-capsule.v1",
@@ -566,11 +574,13 @@ export function App() {
       evidence: evidence.ok ? evidence.value.items : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
+      activity: activity.ok ? activity.value.items : [],
       warnings: [
         contextPack.ok ? null : `contextPack: ${contextPack.error.message}`,
         evidence.ok ? null : `evidence: ${evidence.error.message}`,
         resumeCapsule.ok ? null : `resumeCapsule: ${resumeCapsule.error.message}`,
-        runtimeStatus.ok ? null : `runtimeStatus: ${runtimeStatus.error.message}`
+        runtimeStatus.ok ? null : `runtimeStatus: ${runtimeStatus.error.message}`,
+        activity.ok ? null : `activity: ${activity.error.message}`
       ].filter(Boolean)
     };
     downloadJson(`contextos-session-${session.id}.json`, capsule);
@@ -938,6 +948,10 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <button className="btn" disabled={actionLoading} onClick={() => setModal({ kind: "transcript", sessionId: selectedSession.id })}>{icon("edit_note")}<span>Paste Transcript</span></button>
             <button className="btn" disabled={actionLoading} onClick={() => runAction(() => exportSessionCapsule(selectedSession.id), "Session capsule exported")}>{icon("download")}<span>Export Capsule</span></button>
           </div>
+          {details.activity.length ? <div>
+            <div className="title-sm evidence-section-title">Recent Activity</div>
+            <div className="stack compact">{details.activity.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={`${item.kind}-${item.id}`}><div className="evidence-row-main"><div className="title-sm">{item.summary || item.eventType}</div><div className="muted mono">{fmtDate(item.createdAt)} · {item.kind}{item.actorType ? ` · ${item.actorType}` : ""}</div>{Object.keys(item.metadata || {}).length ? <div className="muted mono">{Object.entries(item.metadata).slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(" · ")}</div> : null}</div><Badge text={item.eventType} tone={item.kind === "AUDIT" ? "blue" : toneForStatus(item.eventType)} /></div>)}</div>
+          </div> : <EmptyNote>No runtime activity has been recorded for this session yet.</EmptyNote>}
           {details.evidence.length ? <div>
             <div className="title-sm evidence-section-title">Evidence Snapshots</div>
             <div className="stack compact">{details.evidence.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><div className="row-actions"><Badge text={item.evidenceType} tone="blue" /><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${item.id}\n${item.storageRef || ""}\n${item.contentHash || ""}`)}>{icon("content_copy")}</button></div></div>)}</div>
@@ -1211,7 +1225,10 @@ function RulesPage(props: AnyRecord & { header: ReactNode }) {
 function SettingsPage(props: AnyRecord & { header: ReactNode }) {
   const { data, header, defaultAdapterId, adapterList } = props;
   const settings = data.settings;
+  const runtimeHealth = data.runtimeHealth;
   const connected = data.adapters.filter((adapter: AnyRecord) => adapter.available).length;
+  const failedRuns = runtimeHealth?.sessionRuns?.latestFailed || [];
+  const failedJobs = runtimeHealth?.jobs?.latestFailed || [];
   return (
     <>{header}<div className="stack">
       <Panel title="General" iconName="tune" meta="Workspace & Defaults">
@@ -1221,6 +1238,24 @@ function SettingsPage(props: AnyRecord & { header: ReactNode }) {
           <div className="setting-row"><div><div className="title-sm">Launch at startup</div><div className="muted">Start the local daemon with the desktop session.</div></div><label className="toggle"><input id="setting-launch-startup" type="checkbox" defaultChecked={settings.launchAtStartup} /><span>{settings.launchAtStartup ? "Enabled" : "Disabled"}</span></label></div>
           <div className="setting-row"><div><div className="title-sm">Data directory</div><div className="muted mono">{settings.dataDirectory}</div></div><Badge text={`rev ${settings.revision}`} /></div>
         </> : <EmptyNote>Settings unavailable.</EmptyNote>}
+      </Panel>
+      <Panel title="Runtime Health" iconName="monitor_heart" meta={runtimeHealth ? fmtDate(runtimeHealth.generatedAt) : "Unavailable"}>
+        {runtimeHealth ? <>
+          <div className="kpi-grid compact-kpis">
+            <div className="kpi"><div className="kpi-value">{runtimeHealth.sessionRuns.running}</div><div className="kpi-label mono">Running runs</div></div>
+            <div className="kpi"><div className="kpi-value">{runtimeHealth.sessionRuns.failed}</div><div className="kpi-label mono">Failed runs</div></div>
+            <div className="kpi"><div className="kpi-value">{runtimeHealth.jobs.byStatus?.FAILED || 0}</div><div className="kpi-label mono">Failed jobs</div></div>
+            <div className="kpi"><div className="kpi-value">{runtimeHealth.outbox.pending}</div><div className="kpi-label mono">Outbox pending</div></div>
+          </div>
+          <div className="setting-row"><div><div className="title-sm">Job lifecycle</div><div className="muted mono">{Object.entries(runtimeHealth.jobs.byStatus || {}).map(([status, count]) => `${status}:${count}`).join(" · ")}</div></div><Badge text={`${runtimeHealth.jobs.total} jobs`} /></div>
+          <div className="setting-row"><div><div className="title-sm">Outbox</div><div className="muted">Internal delivery queue used by runtime support events.</div></div><Badge text={`${runtimeHealth.outbox.failed} failed`} tone={runtimeHealth.outbox.failed ? "red" : "green"} /></div>
+          {failedRuns.length || failedJobs.length ? <div className="stack compact">
+            {[...failedRuns.map((run: AnyRecord) => ({ id: run.id, title: run.failureMessage || run.failureCode || "Session run failed", meta: `${run.sessionId} · ${fmtDate(run.updatedAt)}`, badge: run.failureCode || run.status })),
+              ...failedJobs.map((job: AnyRecord) => ({ id: job.id, title: job.failureMessage || job.failureCode || job.kind, meta: `${job.resourceType} ${job.resourceId} · ${fmtDate(job.updatedAt)}`, badge: job.failureCode || job.status }))].slice(0, 6).map((item: AnyRecord) => (
+              <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{item.meta}</div></div><Badge text={item.badge} tone="red" /></div>
+            ))}
+          </div> : <EmptyNote>No failed runtime work is currently recorded.</EmptyNote>}
+        </> : <EmptyNote>Runtime health unavailable.</EmptyNote>}
       </Panel>
       <Panel title="Agent Adapters" iconName="smart_toy"><div className="setting-row"><div><div className="title-sm">Connected adapters</div><div className="muted">Codex and Claude Code are attached when discovery succeeds.</div></div><Badge text={`${connected} connected`} tone={connected ? "green" : "amber"} /></div>{data.adapters.length ? data.adapters.map((adapter: AnyRecord) => <div className="setting-row" key={adapter.id}><div><div className="title-sm">{adapter.displayName}</div><div className="muted mono">{adapter.version || adapter.error || adapter.command}</div></div><Badge text={adapter.available ? "Available" : "Unavailable"} tone={adapter.available ? "green" : "red"} /></div>) : <EmptyNote>No adapters discovered.</EmptyNote>}</Panel>
       <Panel title="Storage & Privacy" iconName="lock"><div className="setting-row"><div><div className="title-sm">Evidence retention</div><div className="muted">Keep immutable source snapshots unless explicitly archived.</div></div><Badge text="Retain indefinitely" /></div><div className="setting-row"><div><div className="title-sm">Secret redaction</div><div className="muted">Scrub credentials before indexing source material.</div></div><Badge text="Enabled" tone="green" /></div><div className="setting-row"><div><div className="title-sm">Bridge mode</div><div className="muted">Local CLI and IPC integration for desktop agents.</div></div><Badge text="CLI / IPC bridge" tone="blue" /></div></Panel>

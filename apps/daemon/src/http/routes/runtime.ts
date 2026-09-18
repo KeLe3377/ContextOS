@@ -11,6 +11,7 @@ export async function registerRuntimeRoutes(
 ): Promise<void> {
   server.get("/api/settings", async () => services.settings.get());
   server.patch("/api/settings", async (request) => services.settings.patch(settingsPatchSchema.parse(request.body)));
+  server.get("/api/runtime/health", async () => services.settings.runtimeHealth());
 
   server.get("/api/agent-adapters", async () => ({
     items: services.agentAdapters.list(),

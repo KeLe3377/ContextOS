@@ -1,6 +1,6 @@
 import type { Database } from "better-sqlite3";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
-import type { RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
+import type { ResourceActivityEventDto, RuntimeHealthDto, RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
 import type { ResumeCapsuleDto, SessionStatus, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
@@ -36,9 +36,16 @@ type JobRow = {
   resource_id: string;
   payload_json: string;
   available_at: number;
+  failure_code: string | null;
+  failure_message: string | null;
   created_at: number;
   updated_at: number;
   revision: number;
+};
+
+type JobStatusCountRow = {
+  status: RuntimeJobDto["status"];
+  count: number;
 };
 
 type SessionRunRow = {
@@ -57,6 +64,38 @@ type SessionRunRow = {
   created_at: number;
   updated_at: number;
   revision: number;
+};
+
+type SessionRunStatusCountRow = {
+  status: SessionRunDto["status"];
+  count: number;
+};
+
+type OutboxStatusCountRow = {
+  status: "PENDING" | "DISPATCHED" | "FAILED";
+  count: number;
+};
+
+type ActivityEventRow = {
+  id: string;
+  project_id: string | null;
+  resource_type: string;
+  resource_id: string;
+  event_type: string;
+  summary: string;
+  metadata_json: string;
+  created_at: number;
+};
+
+type AuditEventRow = {
+  id: string;
+  project_id: string | null;
+  actor_type: string;
+  resource_type: string;
+  resource_id: string;
+  action: string;
+  after_json: string | null;
+  created_at: number;
 };
 
 type ContextPackageRow = {
@@ -128,6 +167,49 @@ export class SqliteRuntimeRepository {
     return mapSettings(row);
   }
 
+  getRuntimeHealth(now: number): RuntimeHealthDto {
+    const jobCounts = this.db.prepare("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status").all() as JobStatusCountRow[];
+    const runCounts = this.db.prepare("SELECT status, COUNT(*) AS count FROM session_runs GROUP BY status").all() as SessionRunStatusCountRow[];
+    const outboxCounts = this.db.prepare("SELECT status, COUNT(*) AS count FROM outbox_events GROUP BY status").all() as OutboxStatusCountRow[];
+    const latestFailedJobs = this.db.prepare("SELECT * FROM jobs WHERE status = 'FAILED' ORDER BY updated_at DESC, id DESC LIMIT 5")
+      .all() as JobRow[];
+    const latestFailedRuns = this.db.prepare("SELECT * FROM session_runs WHERE status = 'FAILED' ORDER BY updated_at DESC, id DESC LIMIT 5")
+      .all() as SessionRunRow[];
+    const jobByStatus = statusRecord<RuntimeJobDto["status"]>(["CREATED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"], jobCounts);
+    const runByStatus = statusRecord<SessionRunDto["status"]>(["CREATED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"], runCounts);
+    const outboxByStatus = statusRecord<OutboxStatusCountRow["status"]>(["PENDING", "DISPATCHED", "FAILED"], outboxCounts);
+    return {
+      generatedAt: new Date(now).toISOString(),
+      jobs: {
+        total: Object.values(jobByStatus).reduce((sum, count) => sum + count, 0),
+        byStatus: jobByStatus,
+        latestFailed: latestFailedJobs.map(mapJob)
+      },
+      sessionRuns: {
+        total: Object.values(runByStatus).reduce((sum, count) => sum + count, 0),
+        running: runByStatus.RUNNING,
+        failed: runByStatus.FAILED,
+        latestFailed: latestFailedRuns.map(mapSessionRun)
+      },
+      outbox: {
+        pending: outboxByStatus.PENDING,
+        failed: outboxByStatus.FAILED
+      }
+    };
+  }
+
+  listResourceActivity(input: { resourceType: string; resourceId: string; limit: number }): ResourceActivityEventDto[] {
+    const limit = Math.max(1, Math.min(input.limit, 100));
+    const activities = this.db.prepare("SELECT * FROM activity_events WHERE resource_type = ? AND resource_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(input.resourceType, input.resourceId, limit) as ActivityEventRow[];
+    const audits = this.db.prepare("SELECT * FROM audit_events WHERE resource_type = ? AND resource_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(input.resourceType, input.resourceId, limit) as AuditEventRow[];
+    return [
+      ...activities.map(mapActivityEvent),
+      ...audits.map(mapAuditEvent)
+    ].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)).slice(0, limit);
+  }
+
   patchSettings(input: SettingsPatch, now: number): SettingsDto {
     const current = this.getSettings();
     const result = this.db.prepare("UPDATE settings SET launch_at_startup = ?, start_minimized = ?, confirm_destructive_actions = ?, default_adapter_id = ?, updated_at = ?, revision = revision + 1 WHERE id = 'singleton' AND revision = ?")
@@ -190,6 +272,7 @@ export class SqliteRuntimeRepository {
 
   markContinueExitedFailed(input: { jobId: string; runId: string; exitCode: number | null; signal: string | null; failureMessage: string }, now: number): { job: RuntimeJobDto; run: SessionRunDto } {
     const failureCode = input.signal ? "PROCESS_SIGNALED" : "PROCESS_EXITED";
+    const resource = this.getRunSessionResource(input.runId);
     this.db.transaction(() => {
       this.db.prepare("UPDATE jobs SET status = 'FAILED', ended_at = ?, failure_code = ?, failure_message = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND status = 'RUNNING'")
         .run(now, failureCode, input.failureMessage, now, input.jobId);
@@ -199,11 +282,17 @@ export class SqliteRuntimeRepository {
         .run(now, failureCode, input.failureMessage, input.jobId);
       this.db.prepare("UPDATE sessions SET status = 'FAILED', completed_at = COALESCE(completed_at, ?), last_activity_at = ?, updated_at = ?, revision = revision + 1 WHERE id = (SELECT session_id FROM session_runs WHERE id = ?) AND status = 'RUNNING'")
         .run(now, now, now, input.runId);
+      const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode, failureMessage: input.failureMessage });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_FAILED', ?, ?, ?)")
+        .run(newId("act"), resource.projectId, resource.sessionId, input.failureMessage, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CONTINUE_FAILED', ?, ?)")
+        .run(newId("audit"), resource.projectId, resource.sessionId, metadata, now);
     })();
     return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
   }
 
   markContinueFailed(input: { jobId: string; runId: string; failureCode: string; failureMessage: string }, now: number): { job: RuntimeJobDto; run: SessionRunDto } {
+    const resource = this.getRunSessionResource(input.runId);
     this.db.transaction(() => {
       this.db.prepare("UPDATE jobs SET status = 'FAILED', ended_at = ?, failure_code = ?, failure_message = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
         .run(now, input.failureCode, input.failureMessage, now, input.jobId);
@@ -213,6 +302,11 @@ export class SqliteRuntimeRepository {
         .run(now, now, now, input.runId);
       this.db.prepare("INSERT INTO job_attempts (id, job_id, status, started_at, ended_at, failure_code, failure_message) VALUES (?, ?, 'FAILED', ?, ?, ?, ?)")
         .run(newId("jattempt"), input.jobId, now, now, input.failureCode, input.failureMessage);
+      const metadata = JSON.stringify({ jobId: input.jobId, runId: input.runId, failureCode: input.failureCode, failureMessage: input.failureMessage });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'CONTINUE_FAILED', ?, ?, ?)")
+        .run(newId("act"), resource.projectId, resource.sessionId, input.failureMessage, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CONTINUE_FAILED', ?, ?)")
+        .run(newId("audit"), resource.projectId, resource.sessionId, metadata, now);
     })();
     return { job: this.getJob(input.jobId), run: this.getSessionRun(input.runId) };
   }
@@ -523,6 +617,13 @@ export class SqliteRuntimeRepository {
     if (!row) throw new ContextOsError("NOT_FOUND", "Session run not found", { id });
     return mapSessionRun(row);
   }
+
+  private getRunSessionResource(runId: string): { sessionId: string; projectId: string } {
+    const row = this.db.prepare("SELECT runs.session_id AS sessionId, sessions.project_id AS projectId FROM session_runs runs JOIN sessions ON sessions.id = runs.session_id WHERE runs.id = ?")
+      .get(runId) as { sessionId: string; projectId: string } | undefined;
+    if (!row) throw new ContextOsError("NOT_FOUND", "Session run not found", { id: runId });
+    return row;
+  }
 }
 
 function mapEvidenceSnapshot(row: EvidenceSnapshotRow): EvidenceSnapshotDto {
@@ -595,6 +696,8 @@ function mapJob(row: JobRow): RuntimeJobDto {
     resourceId: row.resource_id,
     payload: JSON.parse(row.payload_json) as Record<string, unknown>,
     availableAt: new Date(row.available_at).toISOString(),
+    failureCode: row.failure_code,
+    failureMessage: row.failure_message,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
     revision: row.revision
@@ -618,6 +721,42 @@ function mapSessionRun(row: SessionRunRow): SessionRunDto {
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
     revision: row.revision
+  };
+}
+
+function statusRecord<T extends string>(statuses: T[], rows: Array<{ status: T; count: number }>): Record<T, number> {
+  const output = Object.fromEntries(statuses.map((status) => [status, 0])) as Record<T, number>;
+  for (const row of rows) output[row.status] = row.count;
+  return output;
+}
+
+function mapActivityEvent(row: ActivityEventRow): ResourceActivityEventDto {
+  return {
+    id: row.id,
+    kind: "ACTIVITY",
+    projectId: row.project_id,
+    resourceType: row.resource_type,
+    resourceId: row.resource_id,
+    eventType: row.event_type,
+    summary: row.summary,
+    actorType: null,
+    metadata: JSON.parse(row.metadata_json) as Record<string, unknown>,
+    createdAt: new Date(row.created_at).toISOString()
+  };
+}
+
+function mapAuditEvent(row: AuditEventRow): ResourceActivityEventDto {
+  return {
+    id: row.id,
+    kind: "AUDIT",
+    projectId: row.project_id,
+    resourceType: row.resource_type,
+    resourceId: row.resource_id,
+    eventType: row.action,
+    summary: row.action,
+    actorType: row.actor_type,
+    metadata: row.after_json ? JSON.parse(row.after_json) as Record<string, unknown> : {},
+    createdAt: new Date(row.created_at).toISOString()
   };
 }
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
-import type { AgentAdapterStatusDto, AgentLaunchInfoDto, RuntimeJobDto, SessionInterruptRuntimeDto, SessionRunDto, SessionRuntimeStatusDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
+import type { AgentAdapterStatusDto, AgentLaunchInfoDto, ResourceActivityEventDto, RuntimeHealthDto, RuntimeJobDto, SessionInterruptRuntimeDto, SessionRunDto, SessionRuntimeStatusDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
@@ -26,6 +26,10 @@ export class SettingsService {
 
   patch(input: SettingsPatch): SettingsDto {
     return this.runtime.patchSettings(input, nowMs());
+  }
+
+  runtimeHealth(): RuntimeHealthDto {
+    return this.runtime.getRuntimeHealth(nowMs());
   }
 }
 
@@ -123,6 +127,10 @@ export class ContinueSessionService {
 
   getResumeCapsule(sessionId: string): ResumeCapsuleDto {
     return this.runtime.getResumeCapsule(sessionId);
+  }
+
+  listActivity(sessionId: string): ResourceActivityEventDto[] {
+    return this.runtime.listResourceActivity({ resourceType: "SESSION", resourceId: sessionId, limit: 40 });
   }
 
   patchResumeCapsule(sessionId: string, input: ResumeCapsulePatch): ResumeCapsuleDto {
