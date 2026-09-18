@@ -235,10 +235,11 @@ function transcriptStructure(metadata: AnyRecord | null | undefined) {
 }
 
 function transcriptEventLabel(event: AnyRecord) {
-  if (event.kind === "message") return `${String(event.role || "message").toUpperCase()} message`;
-  if (event.kind === "tool_call") return `Tool call${event.name ? ` · ${event.name}` : ""}`;
-  if (event.kind === "tool_result") return "Tool result";
-  return "Summary";
+  const suffix = event.truncated ? " · output truncated" : "";
+  if (event.kind === "message") return `${String(event.role || "message").toUpperCase()} message${suffix}`;
+  if (event.kind === "tool_call") return `Tool call${event.name ? ` · ${event.name}` : ""}${suffix}`;
+  if (event.kind === "tool_result") return `Tool result${suffix}`;
+  return `Summary${suffix}`;
 }
 
 function transcriptEventPreview(event: AnyRecord) {

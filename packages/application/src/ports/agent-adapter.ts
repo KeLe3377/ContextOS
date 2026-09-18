@@ -49,6 +49,7 @@ export type AgentTranscriptEvent = {
   text?: string;
   name?: string;
   callId?: string;
+  truncated?: boolean;
 };
 
 export interface AgentAdapter {

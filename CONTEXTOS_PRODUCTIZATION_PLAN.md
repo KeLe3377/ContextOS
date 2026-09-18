@@ -478,4 +478,11 @@ Phase 10 transcript event window increment completed on 2026-09-18:
 - Updated Session detail to show the latest 12 events and explain when the display comes from a truncated window or transcript.
 - Covered the boundary with a 205-event Codex transcript integration test.
 
+Phase 10 tool-output truncation increment completed on 2026-09-18:
+
+- Added a shared 20,000-character semantic limit for individual Codex and Claude Code tool calls/results.
+- Preserved the beginning and end of oversized output with an explicit omitted-character marker.
+- Added event-level truncation metadata and surfaced it in Session transcript event labels.
+- Upgraded Codex normalization to v4 and Claude Code normalization to v3 with oversized-output coverage for both adapters.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

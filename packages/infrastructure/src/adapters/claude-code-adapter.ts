@@ -205,7 +205,7 @@ function parseClaudeTranscript(path: string, externalSessionId: string): AgentTr
     externalSessionId,
     contentText: selected.formatted.join("\n\n"),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "claude-code-jsonl.v2",
+    parserVersion: "claude-code-jsonl.v3",
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,
@@ -254,7 +254,7 @@ function readClaudeEvents(row: ClaudeJsonRow, previousOrdinal: number): AgentTra
         kind: "tool_call",
         name: item.name ?? "tool",
         callId: item.id,
-        text: stringifyToolPayload(item.input ?? item.content ?? item.text)
+        ...truncateToolText(stringifyToolPayload(item.input ?? item.content ?? item.text))
       });
     }
     if (item.type === "tool_result") {
@@ -262,7 +262,7 @@ function readClaudeEvents(row: ClaudeJsonRow, previousOrdinal: number): AgentTra
         ordinal: previousOrdinal + events.length + 1,
         kind: "tool_result",
         callId: item.tool_use_id,
-        text: stringifyToolPayload(item.content ?? item.text)
+        ...truncateToolText(stringifyToolPayload(item.content ?? item.text))
       });
     }
   }
@@ -282,6 +282,23 @@ function stringifyToolPayload(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === undefined || value === null) return "";
   return JSON.stringify(value);
+}
+
+const MAX_TOOL_EVENT_TEXT = 20_000;
+
+function truncateToolText(text: string): Pick<AgentTranscriptEvent, "text" | "truncated"> {
+  if (text.length <= MAX_TOOL_EVENT_TEXT) return { text };
+  let omitted = text.length - MAX_TOOL_EVENT_TEXT;
+  let marker = `\n...[truncated ${omitted} characters]...\n`;
+  omitted = text.length - (MAX_TOOL_EVENT_TEXT - marker.length);
+  marker = `\n...[truncated ${omitted} characters]...\n`;
+  const retained = MAX_TOOL_EVENT_TEXT - marker.length;
+  const head = Math.ceil(retained / 2);
+  const tail = Math.floor(retained / 2);
+  return {
+    text: `${text.slice(0, head)}${marker}${text.slice(-tail)}`,
+    truncated: true
+  };
 }
 
 function selectEvents(events: AgentTranscriptEvent[]): { formatted: string[]; truncatedOversized: boolean } {

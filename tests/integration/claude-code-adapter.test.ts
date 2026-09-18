@@ -38,7 +38,7 @@ describe("ClaudeCodeAdapter", () => {
       expect(latest).toMatchObject({
         externalSessionId: "claude-latest",
         contentText: "SUMMARY:\nSummary for claude-latest\n\nUSER:\nnew question\n\nASSISTANT:\nnew answer\n\nTOOL CALL shell (tool_shell):\n{\"command\":\"npm test\"}\n\nTOOL RESULT (tool_shell):\ntool output",
-        parserVersion: "claude-code-jsonl.v2",
+        parserVersion: "claude-code-jsonl.v3",
         eventCount: 5,
         eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
         messageCount: 2,
@@ -64,6 +64,32 @@ describe("ClaudeCodeAdapter", () => {
       const supervisor = new ProcessSupervisor();
       expect(() => adapter.resume({ cwd: projectRoot, externalSessionId: "missing", prompt: "continue", supervisor })).toThrow("was not found");
       expect(() => adapter.resume({ cwd: outsideRoot, externalSessionId: "claude-latest", prompt: "continue", supervisor })).toThrow("different Project");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bounds oversized Claude tool output while preserving both ends", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-claude-tool-output-"));
+    try {
+      const projectsDir = join(tempDir, "projects");
+      const projectRoot = join(tempDir, "project");
+      await Promise.all([mkdir(projectsDir, { recursive: true }), mkdir(projectRoot)]);
+      const output = `${"A".repeat(12_500)}${"Z".repeat(12_500)}`;
+      const rows = [
+        { sessionId: "claude-tool-output", cwd: projectRoot, type: "user", message: { role: "user", content: "inspect output" } },
+        { sessionId: "claude-tool-output", cwd: projectRoot, type: "assistant", message: { role: "assistant", content: [{ type: "tool_result", tool_use_id: "tool_large", content: output }, { type: "text", text: "inspection complete" }] } }
+      ];
+      await writeFile(join(projectsDir, "tool-output.jsonl"), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+
+      const transcript = new ClaudeCodeAdapter(process.execPath, ["--version"], process.platform, projectsDir).importTranscript({ cwd: projectRoot });
+      const toolResult = transcript.events?.find((event) => event.kind === "tool_result");
+      expect(toolResult).toMatchObject({ callId: "tool_large", truncated: true });
+      expect(toolResult?.text).toMatch(/\.\.\.\[truncated \d+ characters\]\.\.\./);
+      expect(toolResult?.text).toHaveLength(20_000);
+      expect(toolResult?.text?.startsWith("A".repeat(100))).toBe(true);
+      expect(toolResult?.text?.endsWith("Z".repeat(100))).toBe(true);
+      expect(transcript.contentText).toContain("ASSISTANT:\ninspection complete");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

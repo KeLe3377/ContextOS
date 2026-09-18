@@ -74,6 +74,7 @@ export type AgentTranscriptEventDto = {
   text?: string;
   name?: string;
   callId?: string;
+  truncated?: boolean;
 };
 
 export type SessionTranscriptEventsDto = {

@@ -233,7 +233,7 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
     externalSessionId,
     contentText: selected.join(separator),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "codex-jsonl.v3",
+    parserVersion: "codex-jsonl.v4",
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,
@@ -259,11 +259,11 @@ function readCodexEvent(row: CodexJsonRow, ordinal: number): AgentTranscriptEven
   }
   if (["function_call", "tool_call", "custom_tool_call"].includes(payload.type)) {
     const text = stringifyToolPayload(payload.arguments ?? payload.input ?? payload.content);
-    return { ordinal, kind: "tool_call", name: payload.name ?? "tool", callId: payload.call_id ?? payload.callId, text };
+    return { ordinal, kind: "tool_call", name: payload.name ?? "tool", callId: payload.call_id ?? payload.callId, ...truncateToolText(text) };
   }
   if (["function_call_output", "tool_result", "custom_tool_call_output"].includes(payload.type)) {
     const text = stringifyToolPayload(payload.output ?? payload.content);
-    return { ordinal, kind: "tool_result", callId: payload.call_id ?? payload.callId, text };
+    return { ordinal, kind: "tool_result", callId: payload.call_id ?? payload.callId, ...truncateToolText(text) };
   }
   return null;
 }
@@ -273,6 +273,23 @@ function stringifyToolPayload(value: unknown): string {
   if (Array.isArray(value)) return contentToText(value as Array<{ type?: string; text?: string; content?: string }>);
   if (value === undefined || value === null) return "";
   return JSON.stringify(value);
+}
+
+const MAX_TOOL_EVENT_TEXT = 20_000;
+
+function truncateToolText(text: string): Pick<AgentTranscriptEvent, "text" | "truncated"> {
+  if (text.length <= MAX_TOOL_EVENT_TEXT) return { text };
+  let omitted = text.length - MAX_TOOL_EVENT_TEXT;
+  let marker = `\n...[truncated ${omitted} characters]...\n`;
+  omitted = text.length - (MAX_TOOL_EVENT_TEXT - marker.length);
+  marker = `\n...[truncated ${omitted} characters]...\n`;
+  const retained = MAX_TOOL_EVENT_TEXT - marker.length;
+  const head = Math.ceil(retained / 2);
+  const tail = Math.floor(retained / 2);
+  return {
+    text: `${text.slice(0, head)}${marker}${text.slice(-tail)}`,
+    truncated: true
+  };
 }
 
 function contentToText(content: string | Array<{ type?: string; text?: string; content?: string }> | undefined): string {

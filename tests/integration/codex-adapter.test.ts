@@ -87,7 +87,7 @@ describe("CodexAdapter command resolution", () => {
       expect(latest).toMatchObject({
         externalSessionId: "codex-latest",
         contentText: "USER:\nnew question\n\nTOOL CALL shell (call_shell):\ntool output\n\nTOOL RESULT (call_shell):\ncommand finished\n\nSUMMARY:\nChecked the workspace state.\n\nTOOL CALL apply_patch (call_patch):\n*** Begin Patch\n*** End Patch\n\nTOOL RESULT (call_patch):\npatch applied\n\nASSISTANT:\nnew answer",
-        parserVersion: "codex-jsonl.v3",
+        parserVersion: "codex-jsonl.v4",
         eventCount: 7,
         eventCounts: { message: 2, toolCall: 2, toolResult: 2, summary: 1 },
         messageCount: 2,
@@ -143,12 +143,40 @@ describe("CodexAdapter command resolution", () => {
 
       const transcript = new CodexAdapter(process.execPath, ["--version"], process.platform, sessionsDir).importTranscript({ cwd: projectRoot });
       expect(transcript).toMatchObject({
-        parserVersion: "codex-jsonl.v3",
+        parserVersion: "codex-jsonl.v4",
         eventCount: 3,
         eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 1 },
         messageCount: 2
       });
       expect(transcript.contentText).toContain("SUMMARY:\nEarlier work selected the SQLite path.");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bounds oversized Codex tool output while preserving both ends", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "contextos-codex-tool-output-"));
+    try {
+      const sessionsDir = join(tempDir, "sessions");
+      const projectRoot = join(tempDir, "project");
+      await Promise.all([mkdir(sessionsDir, { recursive: true }), mkdir(projectRoot)]);
+      const output = `${"A".repeat(12_500)}${"Z".repeat(12_500)}`;
+      const rows = [
+        { type: "session_meta", payload: { id: "codex-tool-output", cwd: projectRoot } },
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "inspect output" }] } },
+        { type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call_large", output } },
+        { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "inspection complete" }] } }
+      ];
+      await writeFile(join(sessionsDir, "rollout-tool-output.jsonl"), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+
+      const transcript = new CodexAdapter(process.execPath, ["--version"], process.platform, sessionsDir).importTranscript({ cwd: projectRoot });
+      const toolResult = transcript.events?.find((event) => event.kind === "tool_result");
+      expect(toolResult).toMatchObject({ callId: "call_large", truncated: true });
+      expect(toolResult?.text).toMatch(/\.\.\.\[truncated \d+ characters\]\.\.\./);
+      expect(toolResult?.text).toHaveLength(20_000);
+      expect(toolResult?.text?.startsWith("A".repeat(100))).toBe(true);
+      expect(toolResult?.text?.endsWith("Z".repeat(100))).toBe(true);
+      expect(transcript.contentText).toContain("ASSISTANT:\ninspection complete");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
