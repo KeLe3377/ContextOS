@@ -292,7 +292,8 @@ h2, h3, p { margin: 0; }
   font-size: 11px;
   color: var(--text-2);
   max-width: 100%;
-  overflow-wrap: anywhere;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .badge.blue { color: var(--blue); background: #eff6ff; border-color: var(--blue-border); }
 .badge.green { color: var(--green); background: var(--green-bg); border-color: #bbf7d0; }

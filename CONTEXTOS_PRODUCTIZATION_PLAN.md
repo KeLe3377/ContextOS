@@ -448,4 +448,10 @@ Phase 9 runtime-visibility increment completed on 2026-09-18:
 - Exposed linked run failures directly on Work Item attempts.
 - Added navigation from failed runs in Runtime Health to their owning Session.
 
+Phase 11 browser-smoke increment completed on 2026-09-18:
+
+- Added isolated Playwright startup using a temporary ContextOS data directory and deterministic failing Codex fixture.
+- Added desktop and mobile Chromium smoke coverage for Sessions, failed Run History, Runtime Health, and cross-page navigation.
+- Captured a full-page screenshot for each viewport as a layout regression artifact.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

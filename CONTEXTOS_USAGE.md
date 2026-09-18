@@ -17,6 +17,8 @@ npm run start:local
 http://127.0.0.1:4721/
 ```
 
+开发验证可运行 `npm test` 做后端/集成回归，运行 `npm run test:e2e` 做桌面与移动视口的浏览器主流程检查。首次运行 E2E 前需要执行一次 `npx playwright install chromium`。
+
 如果浏览器提示 `ERR_CONNECTION_REFUSED`，说明 daemon 没启动。先看启动窗口报错。新版启动时会自动清理 pid 已不存在的 `.contextos\.daemon.lock` 残留。
 
 如果仍然提示 data directory 正在使用，先确认是不是已有 daemon 在运行：

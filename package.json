@@ -12,6 +12,8 @@
     "frontend:typecheck": "tsc -p frontend/tsconfig.json",
     "frontend:build": "npm run frontend:typecheck && vite build",
     "frontend:preview": "vite preview --host 127.0.0.1",
+    "e2e:server": "tsx scripts/start-e2e-server.ts",
+    "test:e2e": "playwright test",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
@@ -28,6 +30,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.5.5",
     "@types/react": "^19.3.0",

@@ -357,11 +357,11 @@ export function App() {
     return {
       sessionId: session.id,
       contextPack: contextPack.ok ? contextPack.value : null,
-      evidence: evidence.ok ? evidence.value.items : [],
+      evidence: evidence.ok ? evidence.value?.items ?? [] : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
-      runs: runs.ok ? runs.value.items : [],
-      activity: activity.ok ? activity.value.items : [],
+      runs: runs.ok ? runs.value?.items ?? [] : [],
+      activity: activity.ok ? activity.value?.items ?? [] : [],
       transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null
     };
   }, []);
@@ -371,7 +371,7 @@ export function App() {
     const result = await settle(fetchJson(`/api/review-items/${reviewId}/action-log`));
     return {
       reviewId,
-      items: result.ok ? result.value.items : [],
+      items: result.ok ? result.value?.items ?? [] : [],
       loading: false,
       error: result.ok ? null : result.error.message
     };
@@ -382,7 +382,7 @@ export function App() {
     const result = await settle(fetchJson(`/api/decisions/${decisionId}/versions`));
     return {
       decisionId,
-      items: result.ok ? result.value.items : [],
+      items: result.ok ? result.value?.items ?? [] : [],
       loading: false,
       error: result.ok ? null : result.error.message
     };
@@ -398,7 +398,7 @@ export function App() {
       settle(fetchJson(`/api/work-items/${workItemId}/activity`))
     ]);
     const error = !readiness.ok ? readiness.error.message : !dependencies.ok ? dependencies.error.message : !children.ok ? children.error.message : !attempts.ok ? attempts.error.message : !activity.ok ? activity.error.message : null;
-    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value.items : [], children: children.ok ? children.value.items : [], attempts: attempts.ok ? attempts.value.items : [], activity: activity.ok ? activity.value.items : [], loading: false, error };
+    return { workItemId, readiness: readiness.ok ? readiness.value : null, dependencies: dependencies.ok ? dependencies.value?.items ?? [] : [], children: children.ok ? children.value?.items ?? [] : [], attempts: attempts.ok ? attempts.value?.items ?? [] : [], activity: activity.ok ? activity.value?.items ?? [] : [], loading: false, error };
   }, []);
 
   const loadRuleDetail = useCallback(async (ruleId: string | null): Promise<{ ruleId: string; versions: AnyRecord[]; evaluations: AnyRecord[]; usage: AnyRecord | null; loading: boolean; error: string | null } | null> => {
@@ -409,7 +409,7 @@ export function App() {
       settle(fetchJson(`/api/rules/${ruleId}/usage`))
     ]);
     const error = !versions.ok ? versions.error.message : !evaluations.ok ? evaluations.error.message : !usage.ok ? usage.error.message : null;
-    return { ruleId, versions: versions.ok ? versions.value.items : [], evaluations: evaluations.ok ? evaluations.value.items : [], usage: usage.ok ? usage.value : null, loading: false, error };
+    return { ruleId, versions: versions.ok ? versions.value?.items ?? [] : [], evaluations: evaluations.ok ? evaluations.value?.items ?? [] : [], usage: usage.ok ? usage.value : null, loading: false, error };
   }, []);
 
   const loadData = useCallback(async () => {
@@ -614,10 +614,10 @@ export function App() {
       exportedAt: new Date().toISOString(),
       session,
       contextPack: contextPack.ok ? contextPack.value : null,
-      evidence: evidence.ok ? evidence.value.items : [],
+      evidence: evidence.ok ? evidence.value?.items ?? [] : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
-      activity: activity.ok ? activity.value.items : [],
+      activity: activity.ok ? activity.value?.items ?? [] : [],
       transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null,
       warnings: [
         contextPack.ok ? null : `contextPack: ${contextPack.error.message}`,
@@ -1476,13 +1476,13 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
   const decision = modal.decisionId ? data.decisions.find((item: AnyRecord) => item.id === modal.decisionId) : data.decisions[0];
-  const modalDecisionVersions = decisionVersions?.decisionId === decision?.id ? decisionVersions.items : [];
+  const modalDecisionVersions = decision && decisionVersions?.decisionId === decision.id ? decisionVersions.items : [];
   const decisionVersion = decision ? modalDecisionVersions.find((item: AnyRecord) => item.id === decision.currentVersionId) || modalDecisionVersions[0] : null;
   const workItem = modal.workItemId ? data.workItems.find((item: AnyRecord) => item.id === modal.workItemId) : data.workItems[0];
   const source = modal.sourceId ? data.contextSources.find((item: AnyRecord) => item.id === modal.sourceId) : null;
   const contextItem = modal.contextItemId ? data.contextItems.find((item: AnyRecord) => item.id === modal.contextItemId) : null;
   const selectedSnapshot = modal.sourceSnapshotId ? data.evidenceSnapshots.find((item: AnyRecord) => item.id === modal.sourceSnapshotId) : null;
-  const resumeCapsule = sessionDetails?.sessionId === session?.id ? sessionDetails.resumeCapsule : null;
+  const resumeCapsule = session && sessionDetails?.sessionId === session.id ? sessionDetails.resumeCapsule : null;
   const defaultProjectId = selectedSnapshot?.projectId || session?.projectId || project?.id || "";
   const close = () => setModal({ kind: null });
   const submit = (event: FormEvent<HTMLFormElement>) => {
