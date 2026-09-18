@@ -37,6 +37,7 @@ type SessionDetails = {
   resumeCapsule: AnyRecord | null;
   runtimeStatus: AnyRecord | null;
   activity: AnyRecord[];
+  transcriptEvents: AnyRecord | null;
 };
 
 const navGroups: Array<{ label: string; items: Array<[PageId, string, string]> }> = [
@@ -231,6 +232,18 @@ function transcriptStructure(metadata: AnyRecord | null | undefined) {
   return parts.filter(Boolean).join(" · ");
 }
 
+function transcriptEventLabel(event: AnyRecord) {
+  if (event.kind === "message") return `${String(event.role || "message").toUpperCase()} message`;
+  if (event.kind === "tool_call") return `Tool call${event.name ? ` · ${event.name}` : ""}`;
+  if (event.kind === "tool_result") return "Tool result";
+  return "Summary";
+}
+
+function transcriptEventPreview(event: AnyRecord) {
+  const value = String(event.text || event.callId || "");
+  return value.length > 220 ? `${value.slice(0, 220)}...` : value;
+}
+
 function toneForStatus(status: string | null | undefined) {
   if (["ACTIVE", "RUNNING", "READY", "SUCCEEDED", "DONE", "ACCEPTED", "RESOLVED", "VALID"].includes(String(status))) return "green";
   if (["OPEN", "DRAFT", "PROPOSED", "CREATED", "IN_PROGRESS", "IN_REVIEW"].includes(String(status))) return "blue";
@@ -330,12 +343,13 @@ export function App() {
 
   const loadSessionDetails = useCallback(async (session: AnyRecord | undefined): Promise<SessionDetails | null> => {
     if (!session) return null;
-    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity] = await Promise.all([
+    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity, transcriptEvents] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
       settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
       settle(fetchJson(`/api/sessions/${session.id}/runtime-status`)),
-      settle(fetchJson(`/api/sessions/${session.id}/activity`))
+      settle(fetchJson(`/api/sessions/${session.id}/activity`)),
+      settle(fetchJson(`/api/sessions/${session.id}/transcript-events`))
     ]);
     return {
       sessionId: session.id,
@@ -343,7 +357,8 @@ export function App() {
       evidence: evidence.ok ? evidence.value.items : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
-      activity: activity.ok ? activity.value.items : []
+      activity: activity.ok ? activity.value.items : [],
+      transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null
     };
   }, []);
 
@@ -574,12 +589,13 @@ export function App() {
   const exportSessionCapsule = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
     if (!session) throw new Error("No session is available to export");
-    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity] = await Promise.all([
+    const [contextPack, evidence, resumeCapsule, runtimeStatus, activity, transcriptEvents] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
       settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
       settle(fetchJson(`/api/sessions/${session.id}/runtime-status`)),
-      settle(fetchJson(`/api/sessions/${session.id}/activity`))
+      settle(fetchJson(`/api/sessions/${session.id}/activity`)),
+      settle(fetchJson(`/api/sessions/${session.id}/transcript-events`))
     ]);
     const capsule = {
       schemaVersion: "contextos.session-capsule.v1",
@@ -590,12 +606,14 @@ export function App() {
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
       activity: activity.ok ? activity.value.items : [],
+      transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null,
       warnings: [
         contextPack.ok ? null : `contextPack: ${contextPack.error.message}`,
         evidence.ok ? null : `evidence: ${evidence.error.message}`,
         resumeCapsule.ok ? null : `resumeCapsule: ${resumeCapsule.error.message}`,
         runtimeStatus.ok ? null : `runtimeStatus: ${runtimeStatus.error.message}`,
-        activity.ok ? null : `activity: ${activity.error.message}`
+        activity.ok ? null : `activity: ${activity.error.message}`,
+        transcriptEvents.ok ? null : `transcriptEvents: ${transcriptEvents.error.message}`
       ].filter(Boolean)
     };
     downloadJson(`contextos-session-${session.id}.json`, capsule);
@@ -967,6 +985,11 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <div className="title-sm evidence-section-title">Recent Activity</div>
             <div className="stack compact">{details.activity.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={`${item.kind}-${item.id}`}><div className="evidence-row-main"><div className="title-sm">{item.summary || item.eventType}</div><div className="muted mono">{fmtDate(item.createdAt)} · {item.kind}{item.actorType ? ` · ${item.actorType}` : ""}</div>{Object.keys(item.metadata || {}).length ? <div className="muted mono">{Object.entries(item.metadata).slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(" · ")}</div> : null}</div><Badge text={item.eventType} tone={item.kind === "AUDIT" ? "blue" : toneForStatus(item.eventType)} /></div>)}</div>
           </div> : <EmptyNote>No runtime activity has been recorded for this session yet.</EmptyNote>}
+          {details.transcriptEvents?.events?.length ? <div>
+            <div className="title-sm evidence-section-title">Transcript Events</div>
+            <div className="muted mono">{details.transcriptEvents.parserVersion || "unknown parser"} · {details.transcriptEvents.eventCount} events · evidence {details.transcriptEvents.evidenceSnapshotId}</div>
+            <div className="stack compact">{details.transcriptEvents.events.slice(0, 12).map((event: AnyRecord) => <div className="metric-row evidence-row" key={`${event.ordinal}-${event.kind}`}><div className="evidence-row-main"><div className="title-sm">{transcriptEventLabel(event)}</div><div className="muted mono">{transcriptEventPreview(event)}</div></div><Badge text={`#${event.ordinal} ${event.kind}`} tone={event.kind === "message" ? "blue" : event.kind === "summary" ? "green" : "amber"} /></div>)}</div>
+          </div> : <EmptyNote>No structured transcript events have been imported for this session yet.</EmptyNote>}
           {details.evidence.length ? <div>
             <div className="title-sm evidence-section-title">Evidence Snapshots</div>
             <div className="stack compact">{details.evidence.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><div className="row-actions"><Badge text={item.evidenceType} tone="blue" /><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${item.id}\n${item.storageRef || ""}\n${item.contentHash || ""}`)}>{icon("content_copy")}</button></div></div>)}</div>

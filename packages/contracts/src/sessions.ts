@@ -67,6 +67,32 @@ export type SessionDto = z.infer<typeof sessionDtoSchema>;
 export type ResumeCapsuleDto = z.infer<typeof resumeCapsuleDtoSchema>;
 export type TranscriptImportInput = z.infer<typeof transcriptImportInputSchema>;
 export type AdapterTranscriptImportInput = z.infer<typeof adapterTranscriptImportInputSchema>;
+export type AgentTranscriptEventDto = {
+  ordinal: number;
+  kind: "message" | "tool_call" | "tool_result" | "summary";
+  role?: "user" | "assistant" | "system";
+  text?: string;
+  name?: string;
+  callId?: string;
+};
+
+export type SessionTranscriptEventsDto = {
+  sessionId: string;
+  evidenceSnapshotId: string | null;
+  adapterId: string | null;
+  externalSessionId: string | null;
+  parserVersion: string | null;
+  sourceUpdatedAt: string | null;
+  eventCount: number;
+  eventCounts: {
+    message: number;
+    toolCall: number;
+    toolResult: number;
+    summary: number;
+  };
+  events: AgentTranscriptEventDto[];
+};
+
 export type TranscriptImportResult = {
   evidence: EvidenceSnapshotDto;
   resumeCapsule: ResumeCapsuleDto;
@@ -84,14 +110,7 @@ export type AdapterTranscriptImportResult = TranscriptImportResult & {
       toolResult: number;
       summary: number;
     };
-    events?: Array<{
-      ordinal: number;
-      kind: "message" | "tool_call" | "tool_result" | "summary";
-      role?: "user" | "assistant" | "system";
-      text?: string;
-      name?: string;
-      callId?: string;
-    }>;
+    events?: AgentTranscriptEventDto[];
     messageCount: number;
     roleCounts: {
       user: number;

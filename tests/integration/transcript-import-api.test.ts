@@ -260,6 +260,22 @@ describe("transcript import API", () => {
     const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
     expect(refreshed.json().externalSessionId).toBe(externalSessionId);
 
+    const events = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/transcript-events` });
+    expect(events.statusCode).toBe(200);
+    expect(events.json()).toMatchObject({
+      sessionId: session.id,
+      evidenceSnapshotId: result.evidence.id,
+      adapterId: "codex",
+      externalSessionId,
+      parserVersion: "codex-jsonl.v2",
+      eventCount: 2,
+      eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
+      events: [
+        expect.objectContaining({ kind: "message", role: "user" }),
+        expect.objectContaining({ kind: "message", role: "assistant" })
+      ]
+    });
+
     const repeated = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
     expect(repeated.statusCode).toBe(201);
     expect(repeated.json().adapter.reused).toBe(true);
@@ -456,6 +472,23 @@ describe("transcript import API", () => {
     );
     const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
     expect(refreshed.json().externalSessionId).toBe(externalSessionId);
+
+    const events = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/transcript-events` });
+    expect(events.statusCode).toBe(200);
+    expect(events.json()).toMatchObject({
+      sessionId: session.id,
+      evidenceSnapshotId: imported.json().evidence.id,
+      adapterId: "claude-code",
+      externalSessionId,
+      parserVersion: "claude-code-jsonl.v2",
+      eventCount: 5,
+      eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
+      events: expect.arrayContaining([
+        expect.objectContaining({ kind: "summary", text: "Claude session summary" }),
+        expect.objectContaining({ kind: "tool_call", name: "Read", callId: "tool_read" }),
+        expect.objectContaining({ kind: "tool_result", callId: "tool_read", text: "rules loaded" })
+      ])
+    });
   });
 });
 

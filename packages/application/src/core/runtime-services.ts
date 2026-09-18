@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto, ResourceActivityEventDto, RuntimeHealthDto, RuntimeJobDto, SessionInterruptRuntimeDto, SessionRunDto, SessionRuntimeStatusDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
-import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
+import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionStatus, SessionTranscriptEventsDto, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
@@ -123,6 +123,37 @@ export class ContinueSessionService {
 
   listEvidence(sessionId: string): EvidenceSnapshotDto[] {
     return this.runtime.listSessionEvidence(sessionId);
+  }
+
+  getTranscriptEvents(sessionId: string): SessionTranscriptEventsDto {
+    const transcript = this.listEvidence(sessionId)
+      .find((snapshot) => snapshot.metadata.stream === "imported-transcript" && Array.isArray(snapshot.metadata.events));
+    if (!transcript) {
+      return {
+        sessionId,
+        evidenceSnapshotId: null,
+        adapterId: null,
+        externalSessionId: null,
+        parserVersion: null,
+        sourceUpdatedAt: null,
+        eventCount: 0,
+        eventCounts: { message: 0, toolCall: 0, toolResult: 0, summary: 0 },
+        events: []
+      };
+    }
+    const metadata = transcript.metadata;
+    const events = (metadata.events as SessionTranscriptEventsDto["events"]).slice(0, 200);
+    return {
+      sessionId,
+      evidenceSnapshotId: transcript.id,
+      adapterId: typeof metadata.adapterId === "string" ? metadata.adapterId : null,
+      externalSessionId: typeof metadata.externalSessionId === "string" ? metadata.externalSessionId : null,
+      parserVersion: typeof metadata.parserVersion === "string" ? metadata.parserVersion : null,
+      sourceUpdatedAt: typeof metadata.sourceUpdatedAt === "string" ? metadata.sourceUpdatedAt : null,
+      eventCount: typeof metadata.eventCount === "number" ? metadata.eventCount : events.length,
+      eventCounts: normalizeEventCounts(metadata.eventCounts),
+      events
+    };
   }
 
   getResumeCapsule(sessionId: string): ResumeCapsuleDto {
@@ -526,4 +557,15 @@ function continueFailureCode(session: SessionDto, error: unknown): string {
   if (error instanceof ContextOsError && error.code === "NOT_FOUND") return "RESUME_SESSION_NOT_FOUND";
   if (error instanceof ContextOsError && error.code === "CONFLICT") return "RESUME_PROJECT_MISMATCH";
   return "RESUME_LAUNCH_FAILED";
+}
+
+function normalizeEventCounts(value: unknown): SessionTranscriptEventsDto["eventCounts"] {
+  if (!value || typeof value !== "object") return { message: 0, toolCall: 0, toolResult: 0, summary: 0 };
+  const counts = value as Partial<SessionTranscriptEventsDto["eventCounts"]>;
+  return {
+    message: counts.message ?? 0,
+    toolCall: counts.toolCall ?? 0,
+    toolResult: counts.toolResult ?? 0,
+    summary: counts.summary ?? 0
+  };
 }

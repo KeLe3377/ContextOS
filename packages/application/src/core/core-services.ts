@@ -3,7 +3,7 @@ import type { DecisionDto, DecisionInput, DecisionPatch, DecisionStatus, Decisio
 import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/review-items.js";
 import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
 import type { ResourceActivityEventDto, SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
-import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionInput, SessionPatch, SessionStatus, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
+import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionInput, SessionPatch, SessionStatus, SessionTranscriptEventsDto, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type {
   SqliteDecisionRepository,
@@ -54,6 +54,12 @@ export class SessionService {
     if (!this.continueSession) throw new Error("Continue session runtime is not configured");
     this.sessions.getByIdOrThrow(id);
     return this.continueSession.listEvidence(id);
+  }
+
+  transcriptEvents(id: string): SessionTranscriptEventsDto {
+    if (!this.continueSession) throw new Error("Continue session runtime is not configured");
+    this.sessions.getByIdOrThrow(id);
+    return this.continueSession.getTranscriptEvents(id);
   }
 
   getResumeCapsule(id: string): ResumeCapsuleDto {

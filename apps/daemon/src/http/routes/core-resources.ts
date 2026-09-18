@@ -31,6 +31,7 @@ export async function registerCoreResourceRoutes(
   server.get("/api/sessions/:id", async (request) => services.sessions.get(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/sessions/:id/context-pack", async (request) => services.sessions.getContextPackage(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/sessions/:id/evidence", async (request) => ({ items: services.sessions.listEvidence(paramsWithIdSchema.parse(request.params).id), page: { nextCursor: null, hasMore: false } }));
+  server.get("/api/sessions/:id/transcript-events", async (request) => services.sessions.transcriptEvents(paramsWithIdSchema.parse(request.params).id));
   server.get("/api/sessions/:id/resume-capsule", async (request) => services.sessions.getResumeCapsule(paramsWithIdSchema.parse(request.params).id));
   server.patch("/api/sessions/:id/resume-capsule", async (request) => services.sessions.patchResumeCapsule(paramsWithIdSchema.parse(request.params).id, resumeCapsulePatchSchema.parse(request.body)));
   server.get("/api/sessions/:id/runtime-status", async (request) => services.sessions.runtimeStatus(paramsWithIdSchema.parse(request.params).id));
