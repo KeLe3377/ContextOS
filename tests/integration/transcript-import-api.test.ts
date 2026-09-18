@@ -393,9 +393,9 @@ describe("transcript import API", () => {
     const externalSessionId = "claude-auto-session";
     const transcriptPath = join(projectsDir, `${externalSessionId}.jsonl`);
     const rows = [
-      { sessionId: externalSessionId, cwd: projectRoot, type: "summary", summary: "ignored" },
+      { sessionId: externalSessionId, cwd: projectRoot, type: "summary", summary: "Claude session summary" },
       { sessionId: externalSessionId, cwd: projectRoot, type: "user", message: { role: "user", content: "preserve the Claude decision" } },
-      { sessionId: externalSessionId, cwd: projectRoot, type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "the Claude decision is preserved" }] } }
+      { sessionId: externalSessionId, cwd: projectRoot, type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "the Claude decision is preserved" }, { type: "tool_use", id: "tool_read", name: "Read", input: { file: "AGENT.md" } }, { type: "tool_result", tool_use_id: "tool_read", content: "rules loaded" }] } }
     ];
     await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
     process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
@@ -430,7 +430,9 @@ describe("transcript import API", () => {
     expect(imported.json().adapter).toMatchObject({
       id: "claude-code",
       externalSessionId,
-      parserVersion: "claude-code-jsonl.v1",
+      parserVersion: "claude-code-jsonl.v2",
+      eventCount: 5,
+      eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
       messageCount: 2,
       roleCounts: { user: 1, assistant: 1 },
       turnCount: 1,
@@ -444,11 +446,13 @@ describe("transcript import API", () => {
       metadata: expect.objectContaining({
         adapterId: "claude-code",
         externalSessionId,
-        parserVersion: "claude-code-jsonl.v1"
+        parserVersion: "claude-code-jsonl.v2",
+        eventCount: 5,
+        eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 }
       })
     });
     await expect(readFile(join(tempDir, imported.json().evidence.storageRef), "utf8")).resolves.toBe(
-      "USER:\npreserve the Claude decision\n\nASSISTANT:\nthe Claude decision is preserved"
+      "SUMMARY:\nClaude session summary\n\nUSER:\npreserve the Claude decision\n\nASSISTANT:\nthe Claude decision is preserved\n\nTOOL CALL Read (tool_read):\n{\"file\":\"AGENT.md\"}\n\nTOOL RESULT (tool_read):\nrules loaded"
     );
     const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
     expect(refreshed.json().externalSessionId).toBe(externalSessionId);

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
+import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptEvent, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
@@ -145,7 +145,7 @@ export function defaultClaudeProjectsDir(): string {
 }
 
 type ClaudeTranscriptMetadata = { id: string; cwd: string };
-type ClaudeTranscriptMessage = { role: "user" | "assistant"; text: string; ordinal: number };
+type ClaudeTranscriptMessage = AgentTranscriptEvent & { kind: "message"; role: "user" | "assistant"; text: string };
 
 function readTranscriptMetadata(path: string): ClaudeTranscriptMetadata | null {
   for (const line of readInitialLines(path, 64)) {
@@ -166,42 +166,55 @@ function parseClaudeTranscript(path: string, externalSessionId: string): AgentTr
   if (file.size > 50 * 1024 * 1024) {
     throw new ContextOsError("INVALID_ARGUMENT", "Claude Code transcript exceeds the 50 MB import limit", { externalSessionId });
   }
-  const messages: ClaudeTranscriptMessage[] = [];
+  const events: AgentTranscriptEvent[] = [];
   let ordinal = 0;
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     if (!line) continue;
     try {
       const row = JSON.parse(line) as ClaudeJsonRow;
-      const role = readMessageRole(row);
-      if (!role) continue;
-      ordinal += 1;
-      const text = readMessageText(row).trim();
-      if (text) messages.push({ role, text, ordinal });
+      const nextEvents = readClaudeEvents(row, ordinal);
+      if (!nextEvents.length) continue;
+      events.push(...nextEvents);
+      ordinal += nextEvents.length;
     } catch {
       // A crash can leave one partial JSONL record; valid records remain importable.
     }
   }
+  const messages = events.filter((event): event is ClaudeTranscriptMessage => event.kind === "message" && (event.role === "user" || event.role === "assistant") && Boolean(event.text));
   if (messages.length === 0) {
     throw new ContextOsError("INVALID_ARGUMENT", "Claude Code transcript contains no user or assistant messages", { externalSessionId });
   }
 
-  const selected = selectMessages(messages);
-  const selectedMessages = selected.truncatedOversized ? [messages.at(-1)!] : messages.slice(messages.length - selected.formatted.length);
+  const selected = selectEvents(events);
+  const selectedEvents = selected.truncatedOversized ? [events.at(-1)!] : events.slice(events.length - selected.formatted.length);
+  const selectedMessages = selectedEvents.filter((event): event is ClaudeTranscriptMessage => event.kind === "message" && (event.role === "user" || event.role === "assistant") && Boolean(event.text));
   const roleCounts = selectedMessages.reduce((counts, message) => {
     counts[message.role] += 1;
     return counts;
   }, { user: 0, assistant: 0 });
+  const eventCounts = selectedEvents.reduce((counts, event) => {
+    if (event.kind === "message") counts.message += 1;
+    if (event.kind === "tool_call") counts.toolCall += 1;
+    if (event.kind === "tool_result") counts.toolResult += 1;
+    if (event.kind === "summary") counts.summary += 1;
+    return counts;
+  }, { message: 0, toolCall: 0, toolResult: 0, summary: 0 });
+  const messageOrdinalStart = selectedMessages[0] ? messages.findIndex((message) => message === selectedMessages[0]) + 1 : 1;
+  const messageOrdinalEnd = selectedMessages.at(-1) ? messages.findIndex((message) => message === selectedMessages.at(-1)) + 1 : messages.length;
   return {
     externalSessionId,
     contentText: selected.formatted.join("\n\n"),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "claude-code-jsonl.v1",
-    messageCount: selected.formatted.length,
+    parserVersion: "claude-code-jsonl.v2",
+    eventCount: selectedEvents.length,
+    eventCounts,
+    events: selectedEvents,
+    messageCount: selectedMessages.length,
     roleCounts,
     turnCount: roleCounts.user,
-    messageOrdinalStart: selectedMessages[0]!.ordinal,
-    messageOrdinalEnd: selectedMessages.at(-1)!.ordinal,
-    truncated: selected.truncatedOversized || selected.formatted.length < messages.length
+    messageOrdinalStart,
+    messageOrdinalEnd,
+    truncated: selected.truncatedOversized || selectedEvents.length < events.length
   };
 }
 
@@ -211,27 +224,52 @@ type ClaudeJsonRow = {
   cwd?: string;
   type?: string;
   role?: string;
+  toolUseId?: string;
+  tool_use_id?: string;
+  name?: string;
+  summary?: string;
   message?: {
     role?: string;
-    content?: string | Array<{ type?: string; text?: string; content?: string }>;
+    content?: string | Array<{ type?: string; text?: string; content?: string; id?: string; tool_use_id?: string; name?: string; input?: unknown }>;
   };
-  content?: string | Array<{ type?: string; text?: string; content?: string }>;
+  content?: string | Array<{ type?: string; text?: string; content?: string; id?: string; tool_use_id?: string; name?: string; input?: unknown }>;
 };
 
 function readSessionId(row: ClaudeJsonRow): string | undefined {
   return row.sessionId ?? row.session_id;
 }
 
-function readMessageRole(row: ClaudeJsonRow): "user" | "assistant" | null {
+function readClaudeEvents(row: ClaudeJsonRow, previousOrdinal: number): AgentTranscriptEvent[] {
+  if (row.type === "summary" && row.summary?.trim()) return [{ ordinal: previousOrdinal + 1, kind: "summary", text: row.summary.trim() }];
   const role = row.message?.role ?? row.role ?? row.type;
-  return role === "user" || role === "assistant" ? role : null;
+  if (role !== "user" && role !== "assistant") return [];
+  const content = row.message?.content ?? row.content;
+  const events: AgentTranscriptEvent[] = [];
+  const text = messageText(content).trim();
+  if (text) events.push({ ordinal: previousOrdinal + events.length + 1, kind: "message", role, text });
+  for (const item of Array.isArray(content) ? content : []) {
+    if (item.type === "tool_use") {
+      events.push({
+        ordinal: previousOrdinal + events.length + 1,
+        kind: "tool_call",
+        name: item.name ?? "tool",
+        callId: item.id,
+        text: stringifyToolPayload(item.input ?? item.content ?? item.text)
+      });
+    }
+    if (item.type === "tool_result") {
+      events.push({
+        ordinal: previousOrdinal + events.length + 1,
+        kind: "tool_result",
+        callId: item.tool_use_id,
+        text: stringifyToolPayload(item.content ?? item.text)
+      });
+    }
+  }
+  return events;
 }
 
-function readMessageText(row: ClaudeJsonRow): string {
-  return contentToText(row.message?.content ?? row.content);
-}
-
-function contentToText(content: ClaudeJsonRow["content"]): string {
+function messageText(content: ClaudeJsonRow["content"]): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -240,27 +278,36 @@ function contentToText(content: ClaudeJsonRow["content"]): string {
     .join("\n");
 }
 
-function selectMessages(messages: ClaudeTranscriptMessage[]): { formatted: string[]; truncatedOversized: boolean } {
+function stringifyToolPayload(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  return JSON.stringify(value);
+}
+
+function selectEvents(events: AgentTranscriptEvent[]): { formatted: string[]; truncatedOversized: boolean } {
   const formatted: string[] = [];
   let length = 0;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    const text = formatTranscriptMessage(message);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    const text = formatTranscriptEvent(event);
     const addedLength = text.length + (formatted.length ? 2 : 0);
     if (length + addedLength > 1_000_000) break;
     formatted.unshift(text);
     length += addedLength;
   }
   if (formatted.length > 0) return { formatted, truncatedOversized: false };
-  const latest = messages.at(-1)!;
+  const latest = events.at(-1)!;
   return {
-    formatted: [formatTranscriptMessage({ ...latest, text: latest.text.slice(-1_000_000) })],
+    formatted: [formatTranscriptEvent({ ...latest, text: latest.text?.slice(-1_000_000) })],
     truncatedOversized: true
   };
 }
 
-function formatTranscriptMessage(message: Pick<ClaudeTranscriptMessage, "role" | "text">): string {
-  return `${message.role.toUpperCase()}:\n${message.text}`;
+function formatTranscriptEvent(event: AgentTranscriptEvent): string {
+  if (event.kind === "message") return `${event.role?.toUpperCase() ?? "MESSAGE"}:\n${event.text ?? ""}`;
+  if (event.kind === "tool_call") return `TOOL CALL ${event.name ?? "tool"}${event.callId ? ` (${event.callId})` : ""}:\n${event.text ?? ""}`;
+  if (event.kind === "tool_result") return `TOOL RESULT${event.callId ? ` (${event.callId})` : ""}:\n${event.text ?? ""}`;
+  return `SUMMARY:\n${event.text ?? ""}`;
 }
 
 function listJsonlFiles(root: string): string[] {

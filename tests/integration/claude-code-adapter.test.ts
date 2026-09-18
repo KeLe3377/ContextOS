@@ -37,8 +37,10 @@ describe("ClaudeCodeAdapter", () => {
       const latest = adapter.importTranscript({ cwd: projectRoot });
       expect(latest).toMatchObject({
         externalSessionId: "claude-latest",
-        contentText: "USER:\nnew question\n\nASSISTANT:\nnew answer",
-        parserVersion: "claude-code-jsonl.v1",
+        contentText: "SUMMARY:\nSummary for claude-latest\n\nUSER:\nnew question\n\nASSISTANT:\nnew answer\n\nTOOL CALL shell (tool_shell):\n{\"command\":\"npm test\"}\n\nTOOL RESULT (tool_shell):\ntool output",
+        parserVersion: "claude-code-jsonl.v2",
+        eventCount: 5,
+        eventCounts: { message: 2, toolCall: 1, toolResult: 1, summary: 1 },
         messageCount: 2,
         roleCounts: { user: 1, assistant: 1 },
         turnCount: 1,
@@ -46,6 +48,11 @@ describe("ClaudeCodeAdapter", () => {
         messageOrdinalEnd: 2,
         truncated: false
       });
+      expect(latest.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "summary", text: "Summary for claude-latest" }),
+        expect.objectContaining({ kind: "tool_call", name: "shell", callId: "tool_shell" }),
+        expect.objectContaining({ kind: "tool_result", callId: "tool_shell", text: "tool output" })
+      ]));
 
       const explicit = adapter.importTranscript({ cwd: projectRoot, externalSessionId: "claude-old" });
       expect(explicit.externalSessionId).toBe("claude-old");
@@ -65,9 +72,9 @@ describe("ClaudeCodeAdapter", () => {
 
 async function writeClaudeTranscript(path: string, id: string, cwd: string, userText: string, assistantText: string): Promise<void> {
   const rows = [
-    { sessionId: id, cwd, type: "summary", summary: "ignored" },
+    { sessionId: id, cwd, type: "summary", summary: `Summary for ${id}` },
     { sessionId: id, cwd, type: "user", message: { role: "user", content: userText } },
-    { sessionId: id, cwd, type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", text: "tool output" }, { type: "text", text: assistantText }] } }
+    { sessionId: id, cwd, type: "assistant", message: { role: "assistant", content: [{ type: "text", text: assistantText }, { type: "tool_use", id: "tool_shell", name: "shell", input: { command: "npm test" } }, { type: "tool_result", tool_use_id: "tool_shell", content: "tool output" }] } }
   ];
   await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
 }
