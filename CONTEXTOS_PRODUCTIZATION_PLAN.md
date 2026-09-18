@@ -460,4 +460,9 @@ Phase 11 user-flow E2E increment completed on 2026-09-18:
 - Added Session and Settings screenshots plus horizontal-overflow assertions for desktop and mobile viewports.
 - Documented the stable build, integration-test, and isolated browser-test commands in README.
 
+Phase 11 Work Item E2E increment completed on 2026-09-18:
+
+- Added browser coverage for Work Item creation, readiness transition, linked Session creation, Agent Continue, and failed-attempt reconciliation.
+- Added desktop and mobile Work Item attempt screenshots and horizontal-overflow checks.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

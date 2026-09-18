@@ -232,6 +232,7 @@ h2, h3, p { margin: 0; }
 .action-notice.success { color: var(--green); }
 .action-notice.error { color: var(--red); }
 .grid { display: grid; gap: 16px; }
+.grid > *, .stack { min-width: 0; }
 .cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
 .span-8 { grid-column: span 8; }
 .span-4 { grid-column: span 4; }
@@ -403,7 +404,13 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
   padding: 16px;
 }
 .dialog-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   width: min(460px, calc(100vw - 32px));
+  max-width: 100%;
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   color: var(--text);
@@ -413,12 +420,12 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
 .dialog-card.evidence-detail { width: min(920px, calc(100vw - 32px)); }
 .dialog-form { display: flex; flex-direction: column; }
 .dialog-head, .dialog-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
-.dialog-head { border-bottom: 1px solid var(--border); }
+.dialog-head { flex: 0 0 auto; border-bottom: 1px solid var(--border); }
 .dialog-head h2 { font-size: 16px; }
-.dialog-actions { justify-content: flex-end; border-top: 1px solid var(--border); background: var(--bg); }
-.dialog-fields { display: grid; gap: 14px; padding: 16px; }
-.dialog-fields label { display: grid; gap: 6px; color: var(--text-2); font-weight: 600; }
-.dialog-fields .field, .dialog-fields select { width: 100%; }
+.dialog-actions { flex: 0 0 auto; justify-content: flex-end; border-top: 1px solid var(--border); background: var(--bg); }
+.dialog-fields { display: grid; min-width: 0; min-height: 0; gap: 14px; padding: 16px; overflow-y: auto; overscroll-behavior: contain; }
+.dialog-fields label { display: grid; min-width: 0; gap: 6px; color: var(--text-2); font-weight: 600; }
+.dialog-fields .field, .dialog-fields select { width: 100%; min-width: 0; }
 .compact-detail { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .evidence-hash { overflow-wrap: anywhere; }
 .evidence-content, .evidence-metadata {

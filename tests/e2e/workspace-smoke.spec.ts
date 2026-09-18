@@ -53,6 +53,67 @@ test("main workspace exposes failed session history across desktop and mobile", 
   await page.screenshot({ path: testInfo.outputPath("workspace.png"), fullPage: true });
 });
 
+test("work item agent attempt reconciles a failed linked session", async ({ page, request }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem("contextos.apiBase", "http://127.0.0.1:4722"));
+  const suffix = `work-${testInfo.project.name}-${Date.now()}`;
+  const projectName = `E2E ${suffix}`;
+  const workTitle = `Execute ${suffix}`;
+
+  await page.goto("/#projects");
+  await page.getByRole("button", { name: "Add Project" }).click();
+  await page.getByLabel("Project name").fill(projectName);
+  await page.getByLabel("Root path").fill(process.cwd());
+  await page.getByRole("button", { name: "Create Project" }).click();
+  await expect(page.getByText(projectName, { exact: true }).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Work Items", exact: true }).click();
+  await page.getByRole("button", { name: "Create Item" }).last().click();
+  await page.getByLabel("Project").selectOption({ label: `${projectName} · ${process.cwd()}` });
+  await page.getByLabel("Title").fill(workTitle);
+  await page.getByLabel("Description").fill("Exercise the linked agent execution loop");
+  await page.getByLabel("Acceptance").fill("Attempt is visible\nFailure is reconciled");
+  await page.getByRole("button", { name: "Create Item" }).last().click();
+  await expect(page.getByText(workTitle, { exact: true }).first()).toBeVisible();
+  const workItemRow = page.getByRole("row").filter({ hasText: workTitle });
+  await workItemRow.getByTitle("View work detail").click();
+
+  const readyButton = page.getByRole("button", { name: "Ready", exact: true });
+  await expect(readyButton).toBeEnabled();
+  await readyButton.click();
+  await expect(page.getByText("Work item marked ready", { exact: true })).toBeVisible();
+  const startSessionButton = page.getByRole("button", { name: "Start Session", exact: true });
+  await expect(startSessionButton).toBeEnabled();
+  await startSessionButton.click();
+  await expect(page.getByText("Work item session started", { exact: true })).toBeVisible();
+  await expect(page.getByText("Work:", { exact: false }).first()).toBeVisible();
+  await page.getByTitle("Open linked session").first().click();
+
+  await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  const sessionTitle = `Work: ${workTitle}`;
+  const linkedSession = await waitForListItem(request, `/api/sessions?q=${encodeURIComponent(sessionTitle)}`);
+  await expect.poll(async () => (await request.get(`/api/sessions/${linkedSession.id}`)).json()).toMatchObject({ status: "FAILED" });
+
+  await page.getByRole("button", { name: "Work Items", exact: true }).click();
+  await page.getByTitle("Refresh").click();
+  await expect(page.getByRole("heading", { name: "Work Items" })).toBeVisible();
+  await expect(page.getByText(workTitle, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Agent Attempts", { exact: true })).toBeVisible();
+  await expect(page.getByText("PROCESS_EXITED", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("FAILED", { exact: true }).first()).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath("work-item-attempt.png"), fullPage: true });
+});
+
+async function waitForListItem(request: import("@playwright/test").APIRequestContext, path: string): Promise<Record<string, any>> {
+  await expect.poll(async () => {
+    const response = await request.get(path);
+    return (await response.json()).items[0] ?? null;
+  }).not.toBeNull();
+  const response = await request.get(path);
+  return (await response.json()).items[0];
+}
+
 async function expectNoHorizontalOverflow(page: import("@playwright/test").Page): Promise<void> {
   await expect.poll(() => page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")).toBe(true);
 }
