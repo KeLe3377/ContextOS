@@ -201,6 +201,7 @@ describe("transcript import API", () => {
     const rows = [
       { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
       { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "preserve the API decision" }] } },
+      ...Array.from({ length: 203 }, (_, index) => ({ type: "response_item", payload: { type: "custom_tool_call", name: "inspect", call_id: `call_${index + 1}`, input: `item ${index + 1}` } })),
       { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "the decision is preserved" }] } }
     ];
     await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
@@ -230,8 +231,8 @@ describe("transcript import API", () => {
       id: "codex",
       externalSessionId,
       parserVersion: "codex-jsonl.v3",
-      eventCount: 2,
-      eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
+      eventCount: 205,
+      eventCounts: { message: 2, toolCall: 203, toolResult: 0, summary: 0 },
       messageCount: 2,
       roleCounts: { user: 1, assistant: 1 },
       turnCount: 1,
@@ -246,17 +247,18 @@ describe("transcript import API", () => {
       adapterId: "codex",
       externalSessionId,
       parserVersion: "codex-jsonl.v3",
-      eventCount: 2,
-      eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
+      eventCount: 205,
+      eventCounts: { message: 2, toolCall: 203, toolResult: 0, summary: 0 },
       messageCount: 2,
       roleCounts: { user: 1, assistant: 1 },
       turnCount: 1,
       messageOrdinalStart: 1,
       messageOrdinalEnd: 2
     });
-    await expect(readFile(join(tempDir, result.evidence.storageRef), "utf8")).resolves.toBe(
-      "USER:\npreserve the API decision\n\nASSISTANT:\nthe decision is preserved"
-    );
+    const storedTranscript = await readFile(join(tempDir, result.evidence.storageRef), "utf8");
+    expect(storedTranscript).toContain("USER:\npreserve the API decision");
+    expect(storedTranscript).toContain("TOOL CALL inspect (call_203):\nitem 203");
+    expect(storedTranscript).toContain("ASSISTANT:\nthe decision is preserved");
     const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
     expect(refreshed.json().externalSessionId).toBe(externalSessionId);
 
@@ -268,13 +270,15 @@ describe("transcript import API", () => {
       adapterId: "codex",
       externalSessionId,
       parserVersion: "codex-jsonl.v3",
-      eventCount: 2,
-      eventCounts: { message: 2, toolCall: 0, toolResult: 0, summary: 0 },
-      events: [
-        expect.objectContaining({ kind: "message", role: "user" }),
-        expect.objectContaining({ kind: "message", role: "assistant" })
-      ]
+      eventCount: 205,
+      returnedEventCount: 200,
+      eventsTruncated: true,
+      transcriptTruncated: false,
+      eventCounts: { message: 2, toolCall: 203, toolResult: 0, summary: 0 }
     });
+    expect(events.json().events).toHaveLength(200);
+    expect(events.json().events[0]).toMatchObject({ ordinal: 6, kind: "tool_call", callId: "call_5" });
+    expect(events.json().events.at(-1)).toMatchObject({ ordinal: 205, kind: "message", role: "assistant" });
 
     const repeated = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
     expect(repeated.statusCode).toBe(201);

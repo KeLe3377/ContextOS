@@ -471,4 +471,11 @@ Phase 10 Codex transcript compatibility increment completed on 2026-09-18:
 - Normalized Codex reasoning summaries into transcript summary events, including `summary_text` content blocks.
 - Verified the parser against fixed integration fixtures and a read-only metadata probe of a real local Codex transcript.
 
+Phase 10 transcript event window increment completed on 2026-09-18:
+
+- Changed Session transcript detail to return the latest 200 normalized events instead of the oldest 200.
+- Exposed returned-event counts plus separate event-window and import-size truncation flags.
+- Updated Session detail to show the latest 12 events and explain when the display comes from a truncated window or transcript.
+- Covered the boundary with a 205-event Codex transcript integration test.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

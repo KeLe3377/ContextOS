@@ -84,6 +84,9 @@ export type SessionTranscriptEventsDto = {
   parserVersion: string | null;
   sourceUpdatedAt: string | null;
   eventCount: number;
+  returnedEventCount: number;
+  eventsTruncated: boolean;
+  transcriptTruncated: boolean;
   eventCounts: {
     message: number;
     toolCall: number;

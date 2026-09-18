@@ -137,12 +137,17 @@ export class ContinueSessionService {
         parserVersion: null,
         sourceUpdatedAt: null,
         eventCount: 0,
+        returnedEventCount: 0,
+        eventsTruncated: false,
+        transcriptTruncated: false,
         eventCounts: { message: 0, toolCall: 0, toolResult: 0, summary: 0 },
         events: []
       };
     }
     const metadata = transcript.metadata;
-    const events = (metadata.events as SessionTranscriptEventsDto["events"]).slice(0, 200);
+    const allEvents = metadata.events as SessionTranscriptEventsDto["events"];
+    const events = allEvents.slice(-200);
+    const eventCount = typeof metadata.eventCount === "number" ? metadata.eventCount : allEvents.length;
     return {
       sessionId,
       evidenceSnapshotId: transcript.id,
@@ -150,7 +155,10 @@ export class ContinueSessionService {
       externalSessionId: typeof metadata.externalSessionId === "string" ? metadata.externalSessionId : null,
       parserVersion: typeof metadata.parserVersion === "string" ? metadata.parserVersion : null,
       sourceUpdatedAt: typeof metadata.sourceUpdatedAt === "string" ? metadata.sourceUpdatedAt : null,
-      eventCount: typeof metadata.eventCount === "number" ? metadata.eventCount : events.length,
+      eventCount,
+      returnedEventCount: events.length,
+      eventsTruncated: events.length < eventCount,
+      transcriptTruncated: metadata.transcriptTruncated === true,
       eventCounts: normalizeEventCounts(metadata.eventCounts),
       events
     };
