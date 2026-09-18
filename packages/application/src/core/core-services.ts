@@ -4,7 +4,7 @@ import type { ReviewItemDto, ReviewItemInput } from "../../../contracts/src/revi
 import type { SessionContinueRuntime, ContinueSessionService } from "./runtime-services.js";
 import type { ResourceActivityEventDto, SessionInterruptRuntimeDto, SessionRuntimeStatusDto } from "../../../contracts/src/runtime.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionInput, SessionPatch, SessionStatus, SessionTranscriptEventsDto, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
-import type { WorkItemAttemptDto, WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemStartSessionInput, WorkItemStartSessionResult, WorkItemStatus } from "../../../contracts/src/work-items.js";
+import type { WorkItemAttemptDto, WorkItemBlockInput, WorkItemDependencyDto, WorkItemDto, WorkItemInput, WorkItemPatch, WorkItemReadinessDto, WorkItemResolveBlockerInput, WorkItemStartSessionInput, WorkItemStartSessionResult, WorkItemStatus } from "../../../contracts/src/work-items.js";
 import type {
   SqliteDecisionRepository,
   SqliteReviewItemRepository,
@@ -219,9 +219,12 @@ export class WorkItemService {
   }
 
   readiness(id: string): WorkItemReadinessDto {
-    this.workItems.getByIdOrThrow(id);
+    const item = this.workItems.getByIdOrThrow(id);
     const blockers = this.workItems.listDependencies(id).filter((dependency) => dependency.status !== "DONE");
-    return { ready: blockers.length === 0, blockers };
+    const blockerReason = item.status === "BLOCKED" && typeof item.readinessState.blocker === "object" && item.readinessState.blocker !== null
+      ? String((item.readinessState.blocker as Record<string, unknown>).reason || "Blocked")
+      : null;
+    return { ready: blockers.length === 0 && blockerReason === null, blockerReason, blockers };
   }
 
   dependencies(id: string): WorkItemDependencyDto[] {
@@ -264,13 +267,23 @@ export class WorkItemService {
     return { workItem: this.workItems.getByIdOrThrow(id), attempt, session };
   }
 
-  transition(id: string, action: "mark-ready" | "start" | "block" | "resolve-blocker" | "send-to-review" | "complete" | "reopen" | "cancel", expectedRevision: number): WorkItemDto {
+  block(id: string, input: WorkItemBlockInput): WorkItemDto {
+    const current = this.workItems.getByIdOrThrow(id);
+    assertTransition("Work Item", current.status, "block", ["IN_PROGRESS"]);
+    return this.workItems.updateBlockState(id, "BLOCKED", input.expectedRevision, { reason: input.reason }, nowMs());
+  }
+
+  resolveBlocker(id: string, input: WorkItemResolveBlockerInput): WorkItemDto {
+    const current = this.workItems.getByIdOrThrow(id);
+    assertTransition("Work Item", current.status, "resolve-blocker", ["BLOCKED"]);
+    return this.workItems.updateBlockState(id, "IN_PROGRESS", input.expectedRevision, { resolution: input.resolution }, nowMs());
+  }
+
+  transition(id: string, action: "mark-ready" | "start" | "send-to-review" | "complete" | "reopen" | "cancel", expectedRevision: number): WorkItemDto {
     const current = this.workItems.getByIdOrThrow(id);
     const allowed: Record<typeof action, WorkItemStatus[]> = {
       "mark-ready": ["BACKLOG"],
       start: ["READY"],
-      block: ["IN_PROGRESS"],
-      "resolve-blocker": ["BLOCKED"],
       "send-to-review": ["IN_PROGRESS"],
       complete: ["IN_PROGRESS", "IN_REVIEW"],
       reopen: ["DONE", "CANCELED"],
@@ -283,8 +296,6 @@ export class WorkItemService {
     const statusByAction: Record<typeof action, WorkItemStatus> = {
       "mark-ready": "READY",
       start: "IN_PROGRESS",
-      block: "BLOCKED",
-      "resolve-blocker": "IN_PROGRESS",
       "send-to-review": "IN_REVIEW",
       complete: "DONE",
       reopen: "BACKLOG",

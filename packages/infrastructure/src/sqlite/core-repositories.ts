@@ -375,6 +375,31 @@ export class SqliteWorkItemRepository {
     ensureChanged(result.changes, this.getById(id), "Work Item", id, expectedRevision);
     return this.getByIdOrThrow(id);
   }
+
+  updateBlockState(id: string, status: "BLOCKED" | "IN_PROGRESS", expectedRevision: number, input: { reason?: string; resolution?: string }, now: number): WorkItemDto {
+    const before = this.getById(id);
+    if (!before) throw new ContextOsError("NOT_FOUND", "Work Item not found", { id });
+    const currentBlocker = typeof before.readinessState.blocker === "object" && before.readinessState.blocker !== null
+      ? before.readinessState.blocker as Record<string, unknown>
+      : {};
+    const blocker = status === "BLOCKED"
+      ? { reason: input.reason, blockedAt: new Date(now).toISOString(), resolution: null, resolvedAt: null }
+      : { ...currentBlocker, resolution: input.resolution, resolvedAt: new Date(now).toISOString() };
+    const readinessState = { ...before.readinessState, blocker };
+    const eventType = status === "BLOCKED" ? "WORK_ITEM_BLOCKED" : "WORK_ITEM_BLOCKER_RESOLVED";
+    const summary = status === "BLOCKED" ? input.reason! : input.resolution!;
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE work_items SET status = ?, readiness_state = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(status, JSON.stringify(readinessState), now, id, expectedRevision);
+      ensureChanged(result.changes, before, "Work Item", id, expectedRevision);
+      const metadata = JSON.stringify({ beforeStatus: before.status, afterStatus: status, blocker });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'WORK_ITEM', ?, ?, ?, ?, ?)")
+        .run(newId("act"), before.projectId, id, eventType, summary, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'WORK_ITEM', ?, ?, ?, ?, ?)")
+        .run(newId("audit"), before.projectId, id, eventType, JSON.stringify(before), JSON.stringify({ status, readinessState }), now);
+    })();
+    return this.getByIdOrThrow(id);
+  }
 }
 
 function mapWorkItem(row: WorkItemRow): WorkItemDto {

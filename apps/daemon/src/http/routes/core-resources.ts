@@ -5,7 +5,7 @@ import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
 import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
 import { adapterTranscriptImportInputSchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
-import { workItemInputSchema, workItemPatchSchema, workItemStartSessionSchema } from "../../../../../packages/contracts/src/work-items.js";
+import { workItemBlockSchema, workItemInputSchema, workItemPatchSchema, workItemResolveBlockerSchema, workItemStartSessionSchema } from "../../../../../packages/contracts/src/work-items.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
 const listWithProjectSchema = listQuerySchema.extend({ projectId: z.string().optional() });
@@ -108,7 +108,15 @@ export async function registerCoreResourceRoutes(
     reply.code(201);
     return result;
   });
-  for (const action of ["mark-ready", "start", "block", "resolve-blocker", "send-to-review", "complete", "reopen", "cancel"] as const) {
+  server.post("/api/work-items/:id/block", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    return services.workItems.block(id, workItemBlockSchema.parse(request.body));
+  });
+  server.post("/api/work-items/:id/resolve-blocker", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    return services.workItems.resolveBlocker(id, workItemResolveBlockerSchema.parse(request.body));
+  });
+  for (const action of ["mark-ready", "start", "send-to-review", "complete", "reopen", "cancel"] as const) {
     server.post(`/api/work-items/:id/${action}`, async (request) => {
       const { id } = paramsWithIdSchema.parse(request.params);
       const { expectedRevision } = expectedRevisionSchema.parse(request.body);

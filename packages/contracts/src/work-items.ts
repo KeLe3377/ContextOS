@@ -30,6 +30,16 @@ export const workItemStartSessionSchema = z.object({
   expectedRevision: z.number().int().positive()
 });
 
+export const workItemBlockSchema = z.object({
+  reason: z.string().trim().min(1),
+  expectedRevision: z.number().int().positive()
+});
+
+export const workItemResolveBlockerSchema = z.object({
+  resolution: z.string().trim().min(1),
+  expectedRevision: z.number().int().positive()
+});
+
 export const workItemDependencyDtoSchema = z.object({
   workItemId: z.string(),
   dependsOnId: z.string(),
@@ -39,6 +49,7 @@ export const workItemDependencyDtoSchema = z.object({
 
 export const workItemReadinessDtoSchema = z.object({
   ready: z.boolean(),
+  blockerReason: z.string().nullable(),
   blockers: z.array(workItemDependencyDtoSchema)
 });
 
@@ -58,6 +69,8 @@ export type WorkItemStatus = z.infer<typeof workItemStatusSchema>;
 export type WorkItemInput = z.infer<typeof workItemInputSchema>;
 export type WorkItemPatch = z.infer<typeof workItemPatchSchema>;
 export type WorkItemStartSessionInput = z.infer<typeof workItemStartSessionSchema>;
+export type WorkItemBlockInput = z.infer<typeof workItemBlockSchema>;
+export type WorkItemResolveBlockerInput = z.infer<typeof workItemResolveBlockerSchema>;
 export type WorkItemDto = z.infer<typeof workItemDtoSchema>;
 export type WorkItemDependencyDto = z.infer<typeof workItemDependencyDtoSchema>;
 export type WorkItemReadinessDto = z.infer<typeof workItemReadinessDtoSchema>;

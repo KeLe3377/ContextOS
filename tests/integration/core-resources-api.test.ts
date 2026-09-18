@@ -147,13 +147,57 @@ describe("core resource APIs", () => {
     expect(started.statusCode).toBe(200);
     expect(started.json().status).toBe("IN_PROGRESS");
 
+    const missingReason = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${workItem.id}/block`,
+      payload: { reason: "", expectedRevision: started.json().revision }
+    });
+    expect(missingReason.statusCode).toBe(400);
+
+    const blocked = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${workItem.id}/block`,
+      payload: { reason: "Waiting for the upstream schema", expectedRevision: started.json().revision }
+    });
+    expect(blocked.statusCode).toBe(200);
+    expect(blocked.json()).toMatchObject({
+      status: "BLOCKED",
+      readinessState: { blocker: { reason: "Waiting for the upstream schema", resolution: null } }
+    });
+    const blockedReadiness = await server!.inject({ method: "GET", url: `/api/work-items/${workItem.id}/readiness` });
+    expect(blockedReadiness.json()).toMatchObject({ ready: false, blockerReason: "Waiting for the upstream schema" });
+
+    const resumed = await server!.inject({
+      method: "POST",
+      url: `/api/work-items/${workItem.id}/resolve-blocker`,
+      payload: { resolution: "Upstream schema was merged", expectedRevision: blocked.json().revision }
+    });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({
+      status: "IN_PROGRESS",
+      readinessState: { blocker: { reason: "Waiting for the upstream schema", resolution: "Upstream schema was merged" } }
+    });
+    const resumedReadiness = await server!.inject({ method: "GET", url: `/api/work-items/${workItem.id}/readiness` });
+    expect(resumedReadiness.json()).toMatchObject({ ready: true, blockerReason: null });
+
     const done = await server!.inject({
       method: "POST",
       url: `/api/work-items/${workItem.id}/complete`,
-      payload: { expectedRevision: started.json().revision }
+      payload: { expectedRevision: resumed.json().revision }
     });
     expect(done.statusCode).toBe(200);
     expect(done.json().status).toBe("DONE");
+
+    const db = new Database(join(tempDir!, "contextos.sqlite"), { readonly: true });
+    try {
+      const activity = db.prepare("SELECT event_type AS eventType FROM activity_events WHERE resource_id = ? ORDER BY created_at, id").all(workItem.id);
+      expect(activity).toEqual(expect.arrayContaining([
+        { eventType: "WORK_ITEM_BLOCKED" },
+        { eventType: "WORK_ITEM_BLOCKER_RESOLVED" }
+      ]));
+    } finally {
+      db.close();
+    }
   });
 
   test("starts an agent session from a ready work item and records the attempt", async () => {
@@ -475,4 +519,3 @@ async function waitForSessionStatus(sessionId: string, status: string): Promise<
   }
   throw new Error(`Session ${sessionId} did not reach ${status}`);
 }
-

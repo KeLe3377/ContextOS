@@ -396,6 +396,13 @@ Phase 6 execution-loop increment completed on 2026-09-18:
 - Added Work Item activity and audit records for attempt lifecycle changes.
 - Added direct navigation from a Work Item attempt to its linked Session, with completion time and run reference visible in the Work detail workspace.
 
+Phase 6 blocker-flow increment completed on 2026-09-18:
+
+- Required a written blocker reason when moving an in-progress Work Item to `BLOCKED`.
+- Added explicit blocker resolution with a written resolution before returning work to `IN_PROGRESS`.
+- Persisted blocker history in readiness state and recorded both transitions in Work Item activity and audit history.
+- Added blocker detail and Block/Resolve Blocker dialogs to the Work Item workspace.
+
 Phase 7 first increment completed on 2026-09-18:
 
 - Added Rules detail workspace with current version, validation state, enforcement, effect, scope, usage, versions, and recent evaluations.
