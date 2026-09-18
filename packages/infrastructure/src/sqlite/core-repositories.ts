@@ -335,9 +335,17 @@ export class SqliteReviewItemRepository {
   }
 
   assign(id: string, reviewerId: string, expectedRevision: number, now: number): ReviewItemDto {
-    const result = this.db.prepare("UPDATE review_items SET reviewer_id = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
-      .run(reviewerId, now, id, expectedRevision);
-    ensureChanged(result.changes, this.getById(id), "Review Item", id, expectedRevision);
+    const before = this.getById(id);
+    this.db.transaction(() => {
+      const result = this.db.prepare("UPDATE review_items SET reviewer_id = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
+        .run(reviewerId, now, id, expectedRevision);
+      ensureChanged(result.changes, before, "Review Item", id, expectedRevision);
+      if (before) {
+        const after = this.getByIdOrThrow(id);
+        this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'REVIEW_ITEM', ?, 'ASSIGN', ?, ?, ?)")
+          .run(newId("audit"), after.projectId, id, JSON.stringify(before), JSON.stringify(after), now);
+      }
+    })();
     return this.getByIdOrThrow(id);
   }
 
@@ -348,10 +356,11 @@ export class SqliteReviewItemRepository {
       const result = this.db.prepare("UPDATE review_items SET status = ?, resolution_type = COALESCE(?, resolution_type), resolution_reason = COALESCE(?, resolution_reason), resolved_at = COALESCE(?, resolved_at), updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?")
         .run(status, resolution?.type ?? null, resolution?.reason ?? null, resolvedAt, now, id, expectedRevision);
       ensureChanged(result.changes, before, "Review Item", id, expectedRevision);
-      if (resolution && before) {
+      if (before) {
         const after = this.getByIdOrThrow(id);
+        const action = status === "IN_PROGRESS" ? "START" : status === "RESOLVED" ? "RESOLVE" : status === "DISMISSED" ? "DISMISS" : status;
         this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, 'USER', 'REVIEW_ITEM', ?, ?, ?, ?, ?)")
-          .run(newId("audit"), after.projectId, id, status === "RESOLVED" ? "RESOLVE" : "DISMISS", JSON.stringify(before), JSON.stringify(after), now);
+          .run(newId("audit"), after.projectId, id, action, JSON.stringify(before), JSON.stringify(after), now);
       }
     })();
     return this.getByIdOrThrow(id);

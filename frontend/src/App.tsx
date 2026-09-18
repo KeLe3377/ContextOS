@@ -4,7 +4,7 @@ const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:
 
 type AnyRecord = Record<string, any>;
 type PageId = "overview" | "projects" | "sessions" | "review" | "decisions" | "work" | "context" | "rules" | "settings";
-type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "resumeCapsule" | "source" | "sourceEdit" | "contextItem" | "contextItemEdit" | "decision" | "workItem" | "reviewResolve" | "reviewDismiss";
+type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "resumeCapsule" | "source" | "sourceEdit" | "contextItem" | "contextItemEdit" | "decision" | "workItem" | "reviewAssign" | "reviewResolve" | "reviewDismiss";
 
 type PageDef = {
   title: string;
@@ -276,14 +276,17 @@ export function App() {
   const [actionMessage, setActionMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [data, setData] = useState<WorkspaceData>(() => emptyData());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [selectedContextSourceId, setSelectedContextSourceId] = useState<string | null>(null);
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
   const [sessionDetailsLoading, setSessionDetailsLoading] = useState(false);
+  const [reviewActionLog, setReviewActionLog] = useState<{ reviewId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const [modal, setModal] = useState<{ kind: ModalKind; sessionId?: string; reviewId?: string; sourceId?: string; sourceSnapshotId?: string; contextItemId?: string }>({ kind: null });
   const [evidenceDetail, setEvidenceDetail] = useState<{ snapshot: AnyRecord; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [evidenceCompare, setEvidenceCompare] = useState<{ base: AnyRecord; other: AnyRecord; metadata: AnyRecord | null; content: AnyRecord | null; loading: boolean; error: string | null } | null>(null);
   const [contextItemDetail, setContextItemDetail] = useState<{ item: AnyRecord; versions: AnyRecord[]; loading: boolean; error: string | null } | null>(null);
   const preferredSessionIdRef = useRef<string | null>(null);
+  const preferredReviewIdRef = useRef<string | null>(null);
   const preferredContextSourceIdRef = useRef<string | null>(null);
 
   const availableAdapters = useCallback(() => data.adapters.filter((adapter) => adapter.available), [data.adapters]);
@@ -308,6 +311,17 @@ export function App() {
       evidence: evidence.ok ? evidence.value.items : [],
       resumeCapsule: resumeCapsule.ok ? resumeCapsule.value : null,
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null
+    };
+  }, []);
+
+  const loadReviewActionLog = useCallback(async (reviewId: string | null): Promise<{ reviewId: string; items: AnyRecord[]; loading: boolean; error: string | null } | null> => {
+    if (!reviewId) return null;
+    const result = await settle(fetchJson(`/api/review-items/${reviewId}/action-log`));
+    return {
+      reviewId,
+      items: result.ok ? result.value.items : [],
+      loading: false,
+      error: result.ok ? null : result.error.message
     };
   }, []);
 
@@ -343,18 +357,22 @@ export function App() {
     next.contextSources = next.contextSources.filter((source) => !isArchived(source));
     next.contextItems = next.contextItems.filter((item) => !isArchived(item));
     const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
+    const selectedReview = next.reviews.find((review) => review.id === preferredReviewIdRef.current) || next.reviews.find((review) => ["OPEN", "IN_PROGRESS"].includes(review.status)) || next.reviews[0];
     const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
     preferredSessionIdRef.current = selectedSession?.id || null;
+    preferredReviewIdRef.current = selectedReview?.id || null;
     preferredContextSourceIdRef.current = selectedContextSource?.id || null;
     setSelectedSessionId(selectedSession?.id || null);
+    setSelectedReviewId(selectedReview?.id || null);
     setSelectedContextSourceId(selectedContextSource?.id || null);
     setSessionDetailsLoading(Boolean(selectedSession));
     setSessionDetails(await loadSessionDetails(selectedSession));
     setSessionDetailsLoading(false);
+    setReviewActionLog(await loadReviewActionLog(selectedReview?.id || null));
     setLoading(false);
-  }, [loadSessionDetails]);
+  }, [loadReviewActionLog, loadSessionDetails]);
 
   useEffect(() => {
     void loadData();
@@ -403,6 +421,13 @@ export function App() {
     setSessionDetails(await loadSessionDetails(session));
     setSessionDetailsLoading(false);
   }, [loadSessionDetails, sessionById]);
+
+  const selectReview = useCallback(async (reviewId: string) => {
+    preferredReviewIdRef.current = reviewId;
+    setSelectedReviewId(reviewId);
+    setReviewActionLog({ reviewId, items: [], loading: true, error: null });
+    setReviewActionLog(await loadReviewActionLog(reviewId));
+  }, [loadReviewActionLog]);
 
   const selectContextSource = useCallback((sourceId: string) => {
     preferredContextSourceIdRef.current = sourceId;
@@ -562,6 +587,16 @@ export function App() {
     if (!review) throw new Error("No review item is available");
     await sendJson(`/api/review-items/${review.id}/dismiss`, "POST", { resolutionReason: reason, expectedRevision: review.revision });
   }, [reviewById]);
+  const startReview = useCallback(async (reviewId: string) => {
+    const review = reviewById(reviewId);
+    if (!review) throw new Error("No review item is available");
+    await sendJson(`/api/review-items/${review.id}/start`, "POST", { expectedRevision: review.revision });
+  }, [reviewById]);
+  const assignReview = useCallback(async (reviewId: string, reviewerId: string) => {
+    const review = reviewById(reviewId);
+    if (!review) throw new Error("No review item is available");
+    await sendJson(`/api/review-items/${review.id}/assign`, "POST", { reviewerId, expectedRevision: review.revision });
+  }, [reviewById]);
 
   const handleAction = useCallback((action: string) => {
     if (action === "refresh-context" || action === "reset-changes") return void loadData();
@@ -582,7 +617,8 @@ export function App() {
       return void runAction(() => transitionWorkItem(item.id, "start"), "Work item started");
     }
     if (action === "approve-selected" || action === "reject") {
-      const review = data.reviews.find((item) => ["OPEN", "IN_PROGRESS"].includes(item.status));
+      const selectedReview = selectedReviewId ? data.reviews.find((item) => item.id === selectedReviewId) : null;
+      const review = selectedReview && ["OPEN", "IN_PROGRESS"].includes(selectedReview.status) ? selectedReview : data.reviews.find((item) => ["OPEN", "IN_PROGRESS"].includes(item.status));
       if (!review) return setActionMessage({ text: "No open review item is available", error: true });
       return setModal({ kind: action === "approve-selected" ? "reviewResolve" : "reviewDismiss", reviewId: review.id });
     }
@@ -624,7 +660,7 @@ export function App() {
         expectedRevision: data.settings!.revision
       }), "Settings saved");
     }
-  }, [continueSession, data.contextSources, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedSessionId, syncActiveSources, syncSessionTranscript, transitionWorkItem]);
+  }, [continueSession, data.contextSources, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, syncActiveSources, syncSessionTranscript, transitionWorkItem]);
 
   const navigate = (next: PageId) => {
     setPage(next);
@@ -634,7 +670,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, transitionDecision, transitionWorkItem, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedSessionId, selectSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -819,17 +855,53 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function ReviewPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, setModal } = props;
-  return <>{header}<Panel title="Pending Review Items" iconName="inbox"><Table headers={["Review", "Source", "Priority", "Status", "Action"]} rows={data.reviews.map((item: AnyRecord) => [
-    <><strong>{item.summary}</strong><div className="muted">{item.proposedResolution || item.triggerType}</div></>,
-    <span className="mono">{item.sourceType} · {item.sourceId}</span>,
-    <Badge text={item.priority} tone={item.priority === "URGENT" || item.priority === "HIGH" ? "amber" : "blue"} />,
-    <Badge text={item.status} tone={toneForStatus(item.status)} />,
-    <div className="row-actions">
-      <button className="icon-btn table-action" title="Resolve review" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewResolve", reviewId: item.id })}>{icon("task_alt")}</button>
-      <button className="icon-btn table-action" title="Dismiss review" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewDismiss", reviewId: item.id })}>{icon("block")}</button>
-    </div>
-  ])} empty="No review items." /></Panel></>;
+  const { data, header, actionLoading, runAction, setModal, selectedReviewId, selectReview, reviewActionLog, startReview } = props;
+  const selectedReview = data.reviews.find((item: AnyRecord) => item.id === selectedReviewId) || data.reviews.find((item: AnyRecord) => ["OPEN", "IN_PROGRESS"].includes(item.status)) || data.reviews[0];
+  const sourceObject = selectedReview ? [...data.rules, ...data.sessions, ...data.contextItems, ...data.evidenceSnapshots, ...data.decisions, ...data.workItems].find((item: AnyRecord) => item.id === selectedReview.sourceId) : null;
+  const logItems = selectedReview && reviewActionLog?.reviewId === selectedReview.id ? reviewActionLog.items : [];
+  return <>{header}<div className="grid cols-12"><div className="span-8 stack">
+    <Panel title="Review Queue" iconName="inbox"><Table headers={["Review", "Source", "Priority", "Status", "Action"]} rows={data.reviews.map((item: AnyRecord) => [
+      <div className={`session-cell ${item.id === selectedReview?.id ? "selected" : ""}`}><strong>{item.summary}</strong><div className="muted">{item.proposedResolution || item.triggerType}</div></div>,
+      <span className="mono">{item.sourceType} · {item.sourceId}</span>,
+      <Badge text={item.priority} tone={item.priority === "URGENT" || item.priority === "HIGH" ? "amber" : "blue"} />,
+      <Badge text={item.status} tone={toneForStatus(item.status)} />,
+      <div className="row-actions">
+        <button className="icon-btn table-action" title="View review detail" disabled={actionLoading} onClick={() => void selectReview(item.id)}>{icon("visibility")}</button>
+        <button className="icon-btn table-action" title="Start review" disabled={item.status !== "OPEN" || actionLoading} onClick={() => runAction(() => startReview(item.id), "Review started")}>{icon("play_arrow")}</button>
+        <button className="icon-btn table-action" title="Assign reviewer" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewAssign", reviewId: item.id })}>{icon("manage_search")}</button>
+        <button className="icon-btn table-action" title="Resolve review" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewResolve", reviewId: item.id })}>{icon("task_alt")}</button>
+        <button className="icon-btn table-action" title="Dismiss review" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewDismiss", reviewId: item.id })}>{icon("block")}</button>
+      </div>
+    ])} empty="No review items." /></Panel>
+  </div><div className="span-4 stack">
+    <Panel title="Selected Review" iconName="rate_review" meta={selectedReview?.id || "No review"}>
+      {selectedReview ? <div className="session-detail">
+        <div className="detail-grid source-detail-grid">
+          <div><span className="mono muted">STATUS</span><strong>{selectedReview.status}</strong></div>
+          <div><span className="mono muted">PRIORITY</span><strong>{selectedReview.priority}</strong></div>
+          <div><span className="mono muted">TRIGGER</span><strong>{selectedReview.triggerType}</strong></div>
+          <div className="detail-wide"><span className="mono muted">SUMMARY</span><strong>{selectedReview.summary}</strong></div>
+          <div className="detail-wide"><span className="mono muted">SOURCE</span><strong className="mono">{selectedReview.sourceType} · {selectedReview.sourceId}</strong><div className="muted">{sourceObject?.title || sourceObject?.name || sourceObject?.summary || "Source object is not currently loaded in this workspace view."}</div></div>
+          <div className="detail-wide"><span className="mono muted">PROPOSED RESOLUTION</span><strong>{selectedReview.proposedResolution || "-"}</strong></div>
+          <div><span className="mono muted">REVIEWER</span><strong>{selectedReview.reviewerId || "-"}</strong></div>
+          <div><span className="mono muted">REVISION</span><strong>{selectedReview.revision}</strong></div>
+          <div><span className="mono muted">UPDATED</span><strong>{fmtDate(selectedReview.updatedAt)}</strong></div>
+          {selectedReview.resolutionReason ? <div className="detail-wide"><span className="mono muted">RESOLUTION</span><strong>{selectedReview.resolutionType || "-"}</strong><div className="muted">{selectedReview.resolutionReason}</div></div> : null}
+        </div>
+        <div className="row-actions">
+          <button className="btn primary" disabled={selectedReview.status !== "OPEN" || actionLoading} onClick={() => runAction(() => startReview(selectedReview.id), "Review started")}>{icon("play_arrow")}<span>Start</span></button>
+          <button className="btn" disabled={!["OPEN", "IN_PROGRESS"].includes(selectedReview.status) || actionLoading} onClick={() => setModal({ kind: "reviewAssign", reviewId: selectedReview.id })}>{icon("manage_search")}<span>Assign</span></button>
+          <button className="btn" disabled={!["OPEN", "IN_PROGRESS"].includes(selectedReview.status) || actionLoading} onClick={() => setModal({ kind: "reviewResolve", reviewId: selectedReview.id })}>{icon("task_alt")}<span>Resolve</span></button>
+          <button className="btn" disabled={!["OPEN", "IN_PROGRESS"].includes(selectedReview.status) || actionLoading} onClick={() => setModal({ kind: "reviewDismiss", reviewId: selectedReview.id })}>{icon("block")}<span>Dismiss</span></button>
+        </div>
+      </div> : <EmptyNote>No review item selected.</EmptyNote>}
+    </Panel>
+    <Panel title="Action Log" iconName="playlist_add_check" meta={selectedReview ? `${logItems.length} actions` : ""}>
+      {reviewActionLog?.loading ? <EmptyNote>Loading review action log...</EmptyNote> : null}
+      {reviewActionLog?.error ? <EmptyNote>{reviewActionLog.error}</EmptyNote> : null}
+      {logItems.length ? <div className="version-list">{logItems.map((entry: AnyRecord) => <div className="version-row" key={entry.id}><div><div className="title-sm">{entry.action}</div><div className="muted mono">{fmtDate(entry.createdAt)}</div><div className="muted">{entry.after?.resolutionReason || entry.after?.status || ""}</div></div></div>)}</div> : !reviewActionLog?.loading && !reviewActionLog?.error ? <EmptyNote>No action history yet.</EmptyNote> : null}
+    </Panel>
+  </div></div></>;
 }
 
 function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
@@ -1128,6 +1200,9 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
         });
       }, "Context source updated");
     }
+    if (kind === "reviewAssign") {
+      void runAction(() => sendJson(`/api/review-items/${review.id}/assign`, "POST", { reviewerId: values.get("reviewerId"), expectedRevision: review.revision }), "Review assigned");
+    }
     if (kind === "reviewResolve") {
       void runAction(() => sendJson(`/api/review-items/${review.id}/resolve`, "POST", { resolutionType: values.get("resolutionType"), resolutionReason: values.get("resolutionReason"), expectedRevision: review.revision }), "Review resolved");
     }
@@ -1137,8 +1212,8 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
   };
 
   if (!modal.kind) return null;
-  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "sourceEdit" ? "Edit Context Source" : modal.kind === "contextItem" ? "Add Context Item" : modal.kind === "contextItemEdit" ? "Edit Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "workItem" ? "Create Work Item" : modal.kind === "reviewResolve" ? "Resolve Review" : modal.kind === "reviewDismiss" ? "Dismiss Review" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : modal.kind === "resumeCapsule" ? "Edit Resume Capsule" : "Import Transcript";
-  const submitLabel = modal.kind === "project" ? "Create Project" : modal.kind === "session" ? "Create Session" : modal.kind === "rule" ? "Create Rule" : modal.kind === "source" ? "Create Source" : modal.kind === "sourceEdit" ? "Save Source" : modal.kind === "contextItem" ? "Create Context Item" : modal.kind === "contextItemEdit" ? "Save Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "workItem" ? "Create Item" : modal.kind === "reviewResolve" ? "Resolve" : modal.kind === "reviewDismiss" ? "Dismiss" : modal.kind === "existingTranscript" ? "Import Existing Session" : modal.kind === "resumeCapsule" ? "Save Capsule" : "Import Transcript";
+  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "sourceEdit" ? "Edit Context Source" : modal.kind === "contextItem" ? "Add Context Item" : modal.kind === "contextItemEdit" ? "Edit Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "workItem" ? "Create Work Item" : modal.kind === "reviewAssign" ? "Assign Review" : modal.kind === "reviewResolve" ? "Resolve Review" : modal.kind === "reviewDismiss" ? "Dismiss Review" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : modal.kind === "resumeCapsule" ? "Edit Resume Capsule" : "Import Transcript";
+  const submitLabel = modal.kind === "project" ? "Create Project" : modal.kind === "session" ? "Create Session" : modal.kind === "rule" ? "Create Rule" : modal.kind === "source" ? "Create Source" : modal.kind === "sourceEdit" ? "Save Source" : modal.kind === "contextItem" ? "Create Context Item" : modal.kind === "contextItemEdit" ? "Save Context Item" : modal.kind === "decision" ? "Record Decision" : modal.kind === "workItem" ? "Create Item" : modal.kind === "reviewAssign" ? "Assign" : modal.kind === "reviewResolve" ? "Resolve" : modal.kind === "reviewDismiss" ? "Dismiss" : modal.kind === "existingTranscript" ? "Import Existing Session" : modal.kind === "resumeCapsule" ? "Save Capsule" : "Import Transcript";
   return (
     <div className="dialog-backdrop">
       <form className="dialog-form dialog-card" onSubmit={submit}>
@@ -1156,6 +1231,7 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
           {modal.kind === "transcript" ? <><label>Session<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>Title<input className="field" name="title" defaultValue="Imported transcript" /></label><label>Summary<input className="field" name="summary" placeholder="What should the resume capsule remember?" /></label><label>Transcript text<textarea className="field" name="contentText" required rows={9} placeholder="Paste Codex transcript or the important conversation excerpt" /></label></> : null}
           {modal.kind === "existingTranscript" ? <><label>ContextOS session<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>External session ID<input className="field mono" name="externalSessionId" placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><label>Title<input className="field" name="title" defaultValue={`Imported ${session?.agentAdapterId || "agent"} transcript`} /></label><label>Summary<input className="field" name="summary" placeholder="What should the resume capsule remember?" /></label></> : null}
           {modal.kind === "resumeCapsule" ? <><label>Session<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>Summary<textarea className="field" name="summary" required rows={4} defaultValue={resumeCapsule?.summary || ""} /></label><label>Next action<input className="field" name="nextAction" defaultValue={resumeCapsule?.nextAction || ""} placeholder="What should happen next?" /></label></> : null}
+          {modal.kind === "reviewAssign" ? <><label>Review<input className="field" value={review?.summary || ""} disabled /></label><label>Reviewer ID<input className="field mono" name="reviewerId" required defaultValue={review?.reviewerId || "local-user"} placeholder="local-user" /></label></> : null}
           {modal.kind === "reviewResolve" ? <><label>Review<input className="field" value={review?.summary || ""} disabled /></label><label>Resolution<select name="resolutionType" defaultValue="APPROVED"><option>APPROVED</option><option>FIXED</option><option>ACKNOWLEDGED</option></select></label><label>Reason<textarea className="field" name="resolutionReason" required rows={4} placeholder="What was checked or approved?" /></label></> : null}
           {modal.kind === "reviewDismiss" ? <><label>Review<input className="field" value={review?.summary || ""} disabled /></label><label>Reason<textarea className="field" name="resolutionReason" required rows={4} placeholder="Why is this no longer applicable?" /></label></> : null}
         </div>

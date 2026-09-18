@@ -366,4 +366,12 @@ Phase 3 first increment completed on 2026-09-17:
 - Added Context Source edit flow backed by `PATCH /api/context-sources/:id` for mutable source fields, keeping locator/type immutable in the UI.
 - Verified with `npm run build:all`, `npm test`, and `git diff --check`.
 
+Phase 4 first increment completed on 2026-09-18:
+
+- Added selected Review workspace with source/trigger/priority/reviewer/resolution detail.
+- Added Review start, assign, resolve, and dismiss actions from the queue and detail panel.
+- Added frontend Review action log display backed by `/api/review-items/:id/action-log`.
+- Extended Review audit history so assignment and start actions are recorded, not only final resolve/dismiss actions.
+- Verified with targeted Review tests, frontend build, full build/test, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

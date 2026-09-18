@@ -265,6 +265,38 @@ describe("core resource APIs", () => {
     expect(log.statusCode).toBe(200);
     expect(log.json().items).toEqual([expect.objectContaining({ action: "DISMISS" })]);
   });
+
+  test("records review start and assignment in action history", async () => {
+    const create = await server!.inject({
+      method: "POST",
+      url: "/api/review-items",
+      payload: { projectId, sourceType: "RULE", sourceId: "rule_3", triggerType: "REQUIRE_REVIEW", summary: "Track review actions" }
+    });
+    const review = create.json();
+
+    const assigned = await server!.inject({
+      method: "POST",
+      url: `/api/review-items/${review.id}/assign`,
+      payload: { expectedRevision: review.revision, reviewerId: "local-user" }
+    });
+    expect(assigned.statusCode).toBe(200);
+    expect(assigned.json().reviewerId).toBe("local-user");
+
+    const started = await server!.inject({
+      method: "POST",
+      url: `/api/review-items/${review.id}/start`,
+      payload: { expectedRevision: assigned.json().revision }
+    });
+    expect(started.statusCode).toBe(200);
+    expect(started.json().status).toBe("IN_PROGRESS");
+
+    const log = await server!.inject({ method: "GET", url: `/api/review-items/${review.id}/action-log` });
+    expect(log.statusCode).toBe(200);
+    expect(log.json().items).toEqual([
+      expect.objectContaining({ action: "ASSIGN" }),
+      expect.objectContaining({ action: "START" })
+    ]);
+  });
 });
 
 
