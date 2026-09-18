@@ -526,4 +526,12 @@ P1 Decision version-compare increment completed on 2026-09-18:
 - Reused the existing Decision version endpoint and kept the increment frontend-only.
 - Verified with `npm run build:all`, targeted core resource integration tests, and `git diff --check`.
 
+P1 browser workflow coverage completed on 2026-09-18:
+
+- Added browser coverage for Decision creation, version edits/comparison, and Review start/assign/resolve actions.
+- Added browser coverage for Context Source sync, Evidence content/verification, Context Item derivation, and Rule validation/activation.
+- Verified project `AGENTS.md` generation inside isolated Playwright output directories without writing to the repository workspace.
+- Bound Rule creation and instruction-file rendering to the selected Project so concurrent workspaces cannot target the first project in list order.
+- Verified with `npm run build:all`, the full desktop/mobile Playwright suite, and `git diff --check`.
+
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

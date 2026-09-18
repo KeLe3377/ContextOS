@@ -737,11 +737,11 @@ export function App() {
     await sendJson(`/api/rules/${rule.id}/${action}`, "POST", { expectedRevision: rule.revision });
   }, [ruleById]);
   const renderRuleInstructions = useCallback(async (target: string, apply: boolean) => {
-    const project = data.projects[0];
+    const project = data.projects.find((item) => item.id === selectedProjectId) || data.projects[0];
     if (!project) throw new Error("Create a project before rendering rule instructions");
     const result = await sendJson("/api/rules/render-instructions", "POST", { projectId: project.id, target, apply });
     setRuleInstructionPreview(result);
-  }, [data.projects]);
+  }, [data.projects, selectedProjectId]);
   const transitionDecision = useCallback(async (decisionId: string, action: string) => {
     const decision = decisionById(decisionId);
     if (!decision) throw new Error("No decision is available");
@@ -910,6 +910,7 @@ export function App() {
         sessionDetails={sessionDetails}
         decisionVersions={decisionVersions}
         workItemDetail={workItemDetail}
+        selectedProjectId={selectedProjectId}
         runAction={runAction}
         confirmDestructiveAction={confirmDestructiveAction}
       />
@@ -1389,12 +1390,13 @@ function ContextPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function RulesPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, validateRule, testRule, transitionRule, renderRuleInstructions, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview } = props;
+  const { data, header, actionLoading, runAction, validateRule, testRule, transitionRule, renderRuleInstructions, selectedProjectId, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview } = props;
+  const selectedProject = data.projects.find((project: AnyRecord) => project.id === selectedProjectId) || data.projects[0];
   const selectedRule = data.rules.find((rule: AnyRecord) => rule.id === selectedRuleId) || data.rules[0];
   const detail = selectedRule && ruleDetail?.ruleId === selectedRule.id ? ruleDetail : null;
   const currentVersion = selectedRule ? detail?.versions.find((version: AnyRecord) => version.id === selectedRule.currentVersionId) || detail?.versions[0] : null;
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
-    <Panel title="Rule Set" iconName="policy" meta={data.projects[0]?.name || "Workspace"}><Table headers={["Rule", "Version", "State", "Action"]} rows={data.rules.map((rule: AnyRecord) => [
+    <Panel title="Rule Set" iconName="policy" meta={selectedProject?.name || "Workspace"}><Table headers={["Rule", "Version", "State", "Action"]} rows={data.rules.map((rule: AnyRecord) => [
       <div className={`session-cell ${rule.id === selectedRule?.id ? "selected" : ""}`}><strong>{rule.title}</strong><div className="muted">{rule.description || ""}</div></div>,
       rule.currentVersionId || "-",
       <Badge text={rule.status} tone={toneForStatus(rule.status)} />,
@@ -1600,8 +1602,8 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
   );
 }
 
-function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, runAction, confirmDestructiveAction }: AnyRecord) {
-  const project = data.projects[0];
+function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction }: AnyRecord) {
+  const project = data.projects.find((item: AnyRecord) => item.id === selectedProjectId) || data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
   const decision = modal.decisionId ? data.decisions.find((item: AnyRecord) => item.id === modal.decisionId) : data.decisions[0];
