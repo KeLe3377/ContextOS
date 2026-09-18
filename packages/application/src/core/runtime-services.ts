@@ -492,12 +492,11 @@ function formatProcessOutput(exit: ProcessExitInfo): string {
 }
 
 function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; contextPackage: ContextPackageDto; adapterName: string }): string {
-  const contextItems = input.contextPackage.contextItems.length
-    ? input.contextPackage.contextItems.map((item) => `- ${item.title} (${item.selectionReason}, rev ${item.revision ?? "n/a"})`).join("\n")
-    : "- No active context items selected.";
-  const evidenceSnapshots = input.contextPackage.evidenceSnapshots.length
-    ? input.contextPackage.evidenceSnapshots.map((snapshot) => `- ${snapshot.title} (${snapshot.selectionReason}, ${snapshot.contentHash ?? "no hash"})`).join("\n")
-    : "- No source evidence snapshots selected.";
+  const workItems = formatContextPackageEntries(input.contextPackage.workItems, "No linked work item selected.");
+  const decisions = formatContextPackageEntries(input.contextPackage.decisions, "No accepted decisions selected.");
+  const contextItems = formatContextPackageEntries(input.contextPackage.contextItems, "No active context items selected.");
+  const evidenceSnapshots = formatContextPackageEntries(input.contextPackage.evidenceSnapshots, "No source evidence snapshots selected.");
+  const rules = formatContextPackageEntries(input.contextPackage.rules, "No active rules selected.");
   const sessionBoundary = input.session.externalSessionId
     ? [
         `You were resumed from ContextOS using an existing ${input.adapterName} conversation.`,
@@ -521,11 +520,20 @@ function formatHandoffPrompt(input: { session: SessionDto; rootPath: string; con
     `Intent: ${input.session.intent ?? "Continue the session."}`,
     `Context Package ID: ${input.contextPackage.id}`,
     "",
+    "## Active Work",
+    workItems,
+    "",
+    "## Accepted Decisions",
+    decisions,
+    "",
     "## Selected Context Items",
     contextItems,
     "",
     "## Selected Evidence Snapshots",
     evidenceSnapshots,
+    "",
+    "## Active Rules",
+    rules,
     "",
     "## Instructions",
     "- Work inside the project root unless the user directs otherwise.",
@@ -540,16 +548,27 @@ function launchCorrelationText(session: SessionDto): string {
 }
 
 function formatResumePrompt(input: { session: SessionDto; contextPackage: ContextPackageDto; adapterName: string }): string {
-  const contextItems = input.contextPackage.contextItems
-    .map((item) => `- ${item.title} (${item.selectionReason}, rev ${item.revision ?? "n/a"})`)
-    .join("\n") || "- No active context items.";
+  const entries = [
+    ...input.contextPackage.workItems,
+    ...input.contextPackage.decisions,
+    ...input.contextPackage.contextItems,
+    ...input.contextPackage.rules
+  ];
   return [
     `Continue this ContextOS session using the existing ${input.adapterName} conversation.`,
     `Intent: ${input.session.intent ?? "Continue the session."}`,
     `Context Package ID: ${input.contextPackage.id}`,
-    "Current active context:",
-    contextItems
+    "Current governed context:",
+    formatContextPackageEntries(entries, "No governed context selected.")
   ].join("\n");
+}
+
+function formatContextPackageEntries(entries: ContextPackageDto["contextItems"], empty: string): string {
+  if (entries.length === 0) return `- ${empty}`;
+  return entries.map((entry) => [
+    `- ${entry.title} [${entry.resourceType}] (${entry.selectionReason}, rev ${entry.revision ?? "n/a"}${entry.contentHash ? `, ${entry.contentHash}` : ""})`,
+    entry.summary ? entry.summary.split("\n").map((line) => `  ${line}`).join("\n") : null
+  ].filter(Boolean).join("\n")).join("\n");
 }
 
 function continueFailureCode(session: SessionDto, error: unknown): string {

@@ -149,6 +149,10 @@ External session ID:
 
 ### Continue in Agent
 
+每次 Continue 都会生成一个不可变的 Context Package。普通 Session 会选择项目中已接受的 Decisions、ACTIVE Context Items、这些 Context 对应的 Evidence，以及 ACTIVE Rules；从 Work Item 启动的 Session 还会加入当前 Work Item 和它的阻塞依赖。
+
+在 Sessions 的 `Context Package Selection` 中可以查看每个对象、内联摘要和选择原因。该包生成后不会随原对象后续编辑而变化，因此可以复现当次 Agent 实际收到的上下文。交接 Evidence `ContextOS handoff prompt` 保存了发送给 Agent 的完整文本。
+
 继续一个 Session。
 
 如果 Session 没有绑定 `externalSessionId`，ContextOS 会启动一个新的 Codex exec 进程，并尝试在退出后自动导入 transcript。

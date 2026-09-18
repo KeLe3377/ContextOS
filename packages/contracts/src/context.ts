@@ -207,6 +207,8 @@ export type ContextItemPatch = z.infer<typeof contextItemPatchSchema>;
 export const contextPackageEntrySchema = z.object({
   id: z.string(),
   title: z.string(),
+  resourceType: z.enum(["WORK_ITEM", "DECISION", "CONTEXT_ITEM", "EVIDENCE_SNAPSHOT", "RULE"]),
+  summary: z.string().nullable(),
   contentHash: z.string().nullable(),
   revision: z.number().int().nullable(),
   selectionReason: z.string()
@@ -217,8 +219,11 @@ export const contextPackageDtoSchema = resourceMetaSchema.extend({
   sessionId: z.string(),
   name: z.string(),
   purpose: z.string(),
+  workItems: z.array(contextPackageEntrySchema),
+  decisions: z.array(contextPackageEntrySchema),
   contextItems: z.array(contextPackageEntrySchema),
   evidenceSnapshots: z.array(contextPackageEntrySchema),
+  rules: z.array(contextPackageEntrySchema),
   manifest: z.record(z.unknown())
 });
 

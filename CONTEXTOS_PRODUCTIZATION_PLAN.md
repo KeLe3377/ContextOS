@@ -412,6 +412,13 @@ Phase 8 first increment completed on 2026-09-18:
 - Added next-work, governance queue, context-health, last-session, and latest-context-package data to the overview DTO.
 - Updated the frontend Overview page to use the backend overview endpoint with local fallback.
 - Surfaced latest context package selection reasons on Overview.
+
+Phase 8 context-package quality increment completed on 2026-09-18:
+
+- Upgraded generated packages to immutable `context-package.v2` selection manifests while preserving v1 reads.
+- Added linked Work Item and dependencies, accepted Decisions, active Context Items and source Evidence, and active Rules with deterministic selection reasons.
+- Included selected resource summaries in Codex/Claude handoff and resume prompts so agents receive actionable context rather than IDs and titles alone.
+- Added readable package selection detail to Sessions and richer package counts to Overview.
 - Verified with `npm run build:all`, targeted Overview tests, full `npm test`, and `git diff --check`.
 
 After that, continue down the phases in order unless a blocker in real use forces a narrower fix.

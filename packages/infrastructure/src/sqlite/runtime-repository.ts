@@ -9,6 +9,20 @@ function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
+function clipPackageText(value: string, maxLength = 4000): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}\n[truncated]`;
+}
+
+function formatWorkItemPackageSummary(item: PackageWorkItemRow): string {
+  const acceptance = JSON.parse(item.acceptance_json) as string[];
+  return clipPackageText([
+    `Status: ${item.status}`,
+    item.description,
+    acceptance.length ? `Acceptance:\n${acceptance.map((entry) => `- ${entry}`).join("\n")}` : null,
+    item.execution_contract ? `Execution contract:\n${item.execution_contract}` : null
+  ].filter(Boolean).join("\n"));
+}
+
 function bool(value: number): boolean {
   return value === 1;
 }
@@ -105,6 +119,7 @@ type ContextPackageRow = {
   purpose: string;
   context_item_ids_json: string;
   evidence_snapshot_ids_json: string;
+  selection_manifest_json: string | null;
   created_at: number;
   updated_at: number;
   revision: number;
@@ -117,6 +132,11 @@ type PackageContextItemRow = {
   source_snapshot_id: string | null;
   revision: number;
 };
+
+type PackageWorkItemRow = { id: string; title: string; description: string | null; status: string; acceptance_json: string; execution_contract: string | null; revision: number };
+type PackageDecisionRow = { id: string; title: string; statement: string; rationale: string; content_hash: string; revision: number };
+type PackageRuleRow = { id: string; title: string; description: string | null; enforcement_mode: string; effect_json: string; content_hash: string; revision: number };
+type StoredContextPackageManifest = Pick<ContextPackageDto, "workItems" | "decisions" | "contextItems" | "evidenceSnapshots" | "rules"> & { schemaVersion: string; generatedFor: string };
 
 type PackageEvidenceRow = {
   id: string;
@@ -359,6 +379,22 @@ export class SqliteRuntimeRepository {
 
   createContextPackageForSession(input: { projectId: string; sessionId: string; intent: string | null }, now: number): ContextPackageDto {
     const packageId = newId("pkg");
+    const linkedWorkItem = this.db.prepare(`
+      SELECT work_items.id, work_items.title, work_items.description, work_items.status, work_items.acceptance_json, work_items.execution_contract, work_items.revision
+      FROM work_item_attempts JOIN work_items ON work_items.id = work_item_attempts.work_item_id
+      WHERE work_item_attempts.session_id = ? ORDER BY work_item_attempts.created_at DESC LIMIT 1
+    `).get(input.sessionId) as PackageWorkItemRow | undefined;
+    const dependencies = linkedWorkItem ? this.db.prepare(`
+      SELECT work_items.id, work_items.title, work_items.description, work_items.status, work_items.acceptance_json, work_items.execution_contract, work_items.revision
+      FROM work_item_dependencies JOIN work_items ON work_items.id = work_item_dependencies.depends_on_id
+      WHERE work_item_dependencies.work_item_id = ? ORDER BY work_item_dependencies.created_at, work_items.id LIMIT 10
+    `).all(linkedWorkItem.id) as PackageWorkItemRow[] : [];
+    const decisions = this.db.prepare(`
+      SELECT decisions.id, decisions.title, versions.statement, versions.rationale, versions.content_hash, decisions.revision
+      FROM decisions JOIN decision_versions versions ON versions.id = decisions.current_version_id
+      WHERE decisions.project_id = ? AND decisions.status = 'ACCEPTED'
+      ORDER BY decisions.updated_at DESC, decisions.id DESC LIMIT 10
+    `).all(input.projectId) as PackageDecisionRow[];
     const contextItems = this.db.prepare("SELECT id, title, summary, source_snapshot_id, revision FROM context_items WHERE project_id = ? AND status = 'ACTIVE' ORDER BY updated_at DESC, id DESC LIMIT 20")
       .all(input.projectId) as PackageContextItemRow[];
     const evidenceIds = Array.from(new Set(contextItems.map((item) => item.source_snapshot_id).filter((id): id is string => Boolean(id))));
@@ -366,12 +402,48 @@ export class SqliteRuntimeRepository {
       ? []
       : this.db.prepare(`SELECT id, title, content_hash FROM evidence_snapshots WHERE project_id = ? AND id IN (${evidenceIds.map(() => "?").join(",")}) ORDER BY created_at DESC, id DESC`)
         .all(input.projectId, ...evidenceIds) as PackageEvidenceRow[];
+    const rules = this.db.prepare(`
+      SELECT rules.id, rules.title, rules.description, versions.enforcement_mode, versions.effect_json, versions.content_hash, rules.revision
+      FROM rules JOIN rule_versions versions ON versions.id = rules.current_version_id
+      WHERE rules.project_id = ? AND rules.status = 'ACTIVE'
+      ORDER BY versions.precedence DESC, rules.updated_at DESC, rules.id DESC LIMIT 20
+    `).all(input.projectId) as PackageRuleRow[];
+    const workItemEntries = [linkedWorkItem, ...dependencies].filter((item): item is PackageWorkItemRow => Boolean(item)).map((item, index) => ({
+      id: item.id, title: item.title, resourceType: "WORK_ITEM" as const,
+      summary: formatWorkItemPackageSummary(item), contentHash: null, revision: item.revision,
+      selectionReason: index === 0 ? "active-work-item-for-session" : "blocking-dependency-of-active-work-item"
+    }));
+    const decisionEntries = decisions.map((decision) => ({
+      id: decision.id, title: decision.title, resourceType: "DECISION" as const,
+      summary: clipPackageText(`${decision.statement}\nRationale: ${decision.rationale}`), contentHash: decision.content_hash, revision: decision.revision,
+      selectionReason: "accepted-project-decision"
+    }));
+    const contextItemEntries = contextItems.map((item) => ({
+      id: item.id, title: item.title, resourceType: "CONTEXT_ITEM" as const,
+      summary: clipPackageText(item.summary), contentHash: null, revision: item.revision,
+      selectionReason: item.source_snapshot_id ? "active-context-item-from-evidence" : "active-context-item"
+    }));
+    const evidenceEntries = evidenceSnapshots.map((snapshot) => ({
+      id: snapshot.id, title: snapshot.title, resourceType: "EVIDENCE_SNAPSHOT" as const,
+      summary: null, contentHash: snapshot.content_hash, revision: null,
+      selectionReason: "source-evidence-for-selected-context"
+    }));
+    const ruleEntries = rules.map((rule) => ({
+      id: rule.id, title: rule.title, resourceType: "RULE" as const,
+      summary: clipPackageText(`${rule.enforcement_mode}: ${rule.description || JSON.stringify(JSON.parse(rule.effect_json))}`), contentHash: rule.content_hash, revision: rule.revision,
+      selectionReason: "active-project-rule"
+    }));
+    const selectionManifest: StoredContextPackageManifest = {
+      schemaVersion: "context-package.v2", generatedFor: "session-continue",
+      workItems: workItemEntries, decisions: decisionEntries, contextItems: contextItemEntries,
+      evidenceSnapshots: evidenceEntries, rules: ruleEntries
+    };
     const name = "Session context package";
     const purpose = input.intent?.trim() || "Continue session";
 
     this.db.transaction(() => {
-      this.db.prepare("INSERT INTO context_packages (id, project_id, name, purpose, context_item_ids_json, evidence_snapshot_ids_json, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)")
-        .run(packageId, input.projectId, name, purpose, JSON.stringify(contextItems.map((item) => item.id)), JSON.stringify(evidenceSnapshots.map((snapshot) => snapshot.id)), now, now);
+      this.db.prepare("INSERT INTO context_packages (id, project_id, name, purpose, context_item_ids_json, evidence_snapshot_ids_json, selection_manifest_json, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
+        .run(packageId, input.projectId, name, purpose, JSON.stringify(contextItems.map((item) => item.id)), JSON.stringify(evidenceSnapshots.map((snapshot) => snapshot.id)), JSON.stringify(selectionManifest), now, now);
       this.db.prepare("UPDATE sessions SET context_package_id = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
         .run(packageId, now, input.sessionId);
     })();
@@ -580,31 +652,42 @@ export class SqliteRuntimeRepository {
       : this.db.prepare(`SELECT id, title, content_hash FROM evidence_snapshots WHERE id IN (${evidenceSnapshotIds.map(() => "?").join(",")}) ORDER BY created_at DESC, id DESC`)
         .all(...evidenceSnapshotIds) as PackageEvidenceRow[];
 
+    const stored = row.selection_manifest_json ? JSON.parse(row.selection_manifest_json) as StoredContextPackageManifest : null;
     return {
       id: row.id,
       projectId: row.project_id,
       sessionId,
       name: row.name,
       purpose: row.purpose,
-      contextItems: contextItems.map((item) => ({
+      workItems: stored?.workItems ?? [],
+      decisions: stored?.decisions ?? [],
+      contextItems: stored?.contextItems ?? contextItems.map((item) => ({
         id: item.id,
         title: item.title,
+        resourceType: "CONTEXT_ITEM",
+        summary: item.summary,
         contentHash: null,
         revision: item.revision,
         selectionReason: item.source_snapshot_id ? "active-context-item-from-evidence" : "active-context-item"
       })),
-      evidenceSnapshots: evidenceSnapshots.map((snapshot) => ({
+      evidenceSnapshots: stored?.evidenceSnapshots ?? evidenceSnapshots.map((snapshot) => ({
         id: snapshot.id,
         title: snapshot.title,
+        resourceType: "EVIDENCE_SNAPSHOT",
+        summary: null,
         contentHash: snapshot.content_hash,
         revision: null,
         selectionReason: "source-evidence-for-selected-context"
       })),
+      rules: stored?.rules ?? [],
       manifest: {
-        schemaVersion: "context-package.v1",
+        schemaVersion: stored?.schemaVersion ?? "context-package.v1",
         contextItemIds,
         evidenceSnapshotIds,
-        generatedFor: "session-continue"
+        workItemIds: stored?.workItems.map((item) => item.id) ?? [],
+        decisionIds: stored?.decisions.map((item) => item.id) ?? [],
+        ruleIds: stored?.rules.map((item) => item.id) ?? [],
+        generatedFor: stored?.generatedFor ?? "session-continue"
       },
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString(),

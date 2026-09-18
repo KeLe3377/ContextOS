@@ -646,13 +646,45 @@ describe("runtime APIs", () => {
     });
     expect(activated.statusCode).toBe(200);
 
-    const sessionResponse = await server.inject({
+    const decisionResponse = await server.inject({
       method: "POST",
-      url: "/api/sessions",
-      payload: { projectId: project.id, agentAdapterId: "codex", title: "Runtime context", intent: "Use selected context" }
+      url: "/api/decisions",
+      payload: { projectId: project.id, title: "Use deterministic packages", statement: "Context packages are immutable snapshots.", rationale: "Agent handoffs must be reproducible." }
     });
-    expect(sessionResponse.statusCode).toBe(201);
-    const session = sessionResponse.json();
+    expect(decisionResponse.statusCode).toBe(201);
+    const acceptedDecision = await server.inject({
+      method: "POST",
+      url: `/api/decisions/${decisionResponse.json().id}/accept`,
+      payload: { expectedRevision: decisionResponse.json().revision }
+    });
+    expect(acceptedDecision.statusCode).toBe(200);
+
+    const ruleResponse = await server.inject({
+      method: "POST",
+      url: "/api/rules",
+      payload: { projectId: project.id, title: "Verify before completion", description: "Run project verification", scope: {}, conditions: [], effect: { instruction: "Run build and tests" }, enforcementMode: "WARNING" }
+    });
+    expect(ruleResponse.statusCode).toBe(201);
+    const validatedRule = await server.inject({ method: "POST", url: `/api/rules/${ruleResponse.json().id}/validate`, payload: {} });
+    expect(validatedRule.statusCode).toBe(200);
+    const activeRule = await server.inject({
+      method: "POST",
+      url: `/api/rules/${ruleResponse.json().id}/activate`,
+      payload: { expectedRevision: validatedRule.json().rule.revision }
+    });
+    expect(activeRule.statusCode).toBe(200);
+
+    const workResponse = await server.inject({
+      method: "POST",
+      url: "/api/work-items",
+      payload: { projectId: project.id, title: "Ship context package v2", description: "Include governed resources", acceptance: ["selection reasons are visible"], executionContract: "Run build and tests" }
+    });
+    expect(workResponse.statusCode).toBe(201);
+    const readyWork = await server.inject({ method: "POST", url: `/api/work-items/${workResponse.json().id}/mark-ready`, payload: { expectedRevision: workResponse.json().revision } });
+    expect(readyWork.statusCode).toBe(200);
+    const startedWork = await server.inject({ method: "POST", url: `/api/work-items/${workResponse.json().id}/start-session`, payload: { expectedRevision: readyWork.json().revision, intent: "Use selected context" } });
+    expect(startedWork.statusCode).toBe(201);
+    const session = startedWork.json().session;
 
     const continued = await server.inject({
       method: "POST",
@@ -680,16 +712,37 @@ describe("runtime APIs", () => {
     expect(contextPack.statusCode).toBe(200);
     expect(contextPack.json().sessionId).toBe(session.id);
     expect(contextPack.json().purpose).toBe("Use selected context");
+    expect(contextPack.json().workItems).toEqual([
+      expect.objectContaining({ id: workResponse.json().id, resourceType: "WORK_ITEM", selectionReason: "active-work-item-for-session" })
+    ]);
+    expect(contextPack.json().decisions).toEqual([
+      expect.objectContaining({ id: decisionResponse.json().id, resourceType: "DECISION", selectionReason: "accepted-project-decision" })
+    ]);
     expect(contextPack.json().contextItems).toEqual([
       expect.objectContaining({ id: item.id, title: "Context package rule", revision: activated.json().revision })
     ]);
     expect(contextPack.json().evidenceSnapshots).toEqual([
       expect.objectContaining({ id: snapshot.id, title: "Runtime evidence", contentHash: snapshot.contentHash })
     ]);
+    expect(contextPack.json().rules).toEqual([
+      expect.objectContaining({ id: ruleResponse.json().id, resourceType: "RULE", selectionReason: "active-project-rule" })
+    ]);
     expect(contextPack.json().manifest).toMatchObject({
-      schemaVersion: "context-package.v1",
+      schemaVersion: "context-package.v2",
+      workItemIds: [workResponse.json().id],
+      decisionIds: [decisionResponse.json().id],
+      ruleIds: [ruleResponse.json().id],
       generatedFor: "session-continue"
     });
+
+    const changedContext = await server.inject({
+      method: "PATCH",
+      url: `/api/context-items/${item.id}`,
+      payload: { expectedRevision: activated.json().revision, summary: "This change belongs to the next package." }
+    });
+    expect(changedContext.statusCode).toBe(200);
+    const unchangedPack = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/context-pack` });
+    expect(unchangedPack.json().contextItems[0].summary).toBe("Continue should record selected context.");
 
     const evidence = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/evidence` });
     expect(evidence.statusCode).toBe(200);
@@ -703,6 +756,13 @@ describe("runtime APIs", () => {
         })
       })
     ]));
+    const handoff = evidence.json().items.find((entry: { metadata: { stream?: string } }) => entry.metadata.stream === "contextos-handoff");
+    const handoffContent = await server.inject({ method: "GET", url: `/api/evidence-snapshots/${handoff.id}/content` });
+    expect(handoffContent.statusCode).toBe(200);
+    expect(handoffContent.json().contentText).toContain("## Active Work");
+    expect(handoffContent.json().contentText).toContain("Ship context package v2");
+    expect(handoffContent.json().contentText).toContain("Context packages are immutable snapshots.");
+    expect(handoffContent.json().contentText).toContain("Verify before completion");
   });
 });
 
