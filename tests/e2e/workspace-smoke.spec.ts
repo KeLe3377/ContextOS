@@ -9,6 +9,12 @@ test("main workspace exposes failed session history across desktop and mobile", 
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "概览" })).toBeVisible();
+  // Guard against frontend field drift: the overview payload uses activeSources /
+  // pausedSources, and reading a renamed key used to render an empty value.
+  for (const label of ["活动数据源", "暂停数据源", "证据快照", "过期上下文"]) {
+    const row = page.locator(".metric-row").filter({ hasText: label }).first();
+    await expect(row.locator("strong")).toHaveText(/^\d+$/);
+  }
   await page.getByRole("button", { name: "项目", exact: true }).click();
   await expect(page.getByRole("heading", { name: "项目" })).toBeVisible();
   await page.getByRole("button", { name: "添加项目" }).click();

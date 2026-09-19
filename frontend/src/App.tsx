@@ -13,7 +13,7 @@ type PageDef = {
   narrow?: boolean;
 };
 
-type 工作区Data = {
+type WorkspaceData = {
   health: AnyRecord | null;
   overview: AnyRecord | null;
   projects: AnyRecord[];
@@ -21,7 +21,7 @@ type 工作区Data = {
   reviews: AnyRecord[];
   decisions: AnyRecord[];
   workItems: AnyRecord[];
-  context数据源: AnyRecord[];
+  contextSources: AnyRecord[];
   evidenceSnapshots: AnyRecord[];
   contextItems: AnyRecord[];
   rules: AnyRecord[];
@@ -30,7 +30,7 @@ type 工作区Data = {
   adapters: AnyRecord[];
 };
 
-class Action取消ed extends Error {
+class ActionCanceled extends Error {
   constructor() {
     super("操作已取消");
   }
@@ -68,7 +68,7 @@ const pages: Record<PageId, PageDef> = {
 
 const enabledActions = new Set(["refresh-context", "add-project", "new-session", "sync-transcript", "desktop-sync", "continue-in-agent", "import-existing-session", "import-transcript", "export-capsule", "approve-selected", "reject", "record-decision", "compare-versions", "start-ready-item", "create-item", "add-source", "add-context-item", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 
-function emptyData(): 工作区Data {
+function emptyData(): WorkspaceData {
   return {
     health: null,
     overview: null,
@@ -77,7 +77,7 @@ function emptyData(): 工作区Data {
     reviews: [],
     decisions: [],
     workItems: [],
-    context数据源: [],
+    contextSources: [],
     evidenceSnapshots: [],
     contextItems: [],
     rules: [],
@@ -321,7 +321,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ text: string; error: boolean } | null>(null);
-  const [data, setData] = useState<工作区Data>(() => emptyData());
+  const [data, setData] = useState<WorkspaceData>(() => emptyData());
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
@@ -438,7 +438,7 @@ export function App() {
       reviews: fetchJson("/api/review-items"),
       decisions: fetchJson("/api/decisions"),
       workItems: fetchJson("/api/work-items"),
-      context数据源: fetchJson("/api/context-sources"),
+      contextSources: fetchJson("/api/context-sources"),
       evidenceSnapshots: fetchJson("/api/evidence-snapshots"),
       contextItems: fetchJson("/api/context-items"),
       rules: fetchJson("/api/rules"),
@@ -458,7 +458,7 @@ export function App() {
     }
     next.projects = next.projects.filter((project) => !isArchived(project));
     next.sessions = next.sessions.filter((session) => !isArchived(session));
-    next.context数据源 = next.context数据源.filter((source) => !isArchived(source));
+    next.contextSources = next.contextSources.filter((source) => !isArchived(source));
     next.contextItems = next.contextItems.filter((item) => !isArchived(item));
     const selectedProject = next.projects.find((project) => project.id === preferredProjectIdRef.current) || next.projects[0];
     const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
@@ -466,7 +466,7 @@ export function App() {
     const selectedDecision = next.decisions.find((decision) => decision.id === preferredDecisionIdRef.current) || next.decisions[0];
     const selectedWorkItem = next.workItems.find((item) => item.id === preferredWorkItemIdRef.current) || next.workItems.find((item) => ["READY", "IN_PROGRESS", "BLOCKED"].includes(item.status)) || next.workItems[0];
     const selectedRule = next.rules.find((rule) => rule.id === preferredRuleIdRef.current) || next.rules[0];
-    const selectedContextSource = next.context数据源.find((source) => source.id === preferredContextSourceIdRef.current) || next.context数据源[0];
+    const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
     setError(failures.length === entries.length ? "守护进程不可用" : failures[0] || null);
     preferredProjectIdRef.current = selectedProject?.id || null;
@@ -519,7 +519,7 @@ export function App() {
       await loadData();
     } catch (actionError) {
       setActionLoading(false);
-      if (actionError instanceof Action取消ed) return;
+      if (actionError instanceof ActionCanceled) return;
       setActionMessage({ text: actionError instanceof Error ? actionError.message : "操作失败", error: true });
     }
   }, [loadData]);
@@ -527,12 +527,12 @@ export function App() {
   const confirmDestructiveAction = useCallback((message: string) => {
     if (!data.settings?.confirmDestructiveActions) return true;
     if (window.confirm(message)) return true;
-    throw new Action取消ed();
+    throw new ActionCanceled();
   }, [data.settings?.confirmDestructiveActions]);
 
   const projectById = useCallback((projectId: string) => data.projects.find((item) => item.id === projectId), [data.projects]);
   const sessionById = useCallback((sessionId: string) => data.sessions.find((item) => item.id === sessionId), [data.sessions]);
-  const sourceById = useCallback((sourceId: string) => data.context数据源.find((item) => item.id === sourceId), [data.context数据源]);
+  const sourceById = useCallback((sourceId: string) => data.contextSources.find((item) => item.id === sourceId), [data.contextSources]);
   const ruleById = useCallback((ruleId: string) => data.rules.find((item) => item.id === ruleId), [data.rules]);
   const decisionById = useCallback((decisionId: string) => data.decisions.find((item) => item.id === decisionId), [data.decisions]);
   const workItemById = useCallback((workItemId: string) => data.workItems.find((item) => item.id === workItemId), [data.workItems]);
@@ -705,11 +705,11 @@ export function App() {
     await sendJson(`/api/context-sources/${source.id}/${action}`, "POST", { expectedRevision: source.revision });
   }, [confirmDestructiveAction, sourceById]);
 
-  const syncActive数据源 = useCallback(async () => {
-    const sources = data.context数据源.filter((source) => source.status === "ACTIVE");
+  const syncActiveSources = useCallback(async () => {
+    const sources = data.contextSources.filter((source) => source.status === "ACTIVE");
     if (!sources.length) throw new Error("没有处于启用状态的数据源可同步");
     for (const source of sources) await syncSource(source.id);
-  }, [data.context数据源, syncSource]);
+  }, [data.contextSources, syncSource]);
 
   const verifyEvidence = useCallback((snapshotId: string) => sendJson(`/api/evidence-snapshots/${snapshotId}/verify`, "POST", {}), []);
   const openEvidenceDetail = useCallback(async (snapshot: AnyRecord) => {
@@ -817,7 +817,7 @@ export function App() {
     if (action === "new-rule") return data.projects[0] ? setModal({ kind: "rule" }) : setActionMessage({ text: "请先创建项目，再添加规则", error: true });
     if (action === "add-source") return data.projects[0] ? setModal({ kind: "source" }) : setActionMessage({ text: "请先创建项目，再添加数据源", error: true });
     if (action === "add-context-item") {
-      const selectedSource = selectedContextSourceId ? data.context数据源.find((item) => item.id === selectedContextSourceId) : null;
+      const selectedSource = selectedContextSourceId ? data.contextSources.find((item) => item.id === selectedContextSourceId) : null;
       const snapshot = selectedSource?.lastSnapshotId ? data.evidenceSnapshots.find((item) => item.id === selectedSource.lastSnapshotId) : null;
       return data.projects[0] ? setModal({ kind: "contextItem", sourceSnapshotId: snapshot?.id }) : setActionMessage({ text: "请先创建项目，再添加上下文项", error: true });
     }
@@ -835,7 +835,7 @@ export function App() {
       if (!review) return setActionMessage({ text: "没有待处理的审查项", error: true });
       return setModal({ kind: action === "approve-selected" ? "reviewResolve" : "reviewDismiss", reviewId: review.id });
     }
-    if (action === "sync-sources") return void runAction(syncActive数据源, "数据源已同步");
+    if (action === "sync-sources") return void runAction(syncActiveSources, "数据源已同步");
     if (action === "continue-in-agent") {
       const selected = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : null;
       const session = selected && ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(selected.status) ? selected : data.sessions.find((item) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
@@ -878,7 +878,7 @@ export function App() {
         expectedRevision: data.settings!.revision
       }), "设置已保存");
     }
-  }, [continueSession, data.context数据源, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, startWorkItemSession, syncActive数据源, syncSessionTranscript, transitionWorkItem]);
+  }, [continueSession, data.contextSources, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, startWorkItemSession, syncActiveSources, syncSessionTranscript, transitionWorkItem]);
 
   const navigate = (next: PageId) => {
     setPage(next);
@@ -934,7 +934,7 @@ export function App() {
         </header>
         <main className="main"><div className={`page ${pages[page].narrow ? "narrow" : ""}`}>{renderPage()}</div></main>
       </div>
-      <工作区Modal
+      <WorkspaceModal
         modal={modal}
         setModal={setModal}
         data={data}
@@ -978,13 +978,13 @@ function ProjectPill({ project }: { project?: AnyRecord }) {
   return <span className="project-pill">{icon("folder_managed")} {project ? `${project.name} (${project.rootPath})` : "未加载项目"}</span>;
 }
 
-function OverviewPage({ data, header }: { data: 工作区Data; header: ReactNode }) {
+function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode }) {
   const overview = data.overview;
   const activeProject = overview?.project || data.projects[0];
   const nextWork = overview?.nextWorkItems || data.workItems.filter((item) => ["READY", "IN_PROGRESS"].includes(item.status)).map((item) => ({ id: item.id, title: item.title, status: item.status, subtitle: item.description || "", updatedAt: item.updatedAt }));
   const pendingReviews = overview?.pendingReviews || data.reviews.map((item) => ({ id: item.id, title: item.summary, status: item.status, subtitle: item.proposedResolution || "", updatedAt: item.updatedAt }));
   const kpis = overview?.kpis || { sessions: data.sessions.length, pendingReviews: data.reviews.length, readyWorkItems: nextWork.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, activeRules: data.rules.filter((item) => item.status === "ACTIVE").length };
-  const contextHealth = overview?.contextHealth || { active数据源: data.context数据源.filter((item) => item.status === "ACTIVE").length, paused数据源: data.context数据源.filter((item) => item.status === "PAUSED").length, evidenceSnapshots: data.evidenceSnapshots.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, staleContextItems: data.contextItems.filter((item) => item.status === "STALE").length };
+  const contextHealth = overview?.contextHealth || { activeSources: data.contextSources.filter((item) => item.status === "ACTIVE").length, pausedSources: data.contextSources.filter((item) => item.status === "PAUSED").length, evidenceSnapshots: data.evidenceSnapshots.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, staleContextItems: data.contextItems.filter((item) => item.status === "STALE").length };
   const latestPackage = overview?.latestContextPackage;
   return (
     <>
@@ -1000,7 +1000,7 @@ function OverviewPage({ data, header }: { data: 工作区Data; header: ReactNode
         </div>
         <div className="span-4 stack">
           <Panel title="治理队列" iconName="inbox"><Rows rows={pendingReviews.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="暂无待审查项。" /></Panel>
-          <Panel title="上下文健康度" iconName="link"><div className="metric-row"><span>活动数据源</span><strong>{contextHealth.active数据源}</strong></div><div className="metric-row"><span>暂停数据源</span><strong>{contextHealth.paused数据源}</strong></div><div className="metric-row"><span>证据快照</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>过期上下文</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
+          <Panel title="上下文健康度" iconName="link"><div className="metric-row"><span>活动数据源</span><strong>{contextHealth.activeSources}</strong></div><div className="metric-row"><span>暂停数据源</span><strong>{contextHealth.pausedSources}</strong></div><div className="metric-row"><span>证据快照</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>过期上下文</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
         </div>
       </div>
     </>
@@ -1012,7 +1012,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
   const selectedProject = data.projects.find((project: AnyRecord) => project.id === selectedProjectId) || data.projects[0];
   const projectSessions = selectedProject ? data.sessions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectWork = selectedProject ? data.workItems.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
-  const project数据源 = selectedProject ? data.context数据源.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const projectSources = selectedProject ? data.contextSources.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectEvidence = selectedProject ? data.evidenceSnapshots.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectRules = selectedProject ? data.rules.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectDecisions = selectedProject ? data.decisions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
@@ -1055,7 +1055,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
       {selectedProject ? <div className="kpi-grid compact-kpis">
         <div className="kpi"><div className="kpi-value">{projectSessions.length}</div><div className="kpi-label mono">会话</div></div>
         <div className="kpi"><div className="kpi-value">{projectWork.length}</div><div className="kpi-label mono">工作项</div></div>
-        <div className="kpi"><div className="kpi-value">{project数据源.length}</div><div className="kpi-label mono">数据源</div></div>
+        <div className="kpi"><div className="kpi-value">{projectSources.length}</div><div className="kpi-label mono">数据源</div></div>
         <div className="kpi"><div className="kpi-value">{projectEvidence.length}</div><div className="kpi-label mono">证据</div></div>
         <div className="kpi"><div className="kpi-value">{projectRules.length}</div><div className="kpi-label mono">规则</div></div>
         <div className="kpi"><div className="kpi-value">{projectDecisions.length}</div><div className="kpi-label mono">决策</div></div>
@@ -1404,14 +1404,14 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
 
 function ContextPage(props: AnyRecord & { header: ReactNode }) {
   const { data, header, selectedContextSourceId, selectContextSource, actionLoading, runAction, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, setModal } = props;
-  const selectedSource = data.context数据源.find((source: AnyRecord) => source.id === selectedContextSourceId) || data.context数据源[0];
+  const selectedSource = data.contextSources.find((source: AnyRecord) => source.id === selectedContextSourceId) || data.contextSources[0];
   const sourceSnapshots = selectedSource ? data.evidenceSnapshots.filter((snapshot: AnyRecord) => snapshot.sourceId === selectedSource.id) : [];
   const sourceSnapshotIds = new Set(sourceSnapshots.map((snapshot: AnyRecord) => snapshot.id));
   const sourceItems = data.contextItems.filter((item: AnyRecord) => item.sourceSnapshotId && sourceSnapshotIds.has(item.sourceSnapshotId));
   const latestSnapshot = sourceSnapshots.find((snapshot: AnyRecord) => snapshot.id === selectedSource?.lastSnapshotId) || sourceSnapshots[0];
   return (
     <>{header}<div className="grid cols-12"><div className="span-8 stack">
-      <Panel title="数据源" iconName="database"><Table headers={["数据源", "类型", "上次同步", "快照", "状态", "操作"]} rows={data.context数据源.map((source: AnyRecord) => [<div className={`session-cell ${source.id === selectedSource?.id ? "selected" : ""}`}><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></div>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="查看数据源详情" disabled={actionLoading} onClick={() => selectContextSource(source.id)}>{icon("visibility")}</button><button className="icon-btn table-action" title="编辑数据源" disabled={actionLoading} onClick={() => setModal({ kind: "sourceEdit", sourceId: source.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="同步数据源" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "数据源已同步")}>{icon("sync")}</button><button className="icon-btn table-action" title="暂停数据源" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "pause"), "数据源已暂停")}>{icon("pause_circle")}</button><button className="icon-btn table-action" title="恢复数据源" disabled={source.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "resume"), "数据源已恢复")}>{icon("play_arrow")}</button><button className="icon-btn table-action" title="归档数据源" disabled={source.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "archive"), "数据源已归档")}>{icon("archive")}</button></div>])} empty="暂无上下文源。" /></Panel>
+      <Panel title="数据源" iconName="database"><Table headers={["数据源", "类型", "上次同步", "快照", "状态", "操作"]} rows={data.contextSources.map((source: AnyRecord) => [<div className={`session-cell ${source.id === selectedSource?.id ? "selected" : ""}`}><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></div>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="查看数据源详情" disabled={actionLoading} onClick={() => selectContextSource(source.id)}>{icon("visibility")}</button><button className="icon-btn table-action" title="编辑数据源" disabled={actionLoading} onClick={() => setModal({ kind: "sourceEdit", sourceId: source.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="同步数据源" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "数据源已同步")}>{icon("sync")}</button><button className="icon-btn table-action" title="暂停数据源" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "pause"), "数据源已暂停")}>{icon("pause_circle")}</button><button className="icon-btn table-action" title="恢复数据源" disabled={source.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "resume"), "数据源已恢复")}>{icon("play_arrow")}</button><button className="icon-btn table-action" title="归档数据源" disabled={source.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "archive"), "数据源已归档")}>{icon("archive")}</button></div>])} empty="暂无上下文源。" /></Panel>
       <Panel title="证据快照" iconName="fact_check"><Table headers={["证据", "类型", "采集时间", "存储", "操作"]} rows={data.evidenceSnapshots.slice(0, 12).map((snapshot: AnyRecord) => [<><strong>{snapshot.title}</strong><div className="muted mono">{snapshot.contentHash || "-"}</div></>, <Badge text={snapshot.evidenceType} tone="blue" />, fmtDate(snapshot.capturedAt), <span className="mono">{snapshot.storageRef || "-"}</span>, <div className="row-actions"><button className="icon-btn table-action" title="查看证据内容" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="派生上下文项" disabled={actionLoading} onClick={() => setModal({ kind: "contextItem", sourceSnapshotId: snapshot.id })}>{icon("add_box")}</button><button className="icon-btn table-action" title="复制证据引用" disabled={actionLoading} onClick={() => copyText(`${snapshot.id}\n${snapshot.storageRef || ""}\n${snapshot.contentHash}`)}>{icon("content_copy")}</button><button className="icon-btn table-action" title="校验证据" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "证据已校验")}>{icon("verified")}</button></div>])} empty="暂无证据快照。" /></Panel>
     </div><div className="span-4 stack">
       <Panel title="所选数据源" iconName="database" meta={selectedSource?.id || "No source"}>
@@ -1661,7 +1661,7 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
   );
 }
 
-function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction, bindDesktopSync }: AnyRecord) {
+function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction, bindDesktopSync }: AnyRecord) {
   const project = data.projects.find((item: AnyRecord) => item.id === selectedProjectId) || data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
@@ -1669,7 +1669,7 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
   const modalDecisionVersions = decision && decisionVersions?.decisionId === decision.id ? decisionVersions.items : [];
   const decisionVersion = decision ? modalDecisionVersions.find((item: AnyRecord) => item.id === decision.currentVersionId) || modalDecisionVersions[0] : null;
   const workItem = modal.workItemId ? data.workItems.find((item: AnyRecord) => item.id === modal.workItemId) : data.workItems[0];
-  const source = modal.sourceId ? data.context数据源.find((item: AnyRecord) => item.id === modal.sourceId) : null;
+  const source = modal.sourceId ? data.contextSources.find((item: AnyRecord) => item.id === modal.sourceId) : null;
   const contextItem = modal.contextItemId ? data.contextItems.find((item: AnyRecord) => item.id === modal.contextItemId) : null;
   const selectedSnapshot = modal.sourceSnapshotId ? data.evidenceSnapshots.find((item: AnyRecord) => item.id === modal.sourceSnapshotId) : null;
   const resumeCapsule = session && sessionDetails?.sessionId === session.id ? sessionDetails.resumeCapsule : null;
