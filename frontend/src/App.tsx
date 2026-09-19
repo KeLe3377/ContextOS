@@ -13,7 +13,7 @@ type PageDef = {
   narrow?: boolean;
 };
 
-type WorkspaceData = {
+type 工作区Data = {
   health: AnyRecord | null;
   overview: AnyRecord | null;
   projects: AnyRecord[];
@@ -21,7 +21,7 @@ type WorkspaceData = {
   reviews: AnyRecord[];
   decisions: AnyRecord[];
   workItems: AnyRecord[];
-  contextSources: AnyRecord[];
+  context数据源: AnyRecord[];
   evidenceSnapshots: AnyRecord[];
   contextItems: AnyRecord[];
   rules: AnyRecord[];
@@ -30,7 +30,7 @@ type WorkspaceData = {
   adapters: AnyRecord[];
 };
 
-class ActionCanceled extends Error {
+class Action取消ed extends Error {
   constructor() {
     super("Action canceled");
   }
@@ -48,26 +48,26 @@ type SessionDetails = {
 };
 
 const navGroups: Array<{ label: string; items: Array<[PageId, string, string]> }> = [
-  { label: "Workspace", items: [["overview", "dashboard", "Overview"], ["projects", "folder_open", "Projects"], ["sessions", "terminal", "Sessions"]] },
-  { label: "Governance", items: [["review", "inbox", "Review Inbox"], ["decisions", "gavel", "Decisions"], ["work", "check_box", "Work Items"], ["context", "account_tree", "Context"]] },
-  { label: "System", items: [["rules", "policy", "Rules"], ["settings", "settings", "Settings"]] }
+  { label: "工作区", items: [["overview", "dashboard", "概览"], ["projects", "folder_open", "项目"], ["sessions", "terminal", "会话"]] },
+  { label: "治理", items: [["review", "inbox", "审查收件箱"], ["decisions", "gavel", "决策"], ["work", "check_box", "工作项"], ["context", "account_tree", "上下文"]] },
+  { label: "系统", items: [["rules", "policy", "规则"], ["settings", "settings", "设置"]] }
 ];
 
 const pages: Record<PageId, PageDef> = {
-  overview: { title: "Overview", subtitle: "Workspace status, pending governance, and the next executable work.", actions: [["refresh", "Refresh Context"]] },
-  projects: { title: "Projects", subtitle: "Governed workspace boundaries and their active context policies.", actions: [["create_new_folder", "Add Project", "primary"], ["tune", "Edit Defaults"]] },
-  sessions: { title: "Sessions", subtitle: "Concrete agent work episodes with immutable evidence references.", actions: [["add", "New Session", "primary"], ["sync", "Sync Transcript"], ["play_arrow", "Continue in Agent"], ["hub", "Import Existing Session"], ["upload_file", "Import Transcript"], ["download", "Export Capsule"]] },
-  review: { title: "Review Inbox", subtitle: "Human decisions required before derived context or rules become active.", actions: [["rule", "Approve Selected", "primary"], ["close", "Reject"]] },
-  decisions: { title: "Decisions", subtitle: "Durable choices, rationale, provenance, and version history.", actions: [["add", "Record Decision", "primary"], ["compare_arrows", "Compare Versions"]] },
-  work: { title: "Work Items", subtitle: "Executable units of work with readiness signals and blocked dependencies.", actions: [["play_arrow", "Start Ready Item", "primary"], ["add_task", "Create Item"]] },
-  context: { title: "Context", subtitle: "Governed sources, immutable evidence snapshots, and derived context items.", actions: [["add", "Add Source", "primary"], ["add_box", "Add Context Item"], ["sync", "Sync Sources"]] },
-  rules: { title: "Rules", subtitle: "Versioned governance instructions controlling automated agent behavior.", actions: [["add", "New Rule", "primary"], ["history", "Version History"]] },
-  settings: { title: "Settings", subtitle: "Configure how ContextOS runs, connects to agents, and handles work context.", actions: [["restart_alt", "Reset changes"], ["check", "Save changes", "primary"]], narrow: true }
+  overview: { title: "概览", subtitle: "工作区状态、待处理审查以及下一步可执行工作。", actions: [["refresh", "刷新上下文"]] },
+  projects: { title: "项目", subtitle: "受控工作区边界及活动的上下文策略。", actions: [["create_new_folder", "添加项目", "primary"], ["tune", "编辑默认值"]] },
+  sessions: { title: "会话", subtitle: "带有不可变证据引用的具体智能体工作片段。", actions: [["add", "新建会话", "primary"], ["sync", "同步对话记录"], ["play_arrow", "在智能体中继续"], ["hub", "导入已有会话"], ["upload_file", "导入对话记录"], ["download", "导出摘要胶囊"]] },
+  review: { title: "审查收件箱", subtitle: "派生上下文或规则生效前需要人工决定的事项。", actions: [["rule", "批准选中", "primary"], ["close", "拒绝"]] },
+  decisions: { title: "决策", subtitle: "持久的选择、基本原理、来源与版本历史。", actions: [["add", "记录决策", "primary"], ["compare_arrows", "版本对比"]] },
+  work: { title: "工作项", subtitle: "具有就绪信号和阻塞依赖的可执行工作单元。", actions: [["play_arrow", "启动就绪项", "primary"], ["add_task", "创建工作项"]] },
+  context: { title: "上下文", subtitle: "受控源、不可变证据快照与派生上下文项。", actions: [["add", "添加数据源", "primary"], ["add_box", "添加上下文项"], ["sync", "同步数据源"]] },
+  rules: { title: "规则", subtitle: "控制自动化智能体行为的版本化治理指令。", actions: [["add", "新建规则", "primary"], ["history", "版本历史"]] },
+  settings: { title: "设置", subtitle: "配置 ContextOS 的运行方式、智能体连接及工作上下文处理。", actions: [["restart_alt", "重置更改"], ["check", "保存更改", "primary"]], narrow: true }
 };
 
 const enabledActions = new Set(["refresh-context", "add-project", "new-session", "sync-transcript", "continue-in-agent", "import-existing-session", "import-transcript", "export-capsule", "approve-selected", "reject", "record-decision", "compare-versions", "start-ready-item", "create-item", "add-source", "add-context-item", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 
-function emptyData(): WorkspaceData {
+function emptyData(): 工作区Data {
   return {
     health: null,
     overview: null,
@@ -76,7 +76,7 @@ function emptyData(): WorkspaceData {
     reviews: [],
     decisions: [],
     workItems: [],
-    contextSources: [],
+    context数据源: [],
     evidenceSnapshots: [],
     contextItems: [],
     rules: [],
@@ -317,7 +317,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ text: string; error: boolean } | null>(null);
-  const [data, setData] = useState<WorkspaceData>(() => emptyData());
+  const [data, setData] = useState<工作区Data>(() => emptyData());
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
@@ -432,7 +432,7 @@ export function App() {
       reviews: fetchJson("/api/review-items"),
       decisions: fetchJson("/api/decisions"),
       workItems: fetchJson("/api/work-items"),
-      contextSources: fetchJson("/api/context-sources"),
+      context数据源: fetchJson("/api/context-sources"),
       evidenceSnapshots: fetchJson("/api/evidence-snapshots"),
       contextItems: fetchJson("/api/context-items"),
       rules: fetchJson("/api/rules"),
@@ -452,7 +452,7 @@ export function App() {
     }
     next.projects = next.projects.filter((project) => !isArchived(project));
     next.sessions = next.sessions.filter((session) => !isArchived(session));
-    next.contextSources = next.contextSources.filter((source) => !isArchived(source));
+    next.context数据源 = next.context数据源.filter((source) => !isArchived(source));
     next.contextItems = next.contextItems.filter((item) => !isArchived(item));
     const selectedProject = next.projects.find((project) => project.id === preferredProjectIdRef.current) || next.projects[0];
     const selectedSession = next.sessions.find((session) => session.id === preferredSessionIdRef.current) || next.sessions[0];
@@ -460,7 +460,7 @@ export function App() {
     const selectedDecision = next.decisions.find((decision) => decision.id === preferredDecisionIdRef.current) || next.decisions[0];
     const selectedWorkItem = next.workItems.find((item) => item.id === preferredWorkItemIdRef.current) || next.workItems.find((item) => ["READY", "IN_PROGRESS", "BLOCKED"].includes(item.status)) || next.workItems[0];
     const selectedRule = next.rules.find((rule) => rule.id === preferredRuleIdRef.current) || next.rules[0];
-    const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
+    const selectedContextSource = next.context数据源.find((source) => source.id === preferredContextSourceIdRef.current) || next.context数据源[0];
     setData(next);
     setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
     preferredProjectIdRef.current = selectedProject?.id || null;
@@ -513,7 +513,7 @@ export function App() {
       await loadData();
     } catch (actionError) {
       setActionLoading(false);
-      if (actionError instanceof ActionCanceled) return;
+      if (actionError instanceof Action取消ed) return;
       setActionMessage({ text: actionError instanceof Error ? actionError.message : "Action failed", error: true });
     }
   }, [loadData]);
@@ -521,12 +521,12 @@ export function App() {
   const confirmDestructiveAction = useCallback((message: string) => {
     if (!data.settings?.confirmDestructiveActions) return true;
     if (window.confirm(message)) return true;
-    throw new ActionCanceled();
+    throw new Action取消ed();
   }, [data.settings?.confirmDestructiveActions]);
 
   const projectById = useCallback((projectId: string) => data.projects.find((item) => item.id === projectId), [data.projects]);
   const sessionById = useCallback((sessionId: string) => data.sessions.find((item) => item.id === sessionId), [data.sessions]);
-  const sourceById = useCallback((sourceId: string) => data.contextSources.find((item) => item.id === sourceId), [data.contextSources]);
+  const sourceById = useCallback((sourceId: string) => data.context数据源.find((item) => item.id === sourceId), [data.context数据源]);
   const ruleById = useCallback((ruleId: string) => data.rules.find((item) => item.id === ruleId), [data.rules]);
   const decisionById = useCallback((decisionId: string) => data.decisions.find((item) => item.id === decisionId), [data.decisions]);
   const workItemById = useCallback((workItemId: string) => data.workItems.find((item) => item.id === workItemId), [data.workItems]);
@@ -677,11 +677,11 @@ export function App() {
     await sendJson(`/api/context-sources/${source.id}/${action}`, "POST", { expectedRevision: source.revision });
   }, [confirmDestructiveAction, sourceById]);
 
-  const syncActiveSources = useCallback(async () => {
-    const sources = data.contextSources.filter((source) => source.status === "ACTIVE");
+  const syncActive数据源 = useCallback(async () => {
+    const sources = data.context数据源.filter((source) => source.status === "ACTIVE");
     if (!sources.length) throw new Error("No active context sources are available to sync");
     for (const source of sources) await syncSource(source.id);
-  }, [data.contextSources, syncSource]);
+  }, [data.context数据源, syncSource]);
 
   const verifyEvidence = useCallback((snapshotId: string) => sendJson(`/api/evidence-snapshots/${snapshotId}/verify`, "POST", {}), []);
   const openEvidenceDetail = useCallback(async (snapshot: AnyRecord) => {
@@ -753,7 +753,7 @@ export function App() {
   const transitionWorkItem = useCallback(async (workItemId: string, action: string) => {
     const item = workItemById(workItemId);
     if (!item) throw new Error("No work item is available");
-    if (action === "cancel" && !confirmDestructiveAction(`Cancel work item "${item.title}"?`)) return;
+    if (action === "cancel" && !confirmDestructiveAction(`取消 work item "${item.title}"?`)) return;
     await sendJson(`/api/work-items/${item.id}/${action}`, "POST", { expectedRevision: item.revision });
   }, [confirmDestructiveAction, workItemById]);
   const startWorkItemSession = useCallback(async (workItemId: string) => {
@@ -789,7 +789,7 @@ export function App() {
     if (action === "new-rule") return data.projects[0] ? setModal({ kind: "rule" }) : setActionMessage({ text: "Create a project before adding rules", error: true });
     if (action === "add-source") return data.projects[0] ? setModal({ kind: "source" }) : setActionMessage({ text: "Create a project before adding context sources", error: true });
     if (action === "add-context-item") {
-      const selectedSource = selectedContextSourceId ? data.contextSources.find((item) => item.id === selectedContextSourceId) : null;
+      const selectedSource = selectedContextSourceId ? data.context数据源.find((item) => item.id === selectedContextSourceId) : null;
       const snapshot = selectedSource?.lastSnapshotId ? data.evidenceSnapshots.find((item) => item.id === selectedSource.lastSnapshotId) : null;
       return data.projects[0] ? setModal({ kind: "contextItem", sourceSnapshotId: snapshot?.id }) : setActionMessage({ text: "Create a project before adding context items", error: true });
     }
@@ -807,7 +807,7 @@ export function App() {
       if (!review) return setActionMessage({ text: "No open review item is available", error: true });
       return setModal({ kind: action === "approve-selected" ? "reviewResolve" : "reviewDismiss", reviewId: review.id });
     }
-    if (action === "sync-sources") return void runAction(syncActiveSources, "Context sources synced");
+    if (action === "sync-sources") return void runAction(syncActive数据源, "Context sources synced");
     if (action === "continue-in-agent") {
       const selected = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : null;
       const session = selected && ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(selected.status) ? selected : data.sessions.find((item) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(item.status));
@@ -845,7 +845,7 @@ export function App() {
         expectedRevision: data.settings!.revision
       }), "Settings saved");
     }
-  }, [continueSession, data.contextSources, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, startWorkItemSession, syncActiveSources, syncSessionTranscript, transitionWorkItem]);
+  }, [continueSession, data.context数据源, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, startWorkItemSession, syncActive数据源, syncSessionTranscript, transitionWorkItem]);
 
   const navigate = (next: PageId) => {
     setPage(next);
@@ -854,7 +854,7 @@ export function App() {
   };
 
   const renderPage = () => {
-    if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>Loading workspace data...</EmptyNote></>;
+    if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>正在加载工作区数据...</EmptyNote></>;
     const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -873,7 +873,7 @@ export function App() {
     <>
       <aside className="sidebar">
         <div>
-          <div className="brand"><div className="brand-mark">{icon("terminal")}</div><div><div className="brand-title">ContextOS</div><div className="brand-sub mono">AGENT WORKSPACE</div></div></div>
+          <div className="brand"><div className="brand-mark">{icon("terminal")}</div><div><div className="brand-title">ContextOS</div><div className="brand-sub mono">智能体工作区</div></div></div>
           <div className="nav">
             {navGroups.map((group) => (
               <div className="nav-group" key={group.label}>
@@ -887,21 +887,21 @@ export function App() {
             ))}
           </div>
         </div>
-        <div className="daemon"><div className="daemon-main"><span className="dot" /><div><div className="daemon-title">{data.health ? "Daemon running" : loading ? "Checking daemon" : "Daemon offline"}</div><div className="daemon-sub mono">{API_BASE.replace(/^https?:\/\//, "")}</div></div></div><button className="icon-btn" onClick={() => navigate("settings")} title="Settings">{icon("settings")}</button></div>
+        <div className="daemon"><div className="daemon-main"><span className="dot" /><div><div className="daemon-title">{data.health ? "守护进程运行中" : loading ? "检查守护进程" : "守护进程离线"}</div><div className="daemon-sub mono">{API_BASE.replace(/^https?:\/\//, "")}</div></div></div><button className="icon-btn" onClick={() => navigate("settings")} title="Settings">{icon("settings")}</button></div>
       </aside>
       <div className="shell">
         <header className="topbar">
-          <div className="crumbs mono"><span>Workspace</span><span>/</span><span className="crumb-current">{pages[page].title}</span><ProjectPill project={data.projects[0]} /></div>
+          <div className="crumbs mono"><span>工作区</span><span>/</span><span className="crumb-current">{pages[page].title}</span><ProjectPill project={data.projects[0]} /></div>
           <div className="top-actions">
-            <div className="search">{icon("search")}<input placeholder="Search projects, sessions, decisions..." /></div>
+            <div className="search">{icon("search")}<input placeholder="搜索项目、会话、决策..." /></div>
             <div className="agent-pill mono"><span className="dot" /><span>{data.adapters.filter((adapter) => adapter.available).length} connected</span><span className="quiet">·</span><strong>{data.adapters.length} adapters available</strong></div>
             <button className="icon-btn" title="Refresh" onClick={() => void loadData()}>{icon("refresh")}</button>
-            <div className="identity"><div className="avatar">AD</div><div><strong>Adam</strong><div className="daemon-sub mono">Lead Architect</div></div></div>
+            <div className="identity"><div className="avatar">AD</div><div><strong>Adam</strong><div className="daemon-sub mono">首席架构师</div></div></div>
           </div>
         </header>
         <main className="main"><div className={`page ${pages[page].narrow ? "narrow" : ""}`}>{renderPage()}</div></main>
       </div>
-      <WorkspaceModal
+      <工作区Modal
         modal={modal}
         setModal={setModal}
         data={data}
@@ -942,32 +942,32 @@ function PageHeader({ pageDef, actionLoading, error, actionMessage, onAction }: 
 }
 
 function ProjectPill({ project }: { project?: AnyRecord }) {
-  return <span className="project-pill">{icon("folder_managed")} {project ? `${project.name} (${project.rootPath})` : "No project loaded"}</span>;
+  return <span className="project-pill">{icon("folder_managed")} {project ? `${project.name} (${project.rootPath})` : "未加载项目"}</span>;
 }
 
-function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode }) {
+function OverviewPage({ data, header }: { data: 工作区Data; header: ReactNode }) {
   const overview = data.overview;
   const activeProject = overview?.project || data.projects[0];
   const nextWork = overview?.nextWorkItems || data.workItems.filter((item) => ["READY", "IN_PROGRESS"].includes(item.status)).map((item) => ({ id: item.id, title: item.title, status: item.status, subtitle: item.description || "", updatedAt: item.updatedAt }));
   const pendingReviews = overview?.pendingReviews || data.reviews.map((item) => ({ id: item.id, title: item.summary, status: item.status, subtitle: item.proposedResolution || "", updatedAt: item.updatedAt }));
   const kpis = overview?.kpis || { sessions: data.sessions.length, pendingReviews: data.reviews.length, readyWorkItems: nextWork.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, activeRules: data.rules.filter((item) => item.status === "ACTIVE").length };
-  const contextHealth = overview?.contextHealth || { activeSources: data.contextSources.filter((item) => item.status === "ACTIVE").length, pausedSources: data.contextSources.filter((item) => item.status === "PAUSED").length, evidenceSnapshots: data.evidenceSnapshots.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, staleContextItems: data.contextItems.filter((item) => item.status === "STALE").length };
+  const contextHealth = overview?.contextHealth || { active数据源: data.context数据源.filter((item) => item.status === "ACTIVE").length, paused数据源: data.context数据源.filter((item) => item.status === "PAUSED").length, evidenceSnapshots: data.evidenceSnapshots.length, activeContextItems: data.contextItems.filter((item) => item.status === "ACTIVE").length, staleContextItems: data.contextItems.filter((item) => item.status === "STALE").length };
   const latestPackage = overview?.latestContextPackage;
   return (
     <>
       {header}
-      <div className="kpi-grid">{[[kpis.sessions, "Sessions"], [kpis.readyWorkItems, "Ready work"], [kpis.pendingReviews, "Review required"], [kpis.activeContextItems, "Active context"], [kpis.activeRules, "Active rules"]].map(([value, label]) => <div className="kpi" key={String(label)}><div className="kpi-value">{value}</div><div className="kpi-label mono">{label}</div></div>)}</div>
+      <div className="kpi-grid">{[[kpis.sessions, "Sessions"], [kpis.readyWorkItems, "就绪工作"], [kpis.pendingReviews, "需要审查"], [kpis.activeContextItems, "活动上下文"], [kpis.activeRules, "活动规则"]].map(([value, label]) => <div className="kpi" key={String(label)}><div className="kpi-value">{value}</div><div className="kpi-label mono">{label}</div></div>)}</div>
       <div className="grid cols-12" style={{ marginTop: 16 }}>
         <div className="span-8 stack">
-          <Panel title="Current Project" iconName="folder_open">{activeProject ? <div className="pad stack"><div className="split"><div><div className="title-sm">{activeProject.name}</div><div className="muted">{activeProject.description || "Agent workspace governance"}</div></div><Badge text={activeProject.status} tone={toneForStatus(activeProject.status)} /></div><div className="progress"><span style={{ width: "72%" }} /></div><div className="split mono muted"><span>Boundary: {activeProject.rootPath}</span><span>Revision: {activeProject.revision}</span></div></div> : <EmptyNote>Create a project to start using ContextOS.</EmptyNote>}</Panel>
-          <Panel title="Next Work Items" iconName="task_alt" meta={`${nextWork.length} ready signals`}><Rows rows={nextWork.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="No ready work items." /></Panel>
-          <Panel title="Latest Context Package" iconName="inventory_2" meta={latestPackage?.id || "No package"}>
-            {latestPackage ? <div className="stack compact"><div className="metric-row"><span>Purpose</span><strong>{latestPackage.purpose}</strong></div><div className="metric-row"><span>Active work</span><strong>{latestPackage.workItems?.length || 0}</strong></div><div className="metric-row"><span>Decisions / Rules</span><strong>{(latestPackage.decisions?.length || 0) + (latestPackage.rules?.length || 0)}</strong></div><div className="metric-row"><span>Context / Evidence</span><strong>{latestPackage.contextItems.length} / {latestPackage.evidenceSnapshots.length}</strong></div>{[...(latestPackage.workItems || []), ...latestPackage.contextItems].slice(0, 4).map((item: AnyRecord) => <div className="metric-row" key={`${item.resourceType}-${item.id}`}><span>{item.title}</span><Badge text={item.selectionReason} tone="blue" /></div>)}</div> : <EmptyNote>Continue a Session to generate a context package.</EmptyNote>}
+          <Panel title="当前项目" iconName="folder_open">{activeProject ? <div className="pad stack"><div className="split"><div><div className="title-sm">{activeProject.name}</div><div className="muted">{activeProject.description || "智能体工作区治理"}</div></div><Badge text={activeProject.status} tone={toneForStatus(activeProject.status)} /></div><div className="progress"><span style={{ width: "72%" }} /></div><div className="split mono muted"><span>Boundary: {activeProject.rootPath}</span><span>Revision: {activeProject.revision}</span></div></div> : <EmptyNote>请创建一个项目以开始使用 ContextOS。</EmptyNote>}</Panel>
+          <Panel title="下一步工作项" iconName="task_alt" meta={`${nextWork.length} ready signals`}><Rows rows={nextWork.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="暂无就绪工作项。" /></Panel>
+          <Panel title="最新上下文包" iconName="inventory_2" meta={latestPackage?.id || "No package"}>
+            {latestPackage ? <div className="stack compact"><div className="metric-row"><span>Purpose</span><strong>{latestPackage.purpose}</strong></div><div className="metric-row"><span>Active work</span><strong>{latestPackage.workItems?.length || 0}</strong></div><div className="metric-row"><span>Decisions / Rules</span><strong>{(latestPackage.decisions?.length || 0) + (latestPackage.rules?.length || 0)}</strong></div><div className="metric-row"><span>Context / Evidence</span><strong>{latestPackage.contextItems.length} / {latestPackage.evidenceSnapshots.length}</strong></div>{[...(latestPackage.workItems || []), ...latestPackage.contextItems].slice(0, 4).map((item: AnyRecord) => <div className="metric-row" key={`${item.resourceType}-${item.id}`}><span>{item.title}</span><Badge text={item.selectionReason} tone="blue" /></div>)}</div> : <EmptyNote>请继续一个会话以生成上下文包。</EmptyNote>}
           </Panel>
         </div>
         <div className="span-4 stack">
-          <Panel title="Governance Queue" iconName="inbox"><Rows rows={pendingReviews.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="No pending review items." /></Panel>
-          <Panel title="Context Health" iconName="link"><div className="metric-row"><span>Active sources</span><strong>{contextHealth.activeSources}</strong></div><div className="metric-row"><span>Paused sources</span><strong>{contextHealth.pausedSources}</strong></div><div className="metric-row"><span>Evidence snapshots</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>Stale context</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
+          <Panel title="治理队列" iconName="inbox"><Rows rows={pendingReviews.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="暂无待审查项。" /></Panel>
+          <Panel title="上下文健康度" iconName="link"><div className="metric-row"><span>活动数据源</span><strong>{contextHealth.active数据源}</strong></div><div className="metric-row"><span>暂停数据源</span><strong>{contextHealth.paused数据源}</strong></div><div className="metric-row"><span>证据快照</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>过期上下文</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
         </div>
       </div>
     </>
@@ -979,14 +979,14 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
   const selectedProject = data.projects.find((project: AnyRecord) => project.id === selectedProjectId) || data.projects[0];
   const projectSessions = selectedProject ? data.sessions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectWork = selectedProject ? data.workItems.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
-  const projectSources = selectedProject ? data.contextSources.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
+  const project数据源 = selectedProject ? data.context数据源.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectEvidence = selectedProject ? data.evidenceSnapshots.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectRules = selectedProject ? data.rules.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectDecisions = selectedProject ? data.decisions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const latestSessions = [...projectSessions].sort((a: AnyRecord, b: AnyRecord) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, 5);
   const activeWork = projectWork.filter((item: AnyRecord) => ["READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW"].includes(item.status)).slice(0, 5);
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
-    <Panel title="Project Register" iconName="folder_open"><Table headers={["Project", "Boundary", "Rules", "Health", "Action"]} rows={data.projects.map((project: AnyRecord) => [
+    <Panel title="项目注册表" iconName="folder_open"><Table headers={["Project", "Boundary", "Rules", "Health", "Action"]} rows={data.projects.map((project: AnyRecord) => [
       <div className={`session-cell ${project.id === selectedProject?.id ? "selected" : ""}`}><strong>{project.name}</strong><div className="muted">{project.description || "Agent workspace"}</div></div>,
       <span className="mono">{project.rootPath}</span>,
       <Badge text={`${project.defaultRuleIds?.length || 0} defaults`} tone="blue" />,
@@ -997,9 +997,9 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
         <button className="icon-btn table-action" title="Activate project" disabled={project.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionProject(project.id, "activate"), "Project activated")}>{icon("toggle_on")}</button>
         <button className="icon-btn table-action" title="Archive project" disabled={actionLoading} onClick={() => runAction(() => archiveProject(project.id), "Project archived")}>{icon("archive")}</button>
       </div>
-    ])} empty="No projects yet." /></Panel>
+    ])} empty="暂无项目。" /></Panel>
   </div><div className="span-4 stack">
-    <Panel title="Selected Project" iconName="folder_open" meta={selectedProject?.id || "No project"}>
+    <Panel title="所选项目" iconName="folder_open" meta={selectedProject?.id || "No project"}>
       {selectedProject ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">
           <div><span className="mono muted">STATUS</span><strong>{selectedProject.status}</strong></div>
@@ -1008,7 +1008,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
           <div className="detail-wide"><span className="mono muted">NAME</span><strong>{selectedProject.name}</strong></div>
           <div className="detail-wide"><span className="mono muted">ROOT PATH</span><strong className="mono">{selectedProject.rootPath}</strong></div>
           <div className="detail-wide"><span className="mono muted">DESCRIPTION</span><strong>{selectedProject.description || "-"}</strong></div>
-          <div className="detail-wide"><span className="mono muted">AGENT ADAPTERS</span><strong>{selectedProject.agentAdapterIds?.length ? selectedProject.agentAdapterIds.join(", ") : "Workspace default"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">AGENT ADAPTERS</span><strong>{selectedProject.agentAdapterIds?.length ? selectedProject.agentAdapterIds.join(", ") : "工作区 default"}</strong></div>
           <div className="detail-wide"><span className="mono muted">DEFAULT RULES</span><strong>{selectedProject.defaultRuleIds?.length ? selectedProject.defaultRuleIds.join(", ") : "No defaults"}</strong></div>
         </div>
         <div className="row-actions">
@@ -1016,23 +1016,23 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
           <button className="btn primary" disabled={selectedProject.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionProject(selectedProject.id, "activate"), "Project activated")}>{icon("toggle_on")}<span>Activate</span></button>
           <button className="btn" disabled={actionLoading} onClick={() => runAction(() => archiveProject(selectedProject.id), "Project archived")}>{icon("archive")}<span>Archive</span></button>
         </div>
-      </div> : <EmptyNote>Select or create a project to inspect its workspace boundary.</EmptyNote>}
+      </div> : <EmptyNote>请选择或创建一个项目以检查其工作区边界。</EmptyNote>}
     </Panel>
-    <Panel title="Workspace Footprint" iconName="inventory_2" meta={selectedProject ? selectedProject.name : ""}>
+    <Panel title="工作区 Footprint" iconName="inventory_2" meta={selectedProject ? selectedProject.name : ""}>
       {selectedProject ? <div className="kpi-grid compact-kpis">
         <div className="kpi"><div className="kpi-value">{projectSessions.length}</div><div className="kpi-label mono">Sessions</div></div>
         <div className="kpi"><div className="kpi-value">{projectWork.length}</div><div className="kpi-label mono">Work</div></div>
-        <div className="kpi"><div className="kpi-value">{projectSources.length}</div><div className="kpi-label mono">Sources</div></div>
+        <div className="kpi"><div className="kpi-value">{project数据源.length}</div><div className="kpi-label mono">数据源</div></div>
         <div className="kpi"><div className="kpi-value">{projectEvidence.length}</div><div className="kpi-label mono">Evidence</div></div>
         <div className="kpi"><div className="kpi-value">{projectRules.length}</div><div className="kpi-label mono">Rules</div></div>
         <div className="kpi"><div className="kpi-value">{projectDecisions.length}</div><div className="kpi-label mono">Decisions</div></div>
-      </div> : <EmptyNote>No project selected.</EmptyNote>}
+      </div> : <EmptyNote>未选择项目。</EmptyNote>}
     </Panel>
-    <Panel title="Recent Sessions" iconName="terminal" meta={`${latestSessions.length} shown`}>
-      {latestSessions.length ? <div className="stack compact">{latestSessions.map((session: AnyRecord) => <div className="metric-row evidence-row" key={session.id}><div className="evidence-row-main"><div className="title-sm">{session.title || session.id}</div><div className="muted mono">{session.agentAdapterId} · {fmtDate(session.updatedAt)}</div></div><Badge text={session.status} tone={toneForStatus(session.status)} /></div>)}</div> : <EmptyNote>No sessions for this project yet.</EmptyNote>}
+    <Panel title="最近会话" iconName="terminal" meta={`${latestSessions.length} shown`}>
+      {latestSessions.length ? <div className="stack compact">{latestSessions.map((session: AnyRecord) => <div className="metric-row evidence-row" key={session.id}><div className="evidence-row-main"><div className="title-sm">{session.title || session.id}</div><div className="muted mono">{session.agentAdapterId} · {fmtDate(session.updatedAt)}</div></div><Badge text={session.status} tone={toneForStatus(session.status)} /></div>)}</div> : <EmptyNote>该项目暂无会话。</EmptyNote>}
     </Panel>
-    <Panel title="Active Work" iconName="task_alt" meta={`${activeWork.length} active`}>
-      {activeWork.length ? <div className="stack compact">{activeWork.map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted">{item.description || item.id}</div></div><Badge text={item.status} tone={toneForStatus(item.status)} /></div>)}</div> : <EmptyNote>No active work for this project.</EmptyNote>}
+    <Panel title="活动工作" iconName="task_alt" meta={`${activeWork.length} active`}>
+      {activeWork.length ? <div className="stack compact">{activeWork.map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted">{item.description || item.id}</div></div><Badge text={item.status} tone={toneForStatus(item.status)} /></div>)}</div> : <EmptyNote>该项目暂无活动工作。</EmptyNote>}
     </Panel>
   </div></div></>;
 }
@@ -1050,7 +1050,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
   const syncLabel = latestAgentTranscript?.metadata?.sourceUpdatedAt ? `Last synced ${fmtDate(latestAgentTranscript.metadata.sourceUpdatedAt)}` : selectedSession?.externalSessionId ? "Bound, not synced yet" : "Not bound yet";
   return (
     <>{header}<div className="stack">
-      <Panel title="Session Episodes" iconName="terminal"><Table headers={["Session", "Agent", "Started", "Updated", "Status", "Action"]} rows={data.sessions.map((session: AnyRecord) => [
+      <Panel title="会话片段" iconName="terminal"><Table headers={["Session", "Agent", "Started", "Updated", "Status", "Action"]} rows={data.sessions.map((session: AnyRecord) => [
         <div className={`session-cell ${session.id === selectedSession?.id ? "selected" : ""}`}><strong>{session.title || session.id}</strong><div className="muted">{session.intent || ""}</div>{session.externalSessionId ? <div className="muted mono">bound {session.externalSessionId}</div> : <div className="muted mono">not bound</div>}</div>,
         session.agentAdapterId,
         fmtDate(session.startedAt),
@@ -1066,9 +1066,9 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           <button className="icon-btn table-action" title="Export session capsule" disabled={actionLoading} onClick={() => runAction(() => exportSessionCapsule(session.id), "Session capsule exported")}>{icon("download")}</button>
           <button className="icon-btn table-action" title="Archive session" disabled={session.status === "RUNNING" || actionLoading} onClick={() => runAction(() => archiveSession(session.id), "Session archived")}>{icon("archive")}</button>
         </div>
-      ])} empty="No sessions yet." /></Panel>
-      <Panel title="Selected Session Detail" iconName="inventory_2" meta={selectedSession ? selectedSession.id : "No session"}>
-        {sessionDetailsLoading ? <EmptyNote>Loading selected session detail...</EmptyNote> : null}
+      ])} empty="暂无会话。" /></Panel>
+      <Panel title="所选会话详情" iconName="inventory_2" meta={selectedSession ? selectedSession.id : "No session"}>
+        {sessionDetailsLoading ? <EmptyNote>正在加载所选会话详情...</EmptyNote> : null}
         {selectedSession && details ? <div className="session-detail">
           <div className="detail-grid">
             <div><span className="mono muted">STATUS</span><strong>{selectedSession.status}</strong></div>
@@ -1101,11 +1101,11 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <button className="btn" disabled={actionLoading} onClick={() => runAction(() => exportSessionCapsule(selectedSession.id), "Session capsule exported")}>{icon("download")}<span>Export Capsule</span></button>
           </div>
           <div>
-            <div className="title-sm evidence-section-title">Run History</div>
+            <div className="title-sm evidence-section-title">运行历史</div>
             {runs.length ? <div className="stack compact">{runs.map((run: AnyRecord) => <div className="metric-row evidence-row" key={run.id}><div className="evidence-row-main"><div className="title-sm">{run.failureMessage || `Agent run ${run.status.toLowerCase()}`}</div><div className="muted mono">{run.id} · {fmtDate(run.startedAt || run.createdAt)}{run.endedAt ? ` · ended ${fmtDate(run.endedAt)}` : ""}</div><div className="muted mono">{run.pid ? `pid ${run.pid}` : "no pid"}{run.exitCode !== null && run.exitCode !== undefined ? ` · exit ${run.exitCode}` : ""}</div></div><Badge text={run.failureCode || run.status} tone={toneForStatus(run.status)} /></div>)}</div> : <EmptyNote>No agent runs recorded.</EmptyNote>}
           </div>
           {details.contextPack ? <div>
-            <div className="title-sm evidence-section-title">Context Package Selection</div>
+            <div className="title-sm evidence-section-title">上下文包选择</div>
             <div className="stack compact">{[
               ...(details.contextPack.workItems || []), ...(details.contextPack.decisions || []),
               ...details.contextPack.contextItems, ...details.contextPack.evidenceSnapshots,
@@ -1113,19 +1113,19 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             ].map((item: AnyRecord) => <div className="metric-row evidence-row" key={`${item.resourceType}-${item.id}`}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted">{item.summary || item.contentHash || "No inline summary"}</div></div><Badge text={item.selectionReason} tone="blue" /></div>)}</div>
           </div> : null}
           {details.activity.length ? <div>
-            <div className="title-sm evidence-section-title">Recent Activity</div>
+            <div className="title-sm evidence-section-title">近期活动</div>
             <div className="stack compact">{details.activity.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={`${item.kind}-${item.id}`}><div className="evidence-row-main"><div className="title-sm">{item.summary || item.eventType}</div><div className="muted mono">{fmtDate(item.createdAt)} · {item.kind}{item.actorType ? ` · ${item.actorType}` : ""}</div>{Object.keys(item.metadata || {}).length ? <div className="muted mono">{Object.entries(item.metadata).slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(" · ")}</div> : null}</div><Badge text={item.eventType} tone={item.kind === "AUDIT" ? "blue" : toneForStatus(item.eventType)} /></div>)}</div>
           </div> : <EmptyNote>No runtime activity has been recorded for this session yet.</EmptyNote>}
           {details.transcriptEvents?.events?.length ? <div>
-            <div className="title-sm evidence-section-title">Transcript Events</div>
+            <div className="title-sm evidence-section-title">对话记录事件</div>
             <div className="muted mono">{details.transcriptEvents.parserVersion || "unknown parser"} · {details.transcriptEvents.eventCount} events · showing latest {Math.min(12, details.transcriptEvents.returnedEventCount)}{details.transcriptEvents.eventsTruncated ? " from a 200-event window" : ""}{details.transcriptEvents.transcriptTruncated ? " · transcript truncated at import limit" : ""} · evidence {details.transcriptEvents.evidenceSnapshotId}</div>
             <div className="stack compact">{details.transcriptEvents.events.slice(-12).map((event: AnyRecord) => <div className="metric-row evidence-row" key={`${event.ordinal}-${event.kind}`}><div className="evidence-row-main"><div className="title-sm">{transcriptEventLabel(event)}</div>{event.timestamp ? <div className="muted mono">{fmtDate(event.timestamp)}</div> : null}<div className="muted mono">{transcriptEventPreview(event)}</div></div><Badge text={`#${event.ordinal} ${event.kind}`} tone={event.kind === "message" ? "blue" : event.kind === "summary" ? "green" : "amber"} /></div>)}</div>
           </div> : <EmptyNote>No structured transcript events have been imported for this session yet.</EmptyNote>}
           {details.evidence.length ? <div>
-            <div className="title-sm evidence-section-title">Evidence Snapshots</div>
+            <div className="title-sm evidence-section-title">证据快照</div>
             <div className="stack compact">{details.evidence.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><div className="row-actions"><Badge text={item.evidenceType} tone="blue" /><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${item.id}\n${item.storageRef || ""}\n${item.contentHash || ""}`)}>{icon("content_copy")}</button></div></div>)}</div>
           </div> : <EmptyNote>No evidence has been captured for this session yet.</EmptyNote>}
-        </div> : !sessionDetailsLoading ? <EmptyNote>Select or create a session to inspect its context package, runtime state, evidence, and resume capsule.</EmptyNote> : null}
+        </div> : !sessionDetailsLoading ? <EmptyNote>请选择或创建一个会话以检查其上下文包、运行时状态、证据及恢复胶囊。</EmptyNote> : null}
       </Panel>
     </div></>
   );
@@ -1137,7 +1137,7 @@ function ReviewPage(props: AnyRecord & { header: ReactNode }) {
   const sourceObject = selectedReview ? [...data.rules, ...data.sessions, ...data.contextItems, ...data.evidenceSnapshots, ...data.decisions, ...data.workItems].find((item: AnyRecord) => item.id === selectedReview.sourceId) : null;
   const logItems = selectedReview && reviewActionLog?.reviewId === selectedReview.id ? reviewActionLog.items : [];
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
-    <Panel title="Review Queue" iconName="inbox"><Table headers={["Review", "Source", "Priority", "Status", "Action"]} rows={data.reviews.map((item: AnyRecord) => [
+    <Panel title="审查队列" iconName="inbox"><Table headers={["Review", "Source", "Priority", "Status", "Action"]} rows={data.reviews.map((item: AnyRecord) => [
       <div className={`session-cell ${item.id === selectedReview?.id ? "selected" : ""}`}><strong>{item.summary}</strong><div className="muted">{item.proposedResolution || item.triggerType}</div></div>,
       <span className="mono">{item.sourceType} · {item.sourceId}</span>,
       <Badge text={item.priority} tone={item.priority === "URGENT" || item.priority === "HIGH" ? "amber" : "blue"} />,
@@ -1149,9 +1149,9 @@ function ReviewPage(props: AnyRecord & { header: ReactNode }) {
         <button className="icon-btn table-action" title="Resolve review" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewResolve", reviewId: item.id })}>{icon("task_alt")}</button>
         <button className="icon-btn table-action" title="Dismiss review" disabled={!["OPEN", "IN_PROGRESS"].includes(item.status) || actionLoading} onClick={() => setModal({ kind: "reviewDismiss", reviewId: item.id })}>{icon("block")}</button>
       </div>
-    ])} empty="No review items." /></Panel>
+    ])} empty="暂无审查项。" /></Panel>
   </div><div className="span-4 stack">
-    <Panel title="Selected Review" iconName="rate_review" meta={selectedReview?.id || "No review"}>
+    <Panel title="所选审查" iconName="rate_review" meta={selectedReview?.id || "No review"}>
       {selectedReview ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">
           <div><span className="mono muted">STATUS</span><strong>{selectedReview.status}</strong></div>
@@ -1171,12 +1171,12 @@ function ReviewPage(props: AnyRecord & { header: ReactNode }) {
           <button className="btn" disabled={!["OPEN", "IN_PROGRESS"].includes(selectedReview.status) || actionLoading} onClick={() => setModal({ kind: "reviewResolve", reviewId: selectedReview.id })}>{icon("task_alt")}<span>Resolve</span></button>
           <button className="btn" disabled={!["OPEN", "IN_PROGRESS"].includes(selectedReview.status) || actionLoading} onClick={() => setModal({ kind: "reviewDismiss", reviewId: selectedReview.id })}>{icon("block")}<span>Dismiss</span></button>
         </div>
-      </div> : <EmptyNote>No review item selected.</EmptyNote>}
+      </div> : <EmptyNote>未选择审查项。</EmptyNote>}
     </Panel>
-    <Panel title="Action Log" iconName="playlist_add_check" meta={selectedReview ? `${logItems.length} actions` : ""}>
-      {reviewActionLog?.loading ? <EmptyNote>Loading review action log...</EmptyNote> : null}
+    <Panel title="操作日志" iconName="playlist_add_check" meta={selectedReview ? `${logItems.length} actions` : ""}>
+      {reviewActionLog?.loading ? <EmptyNote>正在加载审查操作日志...</EmptyNote> : null}
       {reviewActionLog?.error ? <EmptyNote>{reviewActionLog.error}</EmptyNote> : null}
-      {logItems.length ? <div className="version-list">{logItems.map((entry: AnyRecord) => <div className="version-row" key={entry.id}><div><div className="title-sm">{entry.action}</div><div className="muted mono">{fmtDate(entry.createdAt)}</div><div className="muted">{entry.after?.resolutionReason || entry.after?.status || ""}</div></div></div>)}</div> : !reviewActionLog?.loading && !reviewActionLog?.error ? <EmptyNote>No action history yet.</EmptyNote> : null}
+      {logItems.length ? <div className="version-list">{logItems.map((entry: AnyRecord) => <div className="version-row" key={entry.id}><div><div className="title-sm">{entry.action}</div><div className="muted mono">{fmtDate(entry.createdAt)}</div><div className="muted">{entry.after?.resolutionReason || entry.after?.status || ""}</div></div></div>)}</div> : !reviewActionLog?.loading && !reviewActionLog?.error ? <EmptyNote>暂无操作历史。</EmptyNote> : null}
     </Panel>
   </div></div></>;
 }
@@ -1194,7 +1194,7 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
   const comparisonFields: Array<[string, string]> = [["statement", "Statement"], ["rationale", "Rationale"], ["problemContext", "Problem context"], ["consequences", "Consequences"], ["alternatives", "Alternatives"], ["references", "References"]];
   const displayDecisionValue = (value: unknown) => Array.isArray(value) ? (value.length ? value.join("; ") : "-") : String(value || "-");
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
-    <Panel title="Decision Register" iconName="gavel"><Table headers={["Decision", "Version", "Updated", "State", "Action"]} rows={data.decisions.map((item: AnyRecord) => [
+    <Panel title="决策注册表" iconName="gavel"><Table headers={["Decision", "Version", "Updated", "State", "Action"]} rows={data.decisions.map((item: AnyRecord) => [
       <div className={`session-cell ${item.id === selectedDecision?.id ? "selected" : ""}`}><strong>{item.title}</strong><div className="muted mono">{item.id}</div></div>,
       item.currentVersionId || "-",
       fmtDate(item.updatedAt),
@@ -1209,9 +1209,9 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
         <button className="icon-btn table-action" title="Reverse accepted decision" disabled={item.status !== "ACCEPTED" || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "reverse"), "Decision reversed")}>{icon("undo")}</button>
         <button className="icon-btn table-action" title="Archive decision" disabled={!["DRAFT", "PROPOSED", "SUPERSEDED", "REVERSED"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionDecision(item.id, "archive"), "Decision archived")}>{icon("archive")}</button>
       </div>
-    ])} empty="No decisions yet." /></Panel>
+    ])} empty="暂无决策。" /></Panel>
   </div><div className="span-4 stack">
-    <Panel title="Selected Decision" iconName="gavel" meta={selectedDecision?.id || "No decision"}>
+    <Panel title="所选决策" iconName="gavel" meta={selectedDecision?.id || "No decision"}>
       {selectedDecision ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">
           <div><span className="mono muted">STATUS</span><strong>{selectedDecision.status}</strong></div>
@@ -1234,14 +1234,14 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
           <button className="btn" disabled={selectedDecision.status !== "ACCEPTED" || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "reverse"), "Decision reversed")}>{icon("undo")}<span>Reverse</span></button>
           <button className="btn" disabled={!["DRAFT", "PROPOSED", "SUPERSEDED", "REVERSED"].includes(selectedDecision.status) || actionLoading} onClick={() => runAction(() => transitionDecision(selectedDecision.id, "archive"), "Decision archived")}>{icon("archive")}<span>Archive</span></button>
         </div>
-      </div> : <EmptyNote>No decision selected.</EmptyNote>}
+      </div> : <EmptyNote>未选择决策。</EmptyNote>}
     </Panel>
-    <Panel title="Decision Versions" iconName="article" meta={selectedDecision ? `${versions.length} versions` : ""}>
-      {decisionVersions?.loading ? <EmptyNote>Loading decision versions...</EmptyNote> : null}
+    <Panel title="决策版本" iconName="article" meta={selectedDecision ? `${versions.length} versions` : ""}>
+      {decisionVersions?.loading ? <EmptyNote>正在加载决策版本...</EmptyNote> : null}
       {decisionVersions?.error ? <EmptyNote>{decisionVersions.error}</EmptyNote> : null}
-      {versions.length ? <div className="version-list">{versions.map((version: AnyRecord) => <div className="version-row" key={version.id}><div><div className="title-sm">v{version.versionNumber} · {version.state}</div><div className="muted">{version.statement}</div><div className="muted mono">{version.createdByType}{version.createdById ? `:${version.createdById}` : ""} · {fmtDate(version.createdAt)}</div></div></div>)}</div> : !decisionVersions?.loading && !decisionVersions?.error ? <EmptyNote>No versions recorded for this decision.</EmptyNote> : null}
+      {versions.length ? <div className="version-list">{versions.map((version: AnyRecord) => <div className="version-row" key={version.id}><div><div className="title-sm">v{version.versionNumber} · {version.state}</div><div className="muted">{version.statement}</div><div className="muted mono">{version.createdByType}{version.createdById ? `:${version.createdById}` : ""} · {fmtDate(version.createdAt)}</div></div></div>)}</div> : !decisionVersions?.loading && !decisionVersions?.error ? <EmptyNote>该决策暂无记录版本。</EmptyNote> : null}
     </Panel>
-    <Panel title="Compare Versions" iconName="compare_arrows" meta={baseVersion && targetVersion ? `v${baseVersion.versionNumber} to v${targetVersion.versionNumber}` : ""}>
+    <Panel title="版本对比" iconName="compare_arrows" meta={baseVersion && targetVersion ? `v${baseVersion.versionNumber} to v${targetVersion.versionNumber}` : ""}>
       <div id="decision-version-compare" className="version-compare">
         {orderedVersions.length ? <>
           <div className="version-selectors">
@@ -1254,7 +1254,7 @@ function DecisionsPage(props: AnyRecord & { header: ReactNode }) {
             const changed = baseValue !== targetValue;
             return <div className="compare-field" key={field}><div className="split"><strong>{label}</strong><Badge text={changed ? "changed" : "same"} tone={changed ? "amber" : "green"} /></div><div className="compare-values"><div><span className="mono muted">v{baseVersion?.versionNumber}</span><p>{baseValue}</p></div><div><span className="mono muted">v{targetVersion?.versionNumber}</span><p>{targetValue}</p></div></div></div>;
           })}</div>
-        </> : <EmptyNote>Select a decision with version history to compare.</EmptyNote>}
+        </> : <EmptyNote>请选择一个具有版本历史的决策进行对比。</EmptyNote>}
       </div>
     </Panel>
   </div></div></>;
@@ -1266,7 +1266,7 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
   const detail = selectedItem && workItemDetail?.workItemId === selectedItem.id ? workItemDetail : null;
   const canStartSession = (item: AnyRecord) => ["READY", "IN_PROGRESS"].includes(item.status);
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
-  <Panel title="Execution Readiness" iconName="task_alt"><Table headers={["Work item", "Parent", "Acceptance", "Updated", "Status", "Action"]} rows={data.workItems.map((item: AnyRecord) => [
+  <Panel title="执行就绪度" iconName="task_alt"><Table headers={["Work item", "Parent", "Acceptance", "Updated", "Status", "Action"]} rows={data.workItems.map((item: AnyRecord) => [
     <div className={`session-cell ${item.id === selectedItem?.id ? "selected" : ""}`}><strong>{item.title}</strong><div className="muted">{item.description || ""}</div></div>,
     item.parentId || "-",
     `${item.acceptance?.length || 0}`,
@@ -1283,11 +1283,11 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
       <button className="icon-btn table-action" title="Send to review" disabled={item.status !== "IN_PROGRESS" || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "send-to-review"), "Work item sent to review")}>{icon("rate_review")}</button>
       <button className="icon-btn table-action" title="Complete work" disabled={!["IN_PROGRESS", "IN_REVIEW"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "complete"), "Work item completed")}>{icon("check_circle")}</button>
       <button className="icon-btn table-action" title="Reopen work" disabled={!["DONE", "CANCELED"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "reopen"), "Work item reopened")}>{icon("undo")}</button>
-      <button className="icon-btn table-action" title="Cancel work" disabled={!["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "cancel"), "Work item canceled")}>{icon("cancel")}</button>
+      <button className="icon-btn table-action" title="取消 work" disabled={!["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW"].includes(item.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(item.id, "cancel"), "Work item canceled")}>{icon("cancel")}</button>
     </div>
-  ])} empty="No work items yet." /></Panel>
+  ])} empty="暂无工作项。" /></Panel>
   </div><div className="span-4 stack">
-    <Panel title="Selected Work Item" iconName="check_box" meta={selectedItem?.id || "No work item"}>
+    <Panel title="所选工作项" iconName="check_box" meta={selectedItem?.id || "No work item"}>
       {selectedItem ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">
           <div><span className="mono muted">STATUS</span><strong>{selectedItem.status}</strong></div>
@@ -1306,23 +1306,23 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
           <button className="btn" disabled={!canStartSession(selectedItem) || actionLoading} onClick={() => runAction(() => startWorkItemSession(selectedItem.id), "Work item session started")}>{icon("terminal")}<span>Start Session</span></button>
           <button className="btn" disabled={selectedItem.status !== "IN_PROGRESS" || actionLoading} onClick={() => setModal({ kind: "workItemBlock", workItemId: selectedItem.id })}>{icon("pause_circle")}<span>Block</span></button>
           <button className="btn" disabled={selectedItem.status !== "BLOCKED" || actionLoading} onClick={() => setModal({ kind: "workItemResolveBlocker", workItemId: selectedItem.id })}>{icon("play_arrow")}<span>Resolve Blocker</span></button>
-          <button className="btn" disabled={!["IN_PROGRESS", "IN_REVIEW"].includes(selectedItem.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "complete"), "Work item completed")}>{icon("check_circle")}<span>Done</span></button>
+          <button className="btn" disabled={!["IN_PROGRESS", "IN_REVIEW"].includes(selectedItem.status) || actionLoading} onClick={() => runAction(() => transitionWorkItem(selectedItem.id, "complete"), "Work item completed")}>{icon("check_circle")}<span>完成</span></button>
         </div>
-      </div> : <EmptyNote>No work item selected.</EmptyNote>}
+      </div> : <EmptyNote>未选择工作项。</EmptyNote>}
     </Panel>
-    <Panel title="Readiness & Dependencies" iconName="account_tree" meta={detail ? `${detail.dependencies.length} dependencies` : ""}>
-      {detail?.loading ? <EmptyNote>Loading work item readiness...</EmptyNote> : null}
+    <Panel title="就绪度与依赖" iconName="account_tree" meta={detail ? `${detail.dependencies.length} dependencies` : ""}>
+      {detail?.loading ? <EmptyNote>正在加载工作项就绪度...</EmptyNote> : null}
       {detail?.error ? <EmptyNote>{detail.error}</EmptyNote> : null}
       {detail?.readiness ? <div className="metric-row"><span>Ready to start</span><strong>{detail.readiness.ready ? "Yes" : "No"}</strong></div> : null}
       {detail?.readiness?.blockerReason ? <div className="metric-row"><span>Manual blocker</span><strong>{detail.readiness.blockerReason}</strong></div> : null}
       {detail?.readiness?.blockers?.length ? detail.readiness.blockers.map((blocker: AnyRecord) => <div className="metric-row" key={blocker.dependsOnId}><span className="mono">{blocker.dependsOnId}</span><Badge text={blocker.status} tone={toneForStatus(blocker.status)} /></div>) : null}
-      {detail && !detail.dependencies.length && !detail.readiness?.blockers?.length ? <EmptyNote>No blocking dependencies.</EmptyNote> : null}
+      {detail && !detail.dependencies.length && !detail.readiness?.blockers?.length ? <EmptyNote>无阻塞依赖。</EmptyNote> : null}
     </Panel>
-    <Panel title="Child Work Items" iconName="account_tree" meta={detail ? `${detail.children.length} children` : ""}>
-      {detail?.children?.length ? <div className="stack compact">{detail.children.map((child: AnyRecord) => <div className="metric-row evidence-row" key={child.id}><div className="evidence-row-main"><div className="title-sm">{child.title}</div><div className="muted">{child.description || child.id}</div></div><div className="row-actions"><Badge text={child.status} tone={toneForStatus(child.status)} /><button className="icon-btn table-action" title="Open child Work Item" disabled={actionLoading} onClick={() => void selectWorkItem(child.id)}>{icon("visibility")}</button></div></div>)}</div> : detail && !detail.loading ? <EmptyNote>No child Work Items.</EmptyNote> : null}
+    <Panel title="子工作项" iconName="account_tree" meta={detail ? `${detail.children.length} children` : ""}>
+      {detail?.children?.length ? <div className="stack compact">{detail.children.map((child: AnyRecord) => <div className="metric-row evidence-row" key={child.id}><div className="evidence-row-main"><div className="title-sm">{child.title}</div><div className="muted">{child.description || child.id}</div></div><div className="row-actions"><Badge text={child.status} tone={toneForStatus(child.status)} /><button className="icon-btn table-action" title="Open child Work Item" disabled={actionLoading} onClick={() => void selectWorkItem(child.id)}>{icon("visibility")}</button></div></div>)}</div> : detail && !detail.loading ? <EmptyNote>无子工作项。</EmptyNote> : null}
     </Panel>
-    <Panel title="Agent Attempts" iconName="terminal" meta={detail ? `${detail.attempts.length} attempts` : ""}>
-      {detail?.loading ? <EmptyNote>Loading agent attempts...</EmptyNote> : null}
+    <Panel title="智能体尝试" iconName="terminal" meta={detail ? `${detail.attempts.length} attempts` : ""}>
+      {detail?.loading ? <EmptyNote>正在加载智能体尝试...</EmptyNote> : null}
       {detail?.attempts?.length ? <div className="stack compact">{detail.attempts.map((attempt: AnyRecord) => <div className="metric-row evidence-row" key={attempt.id}>
         <div className="evidence-row-main">
           <div className="title-sm">{attempt.session?.title || attempt.summary || "Agent session"}</div>
@@ -1335,27 +1335,27 @@ function WorkPage(props: AnyRecord & { header: ReactNode }) {
           <Badge text={attempt.status} tone={toneForStatus(attempt.status)} />
           <button className="icon-btn table-action" title="Open linked session" disabled={!attempt.sessionId || actionLoading} onClick={() => attempt.sessionId ? void openSession(attempt.sessionId) : undefined}>{icon("visibility")}</button>
         </div>
-      </div>)}</div> : detail && !detail.loading ? <EmptyNote>No agent sessions have been started for this work item yet.</EmptyNote> : null}
+      </div>)}</div> : detail && !detail.loading ? <EmptyNote>该工作项尚未启动智能体会话。</EmptyNote> : null}
     </Panel>
-    <Panel title="Work Item Activity" iconName="history" meta={detail ? `${detail.activity.length} events` : ""}>
-      {detail?.activity?.length ? <div className="stack compact">{detail.activity.slice(0, 20).map((entry: AnyRecord) => <div className="metric-row evidence-row" key={`${entry.kind}-${entry.id}`}><div className="evidence-row-main"><div className="title-sm">{entry.summary || entry.eventType}</div><div className="muted mono">{fmtDate(entry.createdAt)} · {entry.kind}{entry.actorType ? ` · ${entry.actorType}` : ""}</div></div><Badge text={entry.eventType} tone={entry.kind === "AUDIT" ? "blue" : toneForStatus(entry.eventType)} /></div>)}</div> : detail && !detail.loading ? <EmptyNote>No Work Item activity recorded.</EmptyNote> : null}
+    <Panel title="工作项活动" iconName="history" meta={detail ? `${detail.activity.length} events` : ""}>
+      {detail?.activity?.length ? <div className="stack compact">{detail.activity.slice(0, 20).map((entry: AnyRecord) => <div className="metric-row evidence-row" key={`${entry.kind}-${entry.id}`}><div className="evidence-row-main"><div className="title-sm">{entry.summary || entry.eventType}</div><div className="muted mono">{fmtDate(entry.createdAt)} · {entry.kind}{entry.actorType ? ` · ${entry.actorType}` : ""}</div></div><Badge text={entry.eventType} tone={entry.kind === "AUDIT" ? "blue" : toneForStatus(entry.eventType)} /></div>)}</div> : detail && !detail.loading ? <EmptyNote>暂无工作项活动记录。</EmptyNote> : null}
     </Panel>
   </div></div></>;
 }
 
 function ContextPage(props: AnyRecord & { header: ReactNode }) {
   const { data, header, selectedContextSourceId, selectContextSource, actionLoading, runAction, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, setModal } = props;
-  const selectedSource = data.contextSources.find((source: AnyRecord) => source.id === selectedContextSourceId) || data.contextSources[0];
+  const selectedSource = data.context数据源.find((source: AnyRecord) => source.id === selectedContextSourceId) || data.context数据源[0];
   const sourceSnapshots = selectedSource ? data.evidenceSnapshots.filter((snapshot: AnyRecord) => snapshot.sourceId === selectedSource.id) : [];
   const sourceSnapshotIds = new Set(sourceSnapshots.map((snapshot: AnyRecord) => snapshot.id));
   const sourceItems = data.contextItems.filter((item: AnyRecord) => item.sourceSnapshotId && sourceSnapshotIds.has(item.sourceSnapshotId));
   const latestSnapshot = sourceSnapshots.find((snapshot: AnyRecord) => snapshot.id === selectedSource?.lastSnapshotId) || sourceSnapshots[0];
   return (
     <>{header}<div className="grid cols-12"><div className="span-8 stack">
-      <Panel title="Sources" iconName="database"><Table headers={["Source", "Type", "Last sync", "Snapshots", "State", "Action"]} rows={data.contextSources.map((source: AnyRecord) => [<div className={`session-cell ${source.id === selectedSource?.id ? "selected" : ""}`}><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></div>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View source detail" disabled={actionLoading} onClick={() => selectContextSource(source.id)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Edit source" disabled={actionLoading} onClick={() => setModal({ kind: "sourceEdit", sourceId: source.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="Sync source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "Context source synced")}>{icon("sync")}</button><button className="icon-btn table-action" title="Pause source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "pause"), "Context source paused")}>{icon("pause_circle")}</button><button className="icon-btn table-action" title="Resume source" disabled={source.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "resume"), "Context source resumed")}>{icon("play_arrow")}</button><button className="icon-btn table-action" title="Archive source" disabled={source.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "archive"), "Context source archived")}>{icon("archive")}</button></div>])} empty="No context sources yet." /></Panel>
-      <Panel title="Evidence Snapshots" iconName="fact_check"><Table headers={["Evidence", "Type", "Captured", "Storage", "Action"]} rows={data.evidenceSnapshots.slice(0, 12).map((snapshot: AnyRecord) => [<><strong>{snapshot.title}</strong><div className="muted mono">{snapshot.contentHash || "-"}</div></>, <Badge text={snapshot.evidenceType} tone="blue" />, fmtDate(snapshot.capturedAt), <span className="mono">{snapshot.storageRef || "-"}</span>, <div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Derive context item" disabled={actionLoading} onClick={() => setModal({ kind: "contextItem", sourceSnapshotId: snapshot.id })}>{icon("add_box")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${snapshot.id}\n${snapshot.storageRef || ""}\n${snapshot.contentHash}`)}>{icon("content_copy")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div>])} empty="No evidence snapshots yet." /></Panel>
+      <Panel title="数据源" iconName="database"><Table headers={["Source", "Type", "Last sync", "Snapshots", "State", "Action"]} rows={data.context数据源.map((source: AnyRecord) => [<div className={`session-cell ${source.id === selectedSource?.id ? "selected" : ""}`}><strong>{source.name}</strong><div className="muted mono">{source.locator}</div></div>, source.sourceType, fmtDate(source.lastCheckedAt), source.lastSnapshotId || "-", <Badge text={source.status} tone={toneForStatus(source.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View source detail" disabled={actionLoading} onClick={() => selectContextSource(source.id)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Edit source" disabled={actionLoading} onClick={() => setModal({ kind: "sourceEdit", sourceId: source.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="Sync source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => syncSource(source.id), "Context source synced")}>{icon("sync")}</button><button className="icon-btn table-action" title="Pause source" disabled={source.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "pause"), "Context source paused")}>{icon("pause_circle")}</button><button className="icon-btn table-action" title="Resume source" disabled={source.status !== "PAUSED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "resume"), "Context source resumed")}>{icon("play_arrow")}</button><button className="icon-btn table-action" title="Archive source" disabled={source.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(source.id, "archive"), "Context source archived")}>{icon("archive")}</button></div>])} empty="暂无上下文源。" /></Panel>
+      <Panel title="证据快照" iconName="fact_check"><Table headers={["Evidence", "Type", "Captured", "Storage", "Action"]} rows={data.evidenceSnapshots.slice(0, 12).map((snapshot: AnyRecord) => [<><strong>{snapshot.title}</strong><div className="muted mono">{snapshot.contentHash || "-"}</div></>, <Badge text={snapshot.evidenceType} tone="blue" />, fmtDate(snapshot.capturedAt), <span className="mono">{snapshot.storageRef || "-"}</span>, <div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Derive context item" disabled={actionLoading} onClick={() => setModal({ kind: "contextItem", sourceSnapshotId: snapshot.id })}>{icon("add_box")}</button><button className="icon-btn table-action" title="Copy evidence reference" disabled={actionLoading} onClick={() => copyText(`${snapshot.id}\n${snapshot.storageRef || ""}\n${snapshot.contentHash}`)}>{icon("content_copy")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div>])} empty="暂无证据快照。" /></Panel>
     </div><div className="span-4 stack">
-      <Panel title="Selected Source" iconName="database" meta={selectedSource?.id || "No source"}>
+      <Panel title="所选数据源" iconName="database" meta={selectedSource?.id || "No source"}>
         {selectedSource ? <div className="session-detail">
           <div className="detail-grid source-detail-grid">
             <div><span className="mono muted">STATUS</span><strong>{selectedSource.status}</strong></div>
@@ -1374,17 +1374,17 @@ function ContextPage(props: AnyRecord & { header: ReactNode }) {
             <button className="btn" disabled={selectedSource.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionSource(selectedSource.id, "archive"), "Context source archived")}>{icon("archive")}<span>Archive</span></button>
           </div>
           <pre className="evidence-metadata">{prettyJson(selectedSource.metadata)}</pre>
-        </div> : <EmptyNote>Select or create a context source to inspect provenance.</EmptyNote>}
+        </div> : <EmptyNote>请选择或创建一个上下文源以检查血缘。</EmptyNote>}
       </Panel>
-      <Panel title="Source Provenance" iconName="account_tree" meta={selectedSource ? `${sourceSnapshots.length} snapshots` : ""}>
+      <Panel title="数据源血缘" iconName="account_tree" meta={selectedSource ? `${sourceSnapshots.length} snapshots` : ""}>
         {selectedSource ? <div>
-          <div className="metric-row"><span>Evidence snapshots</span><strong>{sourceSnapshots.length}</strong></div>
+          <div className="metric-row"><span>证据快照</span><strong>{sourceSnapshots.length}</strong></div>
           <div className="metric-row"><span>Derived context items</span><strong>{sourceItems.length}</strong></div>
           <div className="metric-row"><span>Latest snapshot</span><strong className="mono">{latestSnapshot?.id || "-"}</strong></div>
-          {sourceSnapshots.length ? <div className="stack compact source-linked-list">{sourceSnapshots.slice(0, 5).map((snapshot: AnyRecord) => <div className="metric-row evidence-row" key={snapshot.id}><div className="evidence-row-main"><div className="title-sm">{snapshot.title}</div><div className="muted mono">{fmtDate(snapshot.capturedAt)} · {snapshot.contentHash}</div></div><div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Derive context item" disabled={actionLoading} onClick={() => setModal({ kind: "contextItem", sourceSnapshotId: snapshot.id })}>{icon("add_box")}</button><button className="icon-btn table-action" title="Compare with latest snapshot" disabled={!latestSnapshot || latestSnapshot.id === snapshot.id || actionLoading} onClick={() => latestSnapshot ? void openEvidenceCompare(snapshot, latestSnapshot) : undefined}>{icon("compare_arrows")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div></div>)}</div> : <EmptyNote>No snapshots captured for this source yet.</EmptyNote>}
-        </div> : <EmptyNote>No source selected.</EmptyNote>}
+          {sourceSnapshots.length ? <div className="stack compact source-linked-list">{sourceSnapshots.slice(0, 5).map((snapshot: AnyRecord) => <div className="metric-row evidence-row" key={snapshot.id}><div className="evidence-row-main"><div className="title-sm">{snapshot.title}</div><div className="muted mono">{fmtDate(snapshot.capturedAt)} · {snapshot.contentHash}</div></div><div className="row-actions"><button className="icon-btn table-action" title="Open evidence content" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Derive context item" disabled={actionLoading} onClick={() => setModal({ kind: "contextItem", sourceSnapshotId: snapshot.id })}>{icon("add_box")}</button><button className="icon-btn table-action" title="Compare with latest snapshot" disabled={!latestSnapshot || latestSnapshot.id === snapshot.id || actionLoading} onClick={() => latestSnapshot ? void openEvidenceCompare(snapshot, latestSnapshot) : undefined}>{icon("compare_arrows")}</button><button className="icon-btn table-action" title="Verify evidence" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "Evidence verified")}>{icon("verified")}</button></div></div>)}</div> : <EmptyNote>该源暂无捕获的快照。</EmptyNote>}
+        </div> : <EmptyNote>未选择数据源。</EmptyNote>}
       </Panel>
-      <Panel title="Derived Context Items" iconName="inventory_2" meta={selectedSource ? `${sourceItems.length} linked` : ""}><Table headers={["Item", "State", "Action"]} rows={(selectedSource ? sourceItems : data.contextItems).slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence} · {item.sourceSnapshotId || "manual"}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View versions" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Edit context item" disabled={actionLoading} onClick={() => setModal({ kind: "contextItemEdit", contextItemId: item.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="Activate item" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "Context item activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="Mark stale" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "Context item marked stale")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="Archive item" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "Context item archived")}>{icon("archive")}</button></div>])} empty={selectedSource ? "No context items derive from this source yet." : "No context items yet."} /></Panel>
+      <Panel title="派生上下文项" iconName="inventory_2" meta={selectedSource ? `${sourceItems.length} linked` : ""}><Table headers={["Item", "State", "Action"]} rows={(selectedSource ? sourceItems : data.contextItems).slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence} · {item.sourceSnapshotId || "manual"}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="View versions" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="Edit context item" disabled={actionLoading} onClick={() => setModal({ kind: "contextItemEdit", contextItemId: item.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="Activate item" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "Context item activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="Mark stale" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "Context item marked stale")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="Archive item" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "Context item archived")}>{icon("archive")}</button></div>])} empty={selectedSource ? "该源暂无派生的上下文项。" : "暂无上下文项。"} /></Panel>
     </div></div></>
   );
 }
@@ -1396,7 +1396,7 @@ function RulesPage(props: AnyRecord & { header: ReactNode }) {
   const detail = selectedRule && ruleDetail?.ruleId === selectedRule.id ? ruleDetail : null;
   const currentVersion = selectedRule ? detail?.versions.find((version: AnyRecord) => version.id === selectedRule.currentVersionId) || detail?.versions[0] : null;
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
-    <Panel title="Rule Set" iconName="policy" meta={selectedProject?.name || "Workspace"}><Table headers={["Rule", "Version", "State", "Action"]} rows={data.rules.map((rule: AnyRecord) => [
+    <Panel title="规则集" iconName="policy" meta={selectedProject?.name || "工作区"}><Table headers={["Rule", "Version", "State", "Action"]} rows={data.rules.map((rule: AnyRecord) => [
       <div className={`session-cell ${rule.id === selectedRule?.id ? "selected" : ""}`}><strong>{rule.title}</strong><div className="muted">{rule.description || ""}</div></div>,
       rule.currentVersionId || "-",
       <Badge text={rule.status} tone={toneForStatus(rule.status)} />,
@@ -1407,18 +1407,18 @@ function RulesPage(props: AnyRecord & { header: ReactNode }) {
         <button className="icon-btn table-action" title="Activate rule" disabled={!["DRAFT", "DISABLED"].includes(rule.status) || actionLoading} onClick={() => runAction(() => transitionRule(rule.id, "activate"), "Rule activated")}>{icon("toggle_on")}</button>
         <button className="icon-btn table-action" title="Disable rule" disabled={rule.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionRule(rule.id, "disable"), "Rule disabled")}>{icon("toggle_off")}</button>
       </div>
-    ])} empty="No rules yet." /></Panel>
-    <Panel title="Agent Instruction Export" iconName="upload_file" meta={ruleInstructionPreview?.path || "AGENTS.md / CLAUDE.md"}>
+    ])} empty="暂无规则。" /></Panel>
+    <Panel title="智能体指令导出" iconName="upload_file" meta={ruleInstructionPreview?.path || "AGENTS.md / CLAUDE.md"}>
       <div className="row-actions">
         <button className="btn" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_AGENTS", false), "Project AGENTS.md preview rendered")}>{icon("visibility")}<span>Preview AGENTS.md</span></button>
         <button className="btn primary" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_AGENTS", true), "Project AGENTS.md updated")}>{icon("check_circle")}<span>Apply AGENTS.md</span></button>
         <button className="btn" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_CLAUDE", false), "Project CLAUDE.md preview rendered")}>{icon("visibility")}<span>Preview CLAUDE.md</span></button>
         <button className="btn" disabled={actionLoading || !data.projects[0]} onClick={() => runAction(() => renderRuleInstructions("PROJECT_CLAUDE", true), "Project CLAUDE.md updated")}>{icon("check_circle")}<span>Apply CLAUDE.md</span></button>
       </div>
-      {ruleInstructionPreview ? <div className="stack compact"><div className="metric-row"><span>Target</span><strong>{ruleInstructionPreview.target}</strong></div><div className="metric-row"><span>Active rules</span><strong>{ruleInstructionPreview.activeRuleCount}</strong></div><div className="metric-row"><span>Applied</span><Badge text={ruleInstructionPreview.applied ? "YES" : "NO"} tone={ruleInstructionPreview.applied ? "green" : "blue"} /></div><pre className="evidence-metadata">{ruleInstructionPreview.nextContent}</pre></div> : <EmptyNote>Render a preview before applying generated instructions.</EmptyNote>}
+      {ruleInstructionPreview ? <div className="stack compact"><div className="metric-row"><span>Target</span><strong>{ruleInstructionPreview.target}</strong></div><div className="metric-row"><span>Active rules</span><strong>{ruleInstructionPreview.activeRuleCount}</strong></div><div className="metric-row"><span>Applied</span><Badge text={ruleInstructionPreview.applied ? "YES" : "NO"} tone={ruleInstructionPreview.applied ? "green" : "blue"} /></div><pre className="evidence-metadata">{ruleInstructionPreview.nextContent}</pre></div> : <EmptyNote>在应用生成指令前请先预览。</EmptyNote>}
     </Panel>
   </div><div className="span-4 stack">
-    <Panel title="Selected Rule" iconName="policy" meta={selectedRule?.id || "No rule"}>
+    <Panel title="所选规则" iconName="policy" meta={selectedRule?.id || "No rule"}>
       {selectedRule ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">
           <div><span className="mono muted">STATUS</span><strong>{selectedRule.status}</strong></div>
@@ -1438,14 +1438,14 @@ function RulesPage(props: AnyRecord & { header: ReactNode }) {
           <button className="btn primary" disabled={!["DRAFT", "DISABLED"].includes(selectedRule.status) || actionLoading} onClick={() => runAction(() => transitionRule(selectedRule.id, "activate"), "Rule activated")}>{icon("toggle_on")}<span>Activate</span></button>
           <button className="btn" disabled={selectedRule.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionRule(selectedRule.id, "disable"), "Rule disabled")}>{icon("toggle_off")}<span>Disable</span></button>
         </div>
-      </div> : <EmptyNote>No rule selected.</EmptyNote>}
+      </div> : <EmptyNote>未选择规则。</EmptyNote>}
     </Panel>
-    <Panel title="Versions & Evaluations" iconName="history" meta={detail ? `${detail.versions.length} versions` : ""}>
-      {detail?.loading ? <EmptyNote>Loading rule detail...</EmptyNote> : null}
+    <Panel title="版本与评估" iconName="history" meta={detail ? `${detail.versions.length} versions` : ""}>
+      {detail?.loading ? <EmptyNote>正在加载规则详情...</EmptyNote> : null}
       {detail?.error ? <EmptyNote>{detail.error}</EmptyNote> : null}
-      {detail?.versions?.length ? <div className="version-list">{detail.versions.slice(0, 4).map((version: AnyRecord) => <div className="version-row" key={version.id}><div><div className="title-sm">v{version.versionNumber} · {version.validationState}</div><div className="muted mono">{version.enforcementMode} · precedence {version.precedence}</div><div className="muted">{version.validationErrors?.join("; ") || "No validation errors"}</div></div></div>)}</div> : null}
+      {detail?.versions?.length ? <div className="version-list">{detail.versions.slice(0, 4).map((version: AnyRecord) => <div className="version-row" key={version.id}><div><div className="title-sm">v{version.versionNumber} · {version.validationState}</div><div className="muted mono">{version.enforcementMode} · precedence {version.precedence}</div><div className="muted">{version.validationErrors?.join("; ") || "无验证错误"}</div></div></div>)}</div> : null}
       {detail?.evaluations?.length ? <div className="version-list">{detail.evaluations.slice(0, 4).map((entry: AnyRecord) => <div className="version-row" key={entry.id}><div><div className="title-sm">{entry.result}</div><div className="muted">{entry.explanation}</div><div className="muted mono">{fmtDate(entry.createdAt)}</div></div></div>)}</div> : null}
-      {detail && !detail.versions.length && !detail.evaluations.length ? <EmptyNote>No versions or evaluations recorded.</EmptyNote> : null}
+      {detail && !detail.versions.length && !detail.evaluations.length ? <EmptyNote>暂无版本或评估记录。</EmptyNote> : null}
     </Panel>
   </div></div></>;
 }
@@ -1459,34 +1459,34 @@ function SettingsPage(props: AnyRecord & { header: ReactNode }) {
   const failedJobs = runtimeHealth?.jobs?.latestFailed || [];
   return (
     <>{header}<div className="stack">
-      <Panel title="General" iconName="tune" meta="Workspace & Defaults">
+      <Panel title="常规" iconName="tune" meta="工作区 & Defaults">
         {settings ? <>
-          <div className="setting-row"><div><div className="title-sm">Default adapter</div><div className="muted">Adapter used when a session does not specify one.</div></div><select id="setting-default-adapter" defaultValue={defaultAdapterId()}>{adapterList.map((adapter: AnyRecord) => <option value={adapter.id} disabled={!adapter.available} key={adapter.id}>{adapter.displayName}{adapter.available ? "" : " (unavailable)"}</option>)}</select></div>
-          <div className="setting-row"><div><div className="title-sm">Review gate</div><div className="muted">Require confirmation before destructive actions.</div></div><label className="toggle"><input id="setting-confirm-destructive" type="checkbox" defaultChecked={settings.confirmDestructiveActions} /><span>{settings.confirmDestructiveActions ? "Enabled" : "Disabled"}</span></label></div>
-          <div className="setting-row"><div><div className="title-sm">Launch at startup</div><div className="muted">Start the local daemon with the desktop session.</div></div><label className="toggle"><input id="setting-launch-startup" type="checkbox" defaultChecked={settings.launchAtStartup} /><span>{settings.launchAtStartup ? "Enabled" : "Disabled"}</span></label></div>
-          <div className="setting-row"><div><div className="title-sm">Data directory</div><div className="muted mono">{settings.dataDirectory}</div></div><Badge text={`rev ${settings.revision}`} /></div>
-        </> : <EmptyNote>Settings unavailable.</EmptyNote>}
+          <div className="setting-row"><div><div className="title-sm">默认适配器</div><div className="muted">当会话未指定时使用的适配器。</div></div><select id="setting-default-adapter" defaultValue={defaultAdapterId()}>{adapterList.map((adapter: AnyRecord) => <option value={adapter.id} disabled={!adapter.available} key={adapter.id}>{adapter.displayName}{adapter.available ? "" : " (unavailable)"}</option>)}</select></div>
+          <div className="setting-row"><div><div className="title-sm">审查关卡</div><div className="muted">破坏性操作前要求确认。</div></div><label className="toggle"><input id="setting-confirm-destructive" type="checkbox" defaultChecked={settings.confirmDestructiveActions} /><span>{settings.confirmDestructiveActions ? "已启用" : "已禁用"}</span></label></div>
+          <div className="setting-row"><div><div className="title-sm">开机启动</div><div className="muted">随桌面会话启动本地守护进程。</div></div><label className="toggle"><input id="setting-launch-startup" type="checkbox" defaultChecked={settings.launchAtStartup} /><span>{settings.launchAtStartup ? "已启用" : "已禁用"}</span></label></div>
+          <div className="setting-row"><div><div className="title-sm">数据目录</div><div className="muted mono">{settings.dataDirectory}</div></div><Badge text={`rev ${settings.revision}`} /></div>
+        </> : <EmptyNote>设置不可用。</EmptyNote>}
       </Panel>
-      <Panel title="Runtime Health" iconName="monitor_heart" meta={runtimeHealth ? fmtDate(runtimeHealth.generatedAt) : "Unavailable"}>
+      <Panel title="运行时健康" iconName="monitor_heart" meta={runtimeHealth ? fmtDate(runtimeHealth.generatedAt) : "Unavailable"}>
         {runtimeHealth ? <>
           <div className="kpi-grid compact-kpis">
             <div className="kpi"><div className="kpi-value">{runtimeHealth.sessionRuns.running}</div><div className="kpi-label mono">Running runs</div></div>
             <div className="kpi"><div className="kpi-value">{runtimeHealth.sessionRuns.failed}</div><div className="kpi-label mono">Failed runs</div></div>
             <div className="kpi"><div className="kpi-value">{runtimeHealth.jobs.byStatus?.FAILED || 0}</div><div className="kpi-label mono">Failed jobs</div></div>
-            <div className="kpi"><div className="kpi-value">{runtimeHealth.outbox.pending}</div><div className="kpi-label mono">Outbox pending</div></div>
+            <div className="kpi"><div className="kpi-value">{runtimeHealth.outbox.pending}</div><div className="kpi-label mono">发件箱 pending</div></div>
           </div>
-          <div className="setting-row"><div><div className="title-sm">Job lifecycle</div><div className="muted mono">{Object.entries(runtimeHealth.jobs.byStatus || {}).map(([status, count]) => `${status}:${count}`).join(" · ")}</div></div><Badge text={`${runtimeHealth.jobs.total} jobs`} /></div>
-          <div className="setting-row"><div><div className="title-sm">Outbox</div><div className="muted">Internal delivery queue used by runtime support events.</div></div><Badge text={`${runtimeHealth.outbox.failed} failed`} tone={runtimeHealth.outbox.failed ? "red" : "green"} /></div>
+          <div className="setting-row"><div><div className="title-sm">任务生命周期</div><div className="muted mono">{Object.entries(runtimeHealth.jobs.byStatus || {}).map(([status, count]) => `${status}:${count}`).join(" · ")}</div></div><Badge text={`${runtimeHealth.jobs.total} jobs`} /></div>
+          <div className="setting-row"><div><div className="title-sm">发件箱</div><div className="muted">运行时支持事件使用的内部投递队列。</div></div><Badge text={`${runtimeHealth.outbox.failed} failed`} tone={runtimeHealth.outbox.failed ? "red" : "green"} /></div>
           {failedRuns.length || failedJobs.length ? <div className="stack compact">
             {[...failedRuns.map((run: AnyRecord) => ({ id: run.id, sessionId: run.sessionId, title: run.failureMessage || run.failureCode || "Session run failed", meta: `${run.sessionId} · ${fmtDate(run.updatedAt)}`, badge: run.failureCode || run.status })),
               ...failedJobs.map((job: AnyRecord) => ({ id: job.id, title: job.failureMessage || job.failureCode || job.kind, meta: `${job.resourceType} ${job.resourceId} · ${fmtDate(job.updatedAt)}`, badge: job.failureCode || job.status }))].slice(0, 6).map((item: AnyRecord) => (
               <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{item.meta}</div></div><div className="row-actions"><Badge text={item.badge} tone="red" />{item.sessionId ? <button className="icon-btn table-action" title="Open owning session" onClick={() => void openSession(item.sessionId)}>{icon("visibility")}</button> : null}</div></div>
             ))}
-          </div> : <EmptyNote>No failed runtime work is currently recorded.</EmptyNote>}
-        </> : <EmptyNote>Runtime health unavailable.</EmptyNote>}
+          </div> : <EmptyNote>当前无失败的运行时工作记录。</EmptyNote>}
+        </> : <EmptyNote>运行时健康不可用。</EmptyNote>}
       </Panel>
-      <Panel title="Agent Adapters" iconName="smart_toy"><div className="setting-row"><div><div className="title-sm">Connected adapters</div><div className="muted">Codex and Claude Code are attached when discovery succeeds.</div></div><Badge text={`${connected} connected`} tone={connected ? "green" : "amber"} /></div>{data.adapters.length ? data.adapters.map((adapter: AnyRecord) => <div className="setting-row" key={adapter.id}><div><div className="title-sm">{adapter.displayName}</div><div className="muted mono">{adapter.version || adapter.error || adapter.command}</div></div><Badge text={adapter.available ? "Available" : "Unavailable"} tone={adapter.available ? "green" : "red"} /></div>) : <EmptyNote>No adapters discovered.</EmptyNote>}</Panel>
-      <Panel title="Storage & Privacy" iconName="lock"><div className="setting-row"><div><div className="title-sm">Evidence retention</div><div className="muted">Keep immutable source snapshots unless explicitly archived.</div></div><Badge text="Retain indefinitely" /></div><div className="setting-row"><div><div className="title-sm">Secret redaction</div><div className="muted">Scrub credentials before indexing source material.</div></div><Badge text="Enabled" tone="green" /></div><div className="setting-row"><div><div className="title-sm">Bridge mode</div><div className="muted">Local CLI and IPC integration for desktop agents.</div></div><Badge text="CLI / IPC bridge" tone="blue" /></div></Panel>
+      <Panel title="智能体适配器" iconName="smart_toy"><div className="setting-row"><div><div className="title-sm">已连接适配器</div><div className="muted">当发现成功时连接 Codex 和 Claude Code。</div></div><Badge text={`${connected} connected`} tone={connected ? "green" : "amber"} /></div>{data.adapters.length ? data.adapters.map((adapter: AnyRecord) => <div className="setting-row" key={adapter.id}><div><div className="title-sm">{adapter.displayName}</div><div className="muted mono">{adapter.version || adapter.error || adapter.command}</div></div><Badge text={adapter.available ? "Available" : "Unavailable"} tone={adapter.available ? "green" : "red"} /></div>) : <EmptyNote>未发现适配器。</EmptyNote>}</Panel>
+      <Panel title="存储与隐私" iconName="lock"><div className="setting-row"><div><div className="title-sm">证据保留</div><div className="muted">保留不可变源快照，除非明确归档。</div></div><Badge text="无限期保留" /></div><div className="setting-row"><div><div className="title-sm">凭据脱敏</div><div className="muted">在索引源材料前清除凭据。</div></div><Badge text="已启用" tone="green" /></div><div className="setting-row"><div><div className="title-sm">桥接模式</div><div className="muted">面向桌面智能体的本地 CLI 与 IPC 集成。</div></div><Badge text="CLI / IPC 桥接" tone="blue" /></div></Panel>
     </div></>
   );
 }
@@ -1508,21 +1508,21 @@ function EvidenceDetail({ detail, onClose }: { detail: { snapshot: AnyRecord; co
             <div className="detail-wide"><span className="mono muted">HASH</span><strong className="mono evidence-hash">{snapshot.contentHash}</strong></div>
           </div>
           <div className="row-actions">
-            <button type="button" className="btn" onClick={() => copyText(reference)}>{icon("content_copy")}<span>Copy Reference</span></button>
-            <button type="button" className="btn" disabled={!content?.contentText} onClick={() => copyText(content?.contentText)}>{icon("article")}<span>Copy Content</span></button>
+            <button type="button" className="btn" onClick={() => copyText(reference)}>{icon("content_copy")}<span>复制引用</span></button>
+            <button type="button" className="btn" disabled={!content?.contentText} onClick={() => copyText(content?.contentText)}>{icon("article")}<span>复制内容</span></button>
           </div>
-          {loading ? <EmptyNote>Loading verified evidence content...</EmptyNote> : null}
+          {loading ? <EmptyNote>正在加载已验证的证据内容...</EmptyNote> : null}
           {error ? <EmptyNote>{error}</EmptyNote> : null}
           {content ? <>
             <div className="split muted mono"><span>{content.returnedChars} / {content.totalChars} chars</span><span>{content.truncated ? "truncated" : "complete"}</span></div>
             <pre className="evidence-content">{content.contentText}</pre>
           </> : null}
           <div>
-            <div className="title-sm">Metadata</div>
+            <div className="title-sm">元数据</div>
             <pre className="evidence-metadata">{prettyJson(snapshot.metadata)}</pre>
           </div>
         </div>
-        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>Done</button></div>
+        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>完成</button></div>
       </div>
     </div>
   );
@@ -1536,7 +1536,7 @@ function EvidenceCompare({ detail, onClose }: { detail: { base: AnyRecord; other
   return (
     <div className="dialog-backdrop">
       <div className="dialog-card evidence-detail">
-        <div className="dialog-head"><h2>Compare Evidence Snapshots</h2><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>{icon("close")}</button></div>
+        <div className="dialog-head"><h2>Compare 证据快照</h2><button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>{icon("close")}</button></div>
         <div className="dialog-fields">
           <div className="detail-grid compact-detail">
             <div><span className="mono muted">BASE</span><strong>{base.title}</strong></div>
@@ -1545,21 +1545,21 @@ function EvidenceCompare({ detail, onClose }: { detail: { base: AnyRecord; other
             <div className="detail-wide"><span className="mono muted">BASE ID</span><strong className="mono">{base.id}</strong></div>
             <div className="detail-wide"><span className="mono muted">OTHER ID</span><strong className="mono">{other.id}</strong></div>
           </div>
-          {loading ? <EmptyNote>Comparing verified evidence content...</EmptyNote> : null}
+          {loading ? <EmptyNote>正在对比已验证的证据内容...</EmptyNote> : null}
           {error ? <EmptyNote>{error}</EmptyNote> : null}
           {metadata ? <div className="compare-grid">
             {["contentHash", "sizeBytes", "evidenceType", "sourceId"].map((field) => <div className="compare-field" key={field}><div className="split"><strong>{field}</strong><Badge text={fields[field]?.same ? "same" : "changed"} tone={fields[field]?.same ? "green" : "amber"} /></div><div className="muted mono">{String(fields[field]?.base ?? "-")}</div><div className="muted mono">{String(fields[field]?.other ?? "-")}</div></div>)}
           </div> : null}
           {content ? <div className="compare-summary">
-            <div className="metric-row"><span>Added lines</span><strong>{content.addedLines}</strong></div>
-            <div className="metric-row"><span>Removed lines</span><strong>{content.removedLines}</strong></div>
-            <div className="metric-row"><span>Output</span><strong>{content.truncated ? "truncated" : "complete"}</strong></div>
+            <div className="metric-row"><span>新增行</span><strong>{content.addedLines}</strong></div>
+            <div className="metric-row"><span>删除行</span><strong>{content.removedLines}</strong></div>
+            <div className="metric-row"><span>输出</span><strong>{content.truncated ? "truncated" : "complete"}</strong></div>
           </div> : null}
           {changes.length ? <div className="version-list">
             {changes.map((change: AnyRecord, index: number) => <div className={`compare-change ${change.kind === "ADDED" ? "added" : "removed"}`} key={`${change.kind}-${index}`}><div className="split"><strong>{change.kind}</strong><span className="muted mono">base {change.baseStartLine} · other {change.otherStartLine} · {change.lineCount} lines</span></div><pre className="evidence-content compare-content">{change.text}</pre></div>)}
-          </div> : !loading && content ? <EmptyNote>No content differences.</EmptyNote> : null}
+          </div> : !loading && content ? <EmptyNote>无内容差异。</EmptyNote> : null}
         </div>
-        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>Done</button></div>
+        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>完成</button></div>
       </div>
     </div>
   );
@@ -1581,7 +1581,7 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
             <div className="detail-wide"><span className="mono muted">SOURCE SNAPSHOT</span><strong className="mono">{item.sourceSnapshotId || "-"}</strong></div>
           </div>
           {item.body ? <pre className="evidence-metadata">{item.body}</pre> : null}
-          {loading ? <EmptyNote>Loading context item versions...</EmptyNote> : null}
+          {loading ? <EmptyNote>正在加载上下文项版本...</EmptyNote> : null}
           {error ? <EmptyNote>{error}</EmptyNote> : null}
           {versions.length ? <div className="version-list">
             {versions.map((version) => (
@@ -1591,18 +1591,18 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
                   <div className="muted">{version.summary}</div>
                   <div className="muted mono">{version.createdByType}{version.createdById ? `:${version.createdById}` : ""} · {fmtDate(version.createdAt)}</div>
                 </div>
-                <button type="button" className="btn" disabled={actionLoading} onClick={() => runAction(() => restoreContextItemVersion(item.id, version.versionNumber), "Context item version restored")}>{icon("restart_alt")}<span>Restore</span></button>
+                <button type="button" className="btn" disabled={actionLoading} onClick={() => runAction(() => restoreContextItemVersion(item.id, version.versionNumber), "Context item version restored")}>{icon("restart_alt")}<span>恢复</span></button>
               </div>
             ))}
-          </div> : !loading && !error ? <EmptyNote>No versions recorded for this context item.</EmptyNote> : null}
+          </div> : !loading && !error ? <EmptyNote>该上下文项暂无版本记录。</EmptyNote> : null}
         </div>
-        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>Done</button></div>
+        <div className="dialog-actions"><button type="button" className="btn primary" onClick={onClose}>完成</button></div>
       </div>
     </div>
   );
 }
 
-function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction }: AnyRecord) {
+function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction }: AnyRecord) {
   const project = data.projects.find((item: AnyRecord) => item.id === selectedProjectId) || data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
@@ -1610,7 +1610,7 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
   const modalDecisionVersions = decision && decisionVersions?.decisionId === decision.id ? decisionVersions.items : [];
   const decisionVersion = decision ? modalDecisionVersions.find((item: AnyRecord) => item.id === decision.currentVersionId) || modalDecisionVersions[0] : null;
   const workItem = modal.workItemId ? data.workItems.find((item: AnyRecord) => item.id === modal.workItemId) : data.workItems[0];
-  const source = modal.sourceId ? data.contextSources.find((item: AnyRecord) => item.id === modal.sourceId) : null;
+  const source = modal.sourceId ? data.context数据源.find((item: AnyRecord) => item.id === modal.sourceId) : null;
   const contextItem = modal.contextItemId ? data.contextItems.find((item: AnyRecord) => item.id === modal.contextItemId) : null;
   const selectedSnapshot = modal.sourceSnapshotId ? data.evidenceSnapshots.find((item: AnyRecord) => item.id === modal.sourceSnapshotId) : null;
   const resumeCapsule = session && sessionDetails?.sessionId === session.id ? sessionDetails.resumeCapsule : null;
@@ -1747,7 +1747,7 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
           {modal.kind === "reviewResolve" ? <><label>Review<input className="field" value={review?.summary || ""} disabled /></label><label>Resolution<select name="resolutionType" defaultValue="APPROVED"><option>APPROVED</option><option>FIXED</option><option>ACKNOWLEDGED</option></select></label><label>Reason<textarea className="field" name="resolutionReason" required rows={4} placeholder="What was checked or approved?" /></label></> : null}
           {modal.kind === "reviewDismiss" ? <><label>Review<input className="field" value={review?.summary || ""} disabled /></label><label>Reason<textarea className="field" name="resolutionReason" required rows={4} placeholder="Why is this no longer applicable?" /></label></> : null}
         </div>
-        <div className="dialog-actions"><button type="button" className="btn" onClick={close}>Cancel</button><button type="submit" className="btn primary">{submitLabel}</button></div>
+        <div className="dialog-actions"><button type="button" className="btn" onClick={close}>取消</button><button type="submit" className="btn primary">{submitLabel}</button></div>
       </form>
     </div>
   );

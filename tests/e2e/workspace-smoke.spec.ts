@@ -8,9 +8,9 @@ test("main workspace exposes failed session history across desktop and mobile", 
   const sessionTitle = `Failed run ${suffix}`;
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await page.getByRole("button", { name: "Projects", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "概览" })).toBeVisible();
+  await page.getByRole("button", { name: "项目", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "项目" })).toBeVisible();
   await page.getByRole("button", { name: "Add Project" }).click();
   await page.getByLabel("Project name").fill(projectName);
   await page.getByLabel("Root path").fill(process.cwd());
