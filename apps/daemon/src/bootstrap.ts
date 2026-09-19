@@ -62,7 +62,7 @@ export type CreateDaemonServerOptions = {
   startupRegistration?: StartupRegistration;
 };
 
-const packageVersion = "0.1.0";
+const packageVersion = "0.1.3";
 
 export function loadDaemonConfig(input: Partial<DaemonConfig> = {}): DaemonConfig {
   const config: DaemonConfig = {

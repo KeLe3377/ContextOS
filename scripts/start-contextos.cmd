@@ -1,5 +1,7 @@
 @echo off
 setlocal
+rem 切到 UTF-8 代码页，保证本文件中的中文提示不会显示成乱码
+chcp 65001 >nul
 cd /d "%~dp0\.."
 
 rem 源码开发模式：数据放在仓库内 .contextos

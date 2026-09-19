@@ -1,4 +1,4 @@
-param(
+﻿param(
   [int]$Port = 4721,
   [string]$HostName = "127.0.0.1",
   [string]$DataDir = ".contextos",
@@ -20,9 +20,22 @@ function Resolve-DataDir([string]$value) {
   return Join-Path $repoRoot $value
 }
 
+# 光是“文件存在”还不够：PATH 里的同名程序、被安全策略拦下的 exe 都会让
+# `& $node` 静默失败（$LASTEXITCODE 为空）。所以逐个候选真正跑一次 `-v`。
+function Test-NodeCommand([string]$candidate) {
+  if (-not $candidate) { return $false }
+  if (-not (Test-Path $candidate)) { return $false }
+  try {
+    $version = & $candidate -v 2>$null
+    return ("$version" -match "^v\d+")
+  } catch {
+    return $false
+  }
+}
+
 function Get-NodeCommand {
   $cmd = Get-Command node -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
+  if ($cmd -and $cmd.Source -and (Test-NodeCommand $cmd.Source)) { return $cmd.Source }
 
   $candidates = @(
     "C:\Program Files\nodejs\node.exe",
@@ -31,11 +44,10 @@ function Get-NodeCommand {
   if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles "nodejs\node.exe") }
   if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe") }
   foreach ($candidate in $candidates) {
-    if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    if (Test-NodeCommand $candidate) { return $candidate }
   }
 
-  # 找不到就退回 PATH 解析，让系统自己报错
-  return "node"
+  return $null
 }
 
 function Get-FrontendPath {
@@ -53,9 +65,9 @@ try {
   $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 2
   if ($health.processState -eq "ready") {
     Write-Host ""
-    Write-Host "ContextOS is already running"
-    Write-Host "Daemon:   $healthUrl"
-    Write-Host "Frontend: $frontendUrl"
+    Write-Host "ContextOS 已在运行"
+    Write-Host "守护进程: $healthUrl"
+    Write-Host "前端地址: $frontendUrl"
     Write-Host ""
     if (-not $NoBrowser) {
       Start-Process $frontendUrl
@@ -63,30 +75,39 @@ try {
     exit 0
   }
 } catch {
-  # No healthy daemon is listening; continue with a normal local startup.
+  # 没有健康的守护进程在监听，继续正常启动流程。
 }
 
 try {
   $node = Get-NodeCommand
+  if (-not $node) {
+    throw "未找到可执行的 Node.js。请安装 Node.js 20 LTS（https://nodejs.org）后重试。"
+  }
 
   $useCompiledBuild = Test-Path $daemonEntry
   if (-not $useCompiledBuild -and -not (Test-Path $sourceEntry)) {
-    throw "ContextOS daemon entry not found. Expected compiled build at '$daemonEntry' or source at '$sourceEntry'."
+    throw "未找到 ContextOS 守护进程入口。预期编译产物 '$daemonEntry' 或源码 '$sourceEntry'。"
   }
 
-  if (-not (Test-Path (Join-Path $repoRoot "node_modules"))) {
-    Write-Host "Installing dependencies..."
+  # 不能只判断 node_modules 目录是否存在：安装时 npm install 失败会留下一个空目录，
+  # 那样会跳过装依赖、随后报 "Cannot find module 'fastify'"。检查真实依赖包。
+  $missingDeps = @()
+  foreach ($dep in @("fastify", "better-sqlite3", "zod")) {
+    if (-not (Test-Path (Join-Path $repoRoot "node_modules/$dep"))) { $missingDeps += $dep }
+  }
+  if ($missingDeps.Count -gt 0) {
+    Write-Host "正在安装依赖（缺少 $($missingDeps -join '、')）..."
     if ($useCompiledBuild) {
       npm install --omit=dev --no-audit --no-fund
     } else {
       npm install --no-audit --no-fund
     }
-    if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) { throw "npm install 失败，退出码 $LASTEXITCODE。" }
   }
 
   $frontendPath = Get-FrontendPath
   if (-not $frontendPath) {
-    throw "Frontend build output not found under '$repoRoot'. Expected frontend/dist/index.html or index.html."
+    throw "未找到前端构建产物。预期 '$repoRoot' 下的 frontend/dist/index.html 或 index.html。"
   }
 
   $resolvedDataDir = Resolve-DataDir $DataDir
@@ -99,14 +120,15 @@ try {
   $env:CONTEXTOS_FRONTEND_DIR = Split-Path -Parent $frontendPath
 
   Write-Host ""
-  Write-Host "ContextOS local startup"
-  Write-Host "Daemon:   $healthUrl"
-  Write-Host "Frontend: $frontendUrl"
-  Write-Host "Build:    $frontendPath"
-  Write-Host "Data:     $resolvedDataDir"
-  Write-Host "Mode:     $(if ($useCompiledBuild) { 'compiled build' } else { 'source (tsx)' })"
+  Write-Host "ContextOS 本地启动"
+  Write-Host "守护进程: $healthUrl"
+  Write-Host "前端地址: $frontendUrl"
+  Write-Host "构建产物: $frontendPath"
+  Write-Host "数据目录: $resolvedDataDir"
+  Write-Host "运行模式: $(if ($useCompiledBuild) { '编译产物' } else { '源码 (tsx)' })"
+  Write-Host "Node:     $node"
   Write-Host ""
-  Write-Host "Keep this terminal open while testing. Press Ctrl+C to stop the daemon."
+  Write-Host "测试期间请保持本窗口打开，按 Ctrl+C 停止守护进程。"
   Write-Host ""
 
   if (-not $NoBrowser) {
@@ -115,24 +137,24 @@ try {
 
   if ($useCompiledBuild) {
     & $node $daemonEntry
-    if ($LASTEXITCODE -ne 0) {
-      throw "Daemon exited with code $LASTEXITCODE. If 'node' was not recognized, install Node.js 20 LTS from https://nodejs.org and try again."
-    }
+    $daemonExit = $LASTEXITCODE
+    if ($null -eq $daemonExit) { throw "守护进程启动失败：无法执行 '$node'。" }
+    if ($daemonExit -ne 0) { throw "守护进程退出，退出码 $daemonExit。" }
   } else {
     npm run dev
-    if ($LASTEXITCODE -ne 0) { throw "npm run dev exited with code $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) { throw "npm run dev 退出，退出码 $LASTEXITCODE。" }
   }
 } catch {
   Write-Host ""
   Write-Host "========================================" -ForegroundColor Red
-  Write-Host "Error occurred while starting ContextOS:" -ForegroundColor Red
+  Write-Host "启动 ContextOS 时发生错误：" -ForegroundColor Red
   Write-Host "$_" -ForegroundColor Red
   Write-Host "========================================" -ForegroundColor Red
   Write-Host ""
   try {
-    Read-Host "Press Enter to exit"
+    Read-Host "按回车键退出"
   } catch {
-    # Non-interactive host (CI / scheduled task): skip the prompt.
+    # 非交互宿主（CI / 计划任务）：跳过等待。
   }
   exit 1
 }

@@ -5,12 +5,12 @@
 
 [Setup]
 AppName=ContextOS
-AppVersion=0.1.2
-AppVerName=ContextOS 0.1.2
+AppVersion=0.1.3
+AppVerName=ContextOS 0.1.3
 AppPublisher=ContextOS
 DefaultDirName={localappdata}\ContextOS
 DefaultGroupName=ContextOS
-UninstallDisplayName=ContextOS 0.1.2
+UninstallDisplayName=ContextOS 0.1.3
 OutputDir=inst
 OutputBaseFilename=contextos-installer
 DisableDirPage=yes
@@ -50,6 +50,9 @@ Name: "{userprograms}\ContextOS\卸载 ContextOS.lnk"; Filename: "{uninstallexe}
 [UninstallDelete]
 ; 只清理开机启动脚本，用户数据目录（Roaming AppData\ContextOS）保留
 Type: files; Name: "{userstartup}\ContextOS.cmd"
+; npm install 装的运行时依赖不在安装清单里，需要显式清理，否则卸载后会留下 node_modules
+Type: filesandordirs; Name: "{app}\node_modules"
+Type: dirifempty; Name: "{app}"
 
 [Codes]
 procedure CurStepChanged(CurStep: Integer);
