@@ -136,7 +136,10 @@ export async function createDaemonServer(
       sessions: new SqliteSessionRepository(sqlite.db),
       sync: new SqliteSessionSyncRepository(sqlite.db),
       adapters: adapterRegistry,
-      tailer: new CodexTranscriptTailer()
+      tailer: new CodexTranscriptTailer(),
+      bindExternalSession: ({ sessionId, externalSessionId }) => {
+        runtimeRepository.bindExternalSession(sessionId, externalSessionId, nowMs());
+      }
     });
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
 

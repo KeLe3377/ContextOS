@@ -13,6 +13,14 @@ export type DesktopSyncServiceOptions = {
   sync: SqliteSessionSyncRepository;
   adapters: AgentAdapterRegistry;
   tailer: CodexTranscriptTailer;
+  /**
+   * Writes the external id back onto the Session row. Desktop sync alone only
+   * tracks it in session_sync_state — but `continue` decides between
+   * `launch` and `resume` by reading `sessions.external_session_id`, so a
+   * bind that never lands on the Session row would keep starting a brand new
+   * agent thread instead of resuming the same UUID.
+   */
+  bindExternalSession?: (input: { sessionId: string; externalSessionId: string }) => void;
 };
 
 function isoNow(): string {
@@ -79,6 +87,13 @@ export class DesktopSyncService {
     if (!externalSessionId) {
       throw new ContextOsError("INVALID_ARGUMENT", "Bind an external session id before enabling desktop sync", { sessionId });
     }
+    if (session.externalSessionId && session.externalSessionId !== externalSessionId) {
+      throw new ContextOsError("CONFLICT", "Session is already bound to a different external agent session", {
+        sessionId,
+        boundExternalSessionId: session.externalSessionId,
+        externalSessionId
+      });
+    }
     if (!adapter.resolveTranscriptPath) {
       throw new ContextOsError("INVALID_ARGUMENT", "Agent adapter cannot resolve a transcript path", { adapterId: adapter.id });
     }
@@ -106,6 +121,11 @@ export class DesktopSyncService {
       lastError: null,
       updatedAt: isoNow()
     });
+    // Only fill the Session row once; it is what makes `continue` resume this
+    // UUID instead of launching a fresh agent thread.
+    if (!session.externalSessionId && this.options.bindExternalSession) {
+      this.options.bindExternalSession({ sessionId, externalSessionId });
+    }
     return this.status(sessionId);
   }
 

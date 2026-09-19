@@ -16,9 +16,11 @@ import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/s
 import { registerCoreResourceRoutes } from "../../apps/daemon/src/http/routes/core-resources.js";
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { nowMs } from "../../packages/shared/src/clock.js";
+import { ContextOsError } from "../../packages/shared/src/errors.js";
 
 let server: FastifyInstance;
 let sqlite: SqliteClient | undefined;
+let sessions: SqliteSessionRepository;
 let dataDir: string;
 let transcriptDir: string;
 let transcriptPath: string;
@@ -54,16 +56,35 @@ beforeAll(async () => {
   sqlite = SqliteClient.open({ databaseFile: join(dataDir, "contextos.sqlite") });
   runMigrations(sqlite);
   const projects = new SqliteProjectRepository(sqlite.db);
-  const sessions = new SqliteSessionRepository(sqlite.db);
+  sessions = new SqliteSessionRepository(sqlite.db);
   const sync = new SqliteSessionSyncRepository(sqlite.db);
   const project = projects.create({ name: "Sync project", rootPath: dataDir, defaultRuleIds: [], agentAdapterIds: ["codex"] }, nowMs());
   const session = sessions.create({ projectId: project.id, agentAdapterId: "codex", title: "Desktop sync", intent: "watch rollout" }, nowMs());
   sessionId = session.id;
 
   const adapters = new AgentAdapterRegistry([new CodexAdapter("codex.cmd", ["exec"], "win32", transcriptDir)]);
-  const desktopSync = new DesktopSyncService({ sessions, sync, adapters, tailer: new CodexTranscriptTailer() });
+  const desktopSync = new DesktopSyncService({
+    sessions,
+    sync,
+    adapters,
+    tailer: new CodexTranscriptTailer(),
+    // Mirrors production: the daemon writes the external id onto the Session row,
+    // which is what makes `continue` resume instead of launching a new thread.
+    bindExternalSession: ({ sessionId: id, externalSessionId: external }) => {
+      sqlite!.db.prepare("UPDATE sessions SET external_session_id = ?, revision = revision + 1 WHERE id = ?").run(external, id);
+    }
+  });
 
   server = Fastify({ logger: false });
+  // Mirror the daemon's error mapping so ContextOsError codes surface as real
+  // HTTP statuses instead of an opaque 500.
+  server.setErrorHandler((error, _request, reply) => {
+    if (error instanceof ContextOsError) {
+      const statusCode = error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;
+      return reply.status(statusCode).send({ code: error.code, message: error.message });
+    }
+    return reply.status(500).send({ code: "INTERNAL", message: error instanceof Error ? error.message : "Request failed" });
+  });
   await server.register(cors);
   await registerCoreResourceRoutes(server, {
     sessions: { getByIdOrThrow: (id: string) => sessions.getByIdOrThrow(id) } as never,
@@ -100,6 +121,9 @@ describe("desktop sync API", () => {
     });
     // Once bound, the same external id can be resumed over the CLI.
     expect(bound.json().capabilities).toMatchObject({ desktopReadSync: true, managedCliResume: true, desktopUiControl: false });
+    // The external id must land on the Session row too, otherwise `continue`
+    // would launch a fresh agent thread instead of resuming this UUID.
+    expect(sessions.getByIdOrThrow(sessionId).externalSessionId).toBe(externalSessionId);
   });
 
   it("tails only new complete lines and advances the byte offset", async () => {
@@ -151,5 +175,17 @@ describe("desktop sync API", () => {
     const state = await server.inject({ method: "GET", url: `/api/sessions/${sessionId}/desktop-sync` });
     expect(state.json().status).toBe("ERROR");
     expect(state.json().lastError).toBeTruthy();
+  });
+
+  it("refuses to rebind a Session that already points at another external session", async () => {
+    const conflict = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${sessionId}/desktop-sync/bind`,
+      payload: { externalSessionId: "01a0test-0000-7000-8000-000000000999" }
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({ code: "CONFLICT" });
+    // The original binding is untouched.
+    expect(sessions.getByIdOrThrow(sessionId).externalSessionId).toBe(externalSessionId);
   });
 });
