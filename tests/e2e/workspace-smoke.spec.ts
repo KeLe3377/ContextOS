@@ -7,7 +7,9 @@ test("main workspace exposes failed session history across desktop and mobile", 
   const projectName = `E2E ${suffix}`;
   const sessionTitle = `Failed run ${suffix}`;
 
-  await page.goto("/");
+  // domcontentloaded: the page links Google Fonts, so waiting for `load` hangs
+  // in any offline or slow-network environment.
+  await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "概览" })).toBeVisible();
   // Guard against frontend field drift: the overview payload uses activeSources /
   // pausedSources, and reading a renamed key used to render an empty value.
@@ -43,7 +45,7 @@ test("main workspace exposes failed session history across desktop and mobile", 
   expect(continueResponse.ok()).toBeTruthy();
 
   await expect.poll(async () => (await request.get(`/api/sessions/${session.id}`)).json()).toMatchObject({ status: "FAILED" });
-  await page.reload();
+  await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "会话" })).toBeVisible();
   await expect(page.getByText(sessionTitle, { exact: true }).first()).toBeVisible();
   const sessionRow = page.getByRole("row").filter({ hasText: sessionTitle });
@@ -66,7 +68,7 @@ test("work item agent attempt reconciles a failed linked session", async ({ page
   const projectName = `E2E ${suffix}`;
   const workTitle = `Execute ${suffix}`;
 
-  await page.goto("/#projects");
+  await page.goto("/#projects", { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "添加项目" }).click();
   await page.getByLabel("项目名称").fill(projectName);
   await page.getByLabel("根路径").fill(process.cwd());
@@ -237,7 +239,7 @@ async function waitForListItem(request: import("@playwright/test").APIRequestCon
 }
 
 async function createProject(page: import("@playwright/test").Page, projectName: string, projectRoot: string): Promise<void> {
-  await page.goto("/#projects");
+  await page.goto("/#projects", { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "添加项目" }).click();
   await page.getByLabel("项目名称").fill(projectName);
   await page.getByLabel("根路径").fill(projectRoot);

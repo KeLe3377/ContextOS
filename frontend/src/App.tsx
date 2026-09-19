@@ -324,6 +324,7 @@ export function App() {
   const [data, setData] = useState<WorkspaceData>(() => emptyData());
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [desktopSyncAuto, setDesktopSyncAuto] = useState(() => localStorage.getItem("contextos.desktopSyncAuto") === "true");
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null);
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
@@ -508,6 +509,10 @@ export function App() {
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("contextos.desktopSyncAuto", String(desktopSyncAuto));
+  }, [desktopSyncAuto]);
 
   const runAction = useCallback(async (task: () => Promise<unknown>, successMessage: string) => {
     setActionLoading(true);
@@ -810,6 +815,30 @@ export function App() {
     await sendJson(`/api/review-items/${review.id}/assign`, "POST", { reviewerId, expectedRevision: review.revision });
   }, [reviewById]);
 
+  // Desktop sync is a tail, not a subscription: nothing pushes to us, so a
+  // bound session only stays current while we poll the byte offset.
+  useEffect(() => {
+    const sessionId = selectedSessionId;
+    const bound = Boolean(sessionDetails?.desktopSync?.transcriptPath);
+    if (!desktopSyncAuto || page !== "sessions" || !sessionId || !bound) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = (await syncDesktopSync(sessionId)) as AnyRecord;
+        if (cancelled) return;
+        setSessionDetails((current) => (current && current.sessionId === sessionId ? { ...current, desktopSync: result } : current));
+      } catch {
+        // A failed poll keeps the last known state; the manual button surfaces errors.
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [desktopSyncAuto, page, selectedSessionId, sessionDetails?.desktopSync?.transcriptPath, syncDesktopSync]);
+
   const handleAction = useCallback((action: string) => {
     if (action === "refresh-context" || action === "reset-changes") return void loadData();
     if (action === "add-project") return setModal({ kind: "project" });
@@ -888,7 +917,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>正在加载工作区数据...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, desktopSyncAuto, setDesktopSyncAuto, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -1071,7 +1100,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function SessionsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, selectedSessionId, selectSession, sessionDetails: details, sessionDetailsLoading, actionLoading, runAction, archiveSession, continueSession, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, interruptSession, exportSessionCapsule, openEvidenceDetail, setModal } = props;
+  const { data, header, selectedSessionId, selectSession, sessionDetails: details, sessionDetailsLoading, actionLoading, runAction, archiveSession, continueSession, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, desktopSyncAuto, setDesktopSyncAuto, interruptSession, exportSessionCapsule, openEvidenceDetail, setModal } = props;
   const canContinue = (status: string) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
   const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `适配器 ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `外部会话 ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} 条消息` : null, item.metadata?.eventCount ? `${item.metadata.eventCount} 个事件` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} 轮对话` : null].filter(Boolean).join(" · ");
   const selectedSession = data.sessions.find((session: AnyRecord) => session.id === selectedSessionId) || data.sessions[0];
@@ -1137,9 +1166,11 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
                 <div className="metric-row evidence-row"><div className="evidence-row-main"><div className="title-sm">同一 UUID 命令行续跑</div><div className="muted">绑定外部会话后可用受管 CLI 在同一 UUID 上继续。</div></div><Badge text={desktopSyncCapabilities.managedCliResume ? "支持" : "待绑定"} tone={desktopSyncCapabilities.managedCliResume ? "green" : "amber"} /></div>
                 <div className="metric-row evidence-row"><div className="evidence-row-main"><div className="title-sm">反向操控 Desktop 界面</div><div className="muted">需要 app-server 单写者锁，仍在调研。</div></div><Badge text="调研中" tone="blue" /></div>
               </div>
+              {desktopSync.transcriptPath && desktopSyncAuto ? <div className="muted mono">自动同步已开启：停留在会话页时每 5 秒增量读取一次新事件</div> : null}
               <div className="row-actions">
-                <button className="btn primary" disabled={actionLoading} onClick={() => setModal({ kind: "desktopSync", sessionId: selectedSession.id })}>{icon("link")}<span>{desktopSync.transcriptPath ? "重新绑定" : "绑定会话"}</span></button>
+                <button className={`btn ${desktopSync.transcriptPath ? "" : "primary"}`} disabled={actionLoading} onClick={() => setModal({ kind: "desktopSync", sessionId: selectedSession.id })}>{icon("link")}<span>{desktopSync.transcriptPath ? "重新绑定" : "绑定会话"}</span></button>
                 <button className="btn" disabled={!desktopSync.transcriptPath || actionLoading} onClick={() => runAction(() => syncDesktopSync(selectedSession.id), "已从 Desktop 对话记录同步")}>{icon("sync")}<span>立即同步</span></button>
+                <button className="btn" disabled={!desktopSync.transcriptPath || actionLoading} onClick={() => setDesktopSyncAuto(!desktopSyncAuto)}>{icon(desktopSyncAuto ? "pause_circle" : "play_arrow")}<span>{desktopSyncAuto ? "停止自动同步" : "自动同步"}</span></button>
                 <button className="btn" disabled={!desktopSync.transcriptPath || actionLoading} onClick={() => runAction(() => unbindDesktopSync(selectedSession.id), "已解除 Desktop 同步绑定")}>{icon("link_off")}<span>解除绑定</span></button>
               </div>
             </div> : <EmptyNote>该会话的 Desktop 同步状态不可用。</EmptyNote>}
