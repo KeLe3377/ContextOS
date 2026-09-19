@@ -142,12 +142,14 @@ cd D:\project\ContextOS
 npm run start:local
 ```
 
-脚本会在缺少依赖时运行 `npm install`，构建 React 前端，启动本地 daemon，并打开：
+脚本会在缺少依赖时运行 `npm install`，然后启动本地 daemon，并打开：
 
 ```text
 http://127.0.0.1:4721/api/health
 http://127.0.0.1:4721/
 ```
+
+启动脚本会自动选择运行模式：存在 `dist/apps/daemon/src/main.js` 时直接运行编译产物（`node dist/apps/daemon/src/main.js`），否则回退到源码模式（`tsx apps/daemon/src/main.ts`）。前端静态资源从 `frontend/dist/index.html` 读取，缺失时回退到仓库根目录的 `index.html`。
 
 默认数据目录是 `.contextos/`，数据库是 `.contextos/contextos.sqlite`。这些本地运行数据已经被 `.gitignore` 排除。
 
@@ -155,9 +157,30 @@ http://127.0.0.1:4721/
 
 ```powershell
 npm install
-npm run frontend:build
-npm run dev
+npm run build:all
+npm start          # 运行编译产物 dist/apps/daemon/src/main.js
 ```
+
+源码开发时仍可用 `npm run dev`（tsx 直跑 TypeScript）。
+
+## Windows 安装包
+
+`contextos.iss` 是 Inno Setup 6 脚本，打包内容包括：
+
+- 编译后的 daemon 产物 `dist/apps`、`dist/packages`；
+- 前端静态资源 `frontend/dist`；
+- 数据库迁移 `migrations/*.sql`（daemon 启动时从安装目录读取）；
+- 启动脚本 `scripts/start-contextos.ps1`、`scripts/start-contextos.cmd`；
+- `package.json` 与 `package-lock.json`。
+
+安装时只安装运行时依赖（`npm install --omit=dev`），因此编译产物必须先由 `npm run build:all` 生成。编译命令：
+
+```powershell
+npm run build:all
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" contextos.iss
+```
+
+产物是 `inst\contextos-installer.exe`。安装目录为 `%LOCALAPPDATA%\ContextOS`，用户数据目录为 `%APPDATA%\ContextOS\.contextos`，卸载时会保留用户数据。
 
 ## 基本测试流程
 

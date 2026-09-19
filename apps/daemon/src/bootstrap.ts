@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { ZodError } from "zod";
@@ -124,7 +123,7 @@ export async function createDaemonServer(
       platform: process.platform,
       startupDirectory: process.env.CONTEXTOS_STARTUP_DIR,
       appDataDirectory: process.env.APPDATA,
-      startupScript: fileURLToPath(new URL("../../../scripts/start-contextos.ps1", import.meta.url)),
+      startupScript: resolveStartupScript(),
       host: config.host,
       port: config.port,
       dataDirectory: config.dataDir
@@ -248,8 +247,20 @@ function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
+function resolveStartupScript(): string {
+  return process.env.CONTEXTOS_STARTUP_SCRIPT
+    ? resolve(process.env.CONTEXTOS_STARTUP_SCRIPT)
+    : resolve(process.cwd(), "scripts", "start-contextos.ps1");
+}
+
+function resolveFrontendRoot(): string {
+  return process.env.CONTEXTOS_FRONTEND_DIR
+    ? resolve(process.env.CONTEXTOS_FRONTEND_DIR)
+    : resolve(process.cwd(), "frontend", "dist");
+}
+
 function registerFrontendRoutes(server: FastifyInstance): void {
-  const frontendRoot = resolve(process.cwd(), "frontend", "dist");
+  const frontendRoot = resolveFrontendRoot();
   server.get("/", async (_request, reply) => sendFrontendFile(reply, frontendRoot, "index.html"));
   server.get("/assets/*", async (request, reply) => {
     const params = request.params as { "*": string };
