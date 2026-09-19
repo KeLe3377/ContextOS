@@ -4,6 +4,7 @@ export const coreTableNames = [
   "agent_adapters",
   "sessions",
   "session_runs",
+  "session_sync_state",
   "review_items",
   "decisions",
   "decision_versions",

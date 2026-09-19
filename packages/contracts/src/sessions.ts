@@ -98,6 +98,46 @@ export type SessionTranscriptEventsDto = {
   events: AgentTranscriptEventDto[];
 };
 
+export const sessionSyncBindSchema = z.object({
+  externalSessionId: z.string().trim().min(1).optional(),
+  transcriptPath: z.string().trim().min(1).optional(),
+  fromBeginning: z.boolean().optional()
+});
+
+export type SessionSyncBindInput = z.infer<typeof sessionSyncBindSchema>;
+export type SessionSyncStatus = "UNBOUND" | "IDLE" | "WATCHING" | "ERROR";
+
+export type SessionSyncCapabilities = {
+  desktopReadSync: boolean;
+  managedCliResume: boolean;
+  desktopUiControl: boolean;
+};
+
+export type SessionSyncStateDto = {
+  sessionId: string;
+  adapterId: string | null;
+  externalSessionId: string | null;
+  transcriptPath: string | null;
+  byteOffset: number;
+  fileSize: number | null;
+  eventsIngested: number;
+  lastEventAt: string | null;
+  lastSyncedAt: string | null;
+  lagMs: number | null;
+  status: SessionSyncStatus;
+  lastError: string | null;
+  capabilities: SessionSyncCapabilities;
+  updatedAt: string | null;
+};
+
+export type SessionSyncResultDto = SessionSyncStateDto & {
+  newEvents: number;
+  newEventTimestamps: number;
+  partialLine: boolean;
+  resetReason: "offset_beyond_eof" | null;
+  events: AgentTranscriptEventDto[];
+};
+
 export type TranscriptImportResult = {
   evidence: EvidenceSnapshotDto;
   resumeCapsule: ResumeCapsuleDto;

@@ -4,7 +4,7 @@ const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:
 
 type AnyRecord = Record<string, any>;
 type PageId = "overview" | "projects" | "sessions" | "review" | "decisions" | "work" | "context" | "rules" | "settings";
-type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "resumeCapsule" | "source" | "sourceEdit" | "contextItem" | "contextItemEdit" | "decision" | "decisionEdit" | "workItem" | "workItemEdit" | "workItemBlock" | "workItemResolveBlocker" | "reviewAssign" | "reviewResolve" | "reviewDismiss";
+type ModalKind = null | "project" | "session" | "rule" | "transcript" | "existingTranscript" | "desktopSync" | "resumeCapsule" | "source" | "sourceEdit" | "contextItem" | "contextItemEdit" | "decision" | "decisionEdit" | "workItem" | "workItemEdit" | "workItemBlock" | "workItemResolveBlocker" | "reviewAssign" | "reviewResolve" | "reviewDismiss";
 
 type PageDef = {
   title: string;
@@ -32,7 +32,7 @@ type 工作区Data = {
 
 class Action取消ed extends Error {
   constructor() {
-    super("Action canceled");
+    super("操作已取消");
   }
 }
 
@@ -45,6 +45,7 @@ type SessionDetails = {
   runs: AnyRecord[];
   activity: AnyRecord[];
   transcriptEvents: AnyRecord | null;
+  desktopSync: AnyRecord | null;
 };
 
 const navGroups: Array<{ label: string; items: Array<[PageId, string, string]> }> = [
@@ -56,7 +57,7 @@ const navGroups: Array<{ label: string; items: Array<[PageId, string, string]> }
 const pages: Record<PageId, PageDef> = {
   overview: { title: "概览", subtitle: "工作区状态、待处理审查以及下一步可执行工作。", actions: [["refresh", "刷新上下文", "", "refresh-context"]] },
   projects: { title: "项目", subtitle: "受控工作区边界及活动的上下文策略。", actions: [["create_new_folder", "添加项目", "primary", "add-project"], ["tune", "编辑默认值", "", "edit-defaults"]] },
-  sessions: { title: "会话", subtitle: "带有不可变证据引用的具体智能体工作片段。", actions: [["add", "新建会话", "primary", "new-session"], ["sync", "同步对话记录", "", "sync-transcript"], ["play_arrow", "在智能体中继续", "", "continue-in-agent"], ["hub", "导入已有会话", "", "import-existing-session"], ["upload_file", "导入对话记录", "", "import-transcript"], ["download", "导出摘要胶囊", "", "export-capsule"]] },
+  sessions: { title: "会话", subtitle: "带有不可变证据引用的具体智能体工作片段。", actions: [["add", "新建会话", "primary", "new-session"], ["sync", "同步对话记录", "", "sync-transcript"], ["link", "Desktop 同步", "", "desktop-sync"], ["play_arrow", "在智能体中继续", "", "continue-in-agent"], ["hub", "导入已有会话", "", "import-existing-session"], ["upload_file", "导入对话记录", "", "import-transcript"], ["download", "导出摘要胶囊", "", "export-capsule"]] },
   review: { title: "审查收件箱", subtitle: "派生上下文或规则生效前需要人工决定的事项。", actions: [["rule", "批准选中", "primary", "approve-selected"], ["close", "拒绝", "", "reject"]] },
   decisions: { title: "决策", subtitle: "持久的选择、基本原理、来源与版本历史。", actions: [["add", "记录决策", "primary", "record-decision"], ["compare_arrows", "版本对比", "", "compare-versions"]] },
   work: { title: "工作项", subtitle: "具有就绪信号和阻塞依赖的可执行工作单元。", actions: [["play_arrow", "启动就绪项", "primary", "start-ready-item"], ["add_task", "创建工作项", "", "create-item"]] },
@@ -65,7 +66,7 @@ const pages: Record<PageId, PageDef> = {
   settings: { title: "设置", subtitle: "配置 ContextOS 的运行方式、智能体连接及工作上下文处理。", actions: [["restart_alt", "重置更改", "", "reset-changes"], ["check", "保存更改", "primary", "save-changes"]], narrow: true }
 };
 
-const enabledActions = new Set(["refresh-context", "add-project", "new-session", "sync-transcript", "continue-in-agent", "import-existing-session", "import-transcript", "export-capsule", "approve-selected", "reject", "record-decision", "compare-versions", "start-ready-item", "create-item", "add-source", "add-context-item", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
+const enabledActions = new Set(["refresh-context", "add-project", "new-session", "sync-transcript", "desktop-sync", "continue-in-agent", "import-existing-session", "import-transcript", "export-capsule", "approve-selected", "reject", "record-decision", "compare-versions", "start-ready-item", "create-item", "add-source", "add-context-item", "sync-sources", "new-rule", "reset-changes", "save-changes"]);
 
 function emptyData(): 工作区Data {
   return {
@@ -113,7 +114,7 @@ async function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | 
   try {
     return { ok: true, value: await promise };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error : new Error("Request failed") };
+    return { ok: false, error: error instanceof Error ? error : new Error("请求失败") };
   }
 }
 
@@ -222,16 +223,16 @@ function fmtDate(value: string | null | undefined) {
 }
 
 function transcriptStructure(metadata: AnyRecord | null | undefined) {
-  if (!metadata) return "No transcript metadata";
+  if (!metadata) return "无对话记录元数据";
   const counts = metadata.eventCounts || {};
   const parts = [
-    `${metadata.messageCount || 0} messages`,
-    metadata.eventCount ? `${metadata.eventCount} events` : null,
-    counts.toolCall ? `${counts.toolCall} tool calls` : null,
-    counts.toolResult ? `${counts.toolResult} tool results` : null,
-    counts.summary ? `${counts.summary} summaries` : null,
-    `${metadata.turnCount || 0} turns`,
-    metadata.transcriptTruncated ? "truncated" : "complete"
+    `${metadata.messageCount || 0} 条消息`,
+    metadata.eventCount ? `${metadata.eventCount} 个事件` : null,
+    counts.toolCall ? `${counts.toolCall} 次工具调用` : null,
+    counts.toolResult ? `${counts.toolResult} 个工具结果` : null,
+    counts.summary ? `${counts.summary} 条摘要` : null,
+    `${metadata.turnCount || 0} 轮对话`,
+    metadata.transcriptTruncated ? "已截断" : "完整"
   ];
   return parts.filter(Boolean).join(" · ");
 }
@@ -257,6 +258,13 @@ function toneForStatus(status: string | null | undefined) {
   return "";
 }
 
+function desktopSyncStatusLabel(status: unknown) {
+  if (status === "WATCHING") return "监听中";
+  if (status === "IDLE") return "空闲";
+  if (status === "ERROR") return "出错";
+  return "未绑定";
+}
+
 function Badge({ text, tone = "" }: { text: ReactNode; tone?: string }) {
   return <span className={`badge ${tone}`}>{text}</span>;
 }
@@ -277,7 +285,7 @@ function Panel({ title, iconName, children, meta = "" }: { title: string; iconNa
   );
 }
 
-function Table({ headers, rows, empty = "No records yet." }: { headers: string[]; rows: ReactNode[][]; empty?: string }) {
+function Table({ headers, rows, empty = "暂无记录。" }: { headers: string[]; rows: ReactNode[][]; empty?: string }) {
   if (!rows.length) return <EmptyNote>{empty}</EmptyNote>;
   return (
     <div className="table-scroll">
@@ -289,7 +297,7 @@ function Table({ headers, rows, empty = "No records yet." }: { headers: string[]
   );
 }
 
-function Rows({ rows, empty = "No items yet." }: { rows: Array<[ReactNode, ReactNode, string, ReactNode?]>; empty?: string }) {
+function Rows({ rows, empty = "暂无条目。" }: { rows: Array<[ReactNode, ReactNode, string, ReactNode?]>; empty?: string }) {
   if (!rows.length) return <EmptyNote>{empty}</EmptyNote>;
   return (
     <div>
@@ -350,14 +358,15 @@ export function App() {
 
   const loadSessionDetails = useCallback(async (session: AnyRecord | undefined): Promise<SessionDetails | null> => {
     if (!session) return null;
-    const [contextPack, evidence, resumeCapsule, runtimeStatus, runs, activity, transcriptEvents] = await Promise.all([
+    const [contextPack, evidence, resumeCapsule, runtimeStatus, runs, activity, transcriptEvents, desktopSync] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
       settle(fetchJson(`/api/sessions/${session.id}/resume-capsule`)),
       settle(fetchJson(`/api/sessions/${session.id}/runtime-status`)),
       settle(fetchJson(`/api/sessions/${session.id}/runs`)),
       settle(fetchJson(`/api/sessions/${session.id}/activity`)),
-      settle(fetchJson(`/api/sessions/${session.id}/transcript-events`))
+      settle(fetchJson(`/api/sessions/${session.id}/transcript-events`)),
+      settle(fetchJson(`/api/sessions/${session.id}/desktop-sync`))
     ]);
     return {
       sessionId: session.id,
@@ -367,7 +376,8 @@ export function App() {
       runtimeStatus: runtimeStatus.ok ? runtimeStatus.value : null,
       runs: runs.ok ? runs.value?.items ?? [] : [],
       activity: activity.ok ? activity.value?.items ?? [] : [],
-      transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null
+      transcriptEvents: transcriptEvents.ok ? transcriptEvents.value : null,
+      desktopSync: desktopSync.ok ? desktopSync.value : null
     };
   }, []);
 
@@ -458,7 +468,7 @@ export function App() {
     const selectedRule = next.rules.find((rule) => rule.id === preferredRuleIdRef.current) || next.rules[0];
     const selectedContextSource = next.context数据源.find((source) => source.id === preferredContextSourceIdRef.current) || next.context数据源[0];
     setData(next);
-    setError(failures.length === entries.length ? "Daemon unavailable" : failures[0] || null);
+    setError(failures.length === entries.length ? "守护进程不可用" : failures[0] || null);
     preferredProjectIdRef.current = selectedProject?.id || null;
     preferredSessionIdRef.current = selectedSession?.id || null;
     preferredReviewIdRef.current = selectedReview?.id || null;
@@ -510,7 +520,7 @@ export function App() {
     } catch (actionError) {
       setActionLoading(false);
       if (actionError instanceof Action取消ed) return;
-      setActionMessage({ text: actionError instanceof Error ? actionError.message : "Action failed", error: true });
+      setActionMessage({ text: actionError instanceof Error ? actionError.message : "操作失败", error: true });
     }
   }, [loadData]);
 
@@ -583,54 +593,76 @@ export function App() {
 
   const archiveProject = useCallback(async (projectId: string) => {
     const project = projectById(projectId);
-    if (!project) throw new Error("No project is available to archive");
+    if (!project) throw new Error("没有可归档的项目");
     if (!confirmDestructiveAction(`Archive project "${project.name}"?`)) return;
     await sendJson(`/api/projects/${project.id}/archive`, "POST", { expectedRevision: project.revision });
   }, [confirmDestructiveAction, projectById]);
 
   const transitionProject = useCallback(async (projectId: string, action: string) => {
     const project = projectById(projectId);
-    if (!project) throw new Error("No project is available");
+    if (!project) throw new Error("没有可用的项目");
     if (action === "archive" && !confirmDestructiveAction(`Archive project "${project.name}"?`)) return;
     await sendJson(`/api/projects/${project.id}/${action}`, "POST", { expectedRevision: project.revision });
   }, [confirmDestructiveAction, projectById]);
 
   const archiveSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
-    if (!session) throw new Error("No session is available to archive");
+    if (!session) throw new Error("没有可归档的会话");
     if (!confirmDestructiveAction(`Archive session "${session.title || session.id}"?`)) return;
     await sendJson(`/api/sessions/${session.id}/archive`, "POST", { expectedRevision: session.revision });
   }, [confirmDestructiveAction, sessionById]);
 
   const continueSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
-    if (!session) throw new Error("No session is available to continue");
+    if (!session) throw new Error("没有可继续的会话");
     await sendJson(`/api/sessions/${session.id}/continue`, "POST", { expectedRevision: session.revision });
     window.setTimeout(() => void loadData(), 500);
   }, [loadData, sessionById]);
 
   const importTranscriptAuto = useCallback(async (sessionId: string, input: AnyRecord = {}) => {
     const session = sessionById(sessionId);
-    if (!session) throw new Error("No session is available for transcript import");
+    if (!session) throw new Error("没有可用于导入对话记录的会话");
     await sendJson(`/api/sessions/${session.id}/import-transcript/auto`, "POST", input);
   }, [sessionById]);
 
   const syncSessionTranscript = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
-    if (!session) throw new Error("No session is available for transcript sync");
+    if (!session) throw new Error("没有可用于同步对话记录的会话");
     await sendJson(`/api/sessions/${session.id}/sync-transcript`, "POST", {});
+  }, [sessionById]);
+
+  const bindDesktopSync = useCallback(async (sessionId: string, input: AnyRecord = {}) => {
+    const session = sessionById(sessionId);
+    if (!session) throw new Error("没有可用于 Desktop 同步的会话");
+    await sendJson(`/api/sessions/${session.id}/desktop-sync/bind`, "POST", {
+      externalSessionId: String(input.externalSessionId || "").trim() || undefined,
+      transcriptPath: String(input.transcriptPath || "").trim() || undefined,
+      fromBeginning: input.fromBeginning === true
+    });
+  }, [sessionById]);
+
+  const syncDesktopSync = useCallback(async (sessionId: string) => {
+    const session = sessionById(sessionId);
+    if (!session) throw new Error("没有可用于 Desktop 同步的会话");
+    return sendJson(`/api/sessions/${session.id}/desktop-sync/sync`, "POST", {});
+  }, [sessionById]);
+
+  const unbindDesktopSync = useCallback(async (sessionId: string) => {
+    const session = sessionById(sessionId);
+    if (!session) throw new Error("没有可用于 Desktop 同步的会话");
+    await sendJson(`/api/sessions/${session.id}/desktop-sync`, "DELETE", {});
   }, [sessionById]);
 
   const interruptSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
-    if (!session) throw new Error("No session is available to interrupt");
+    if (!session) throw new Error("没有可中断的会话");
     if (!confirmDestructiveAction(`Interrupt the active run for "${session.title || session.id}"?`)) return;
     await sendJson(`/api/sessions/${session.id}/interrupt`, "POST", { expectedRevision: session.revision });
   }, [confirmDestructiveAction, sessionById]);
 
   const exportSessionCapsule = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
-    if (!session) throw new Error("No session is available to export");
+    if (!session) throw new Error("没有可导出的会话");
     const [contextPack, evidence, resumeCapsule, runtimeStatus, activity, transcriptEvents] = await Promise.all([
       settle(fetchJson(`/api/sessions/${session.id}/context-pack`)),
       settle(fetchJson(`/api/sessions/${session.id}/evidence`)),
@@ -663,19 +695,19 @@ export function App() {
 
   const syncSource = useCallback(async (sourceId: string) => {
     const source = sourceById(sourceId);
-    if (!source) throw new Error("No context source is available to sync");
+    if (!source) throw new Error("没有可同步的数据源");
     await sendJson(`/api/context-sources/${source.id}/sync`, "POST", { expectedRevision: source.revision });
   }, [sourceById]);
   const transitionSource = useCallback(async (sourceId: string, action: string) => {
     const source = sourceById(sourceId);
-    if (!source) throw new Error("No context source is available");
+    if (!source) throw new Error("没有可用的数据源");
     if (action === "archive" && !confirmDestructiveAction(`Archive context source "${source.name}"?`)) return;
     await sendJson(`/api/context-sources/${source.id}/${action}`, "POST", { expectedRevision: source.revision });
   }, [confirmDestructiveAction, sourceById]);
 
   const syncActive数据源 = useCallback(async () => {
     const sources = data.context数据源.filter((source) => source.status === "ACTIVE");
-    if (!sources.length) throw new Error("No active context sources are available to sync");
+    if (!sources.length) throw new Error("没有处于启用状态的数据源可同步");
     for (const source of sources) await syncSource(source.id);
   }, [data.context数据源, syncSource]);
 
@@ -706,7 +738,7 @@ export function App() {
   }, []);
   const transitionContextItem = useCallback(async (itemId: string, action: string) => {
     const item = data.contextItems.find((entry) => entry.id === itemId);
-    if (!item) throw new Error("No context item is available");
+    if (!item) throw new Error("没有可用的上下文项");
     if (action === "archive" && !confirmDestructiveAction(`Archive context item "${item.title}"?`)) return;
     await sendJson(`/api/context-items/${item.id}/${action}`, "POST", { expectedRevision: item.revision });
   }, [confirmDestructiveAction, data.contextItems]);
@@ -721,7 +753,7 @@ export function App() {
   }, []);
   const restoreContextItemVersion = useCallback(async (itemId: string, versionNumber: number) => {
     const item = data.contextItems.find((entry) => entry.id === itemId);
-    if (!item) throw new Error("No context item is available");
+    if (!item) throw new Error("没有可用的上下文项");
     await sendJson(`/api/context-items/${item.id}/versions/${versionNumber}/restore`, "POST", { expectedRevision: item.revision });
     setContextItemDetail(null);
   }, [data.contextItems]);
@@ -729,7 +761,7 @@ export function App() {
   const testRule = useCallback((ruleId: string) => sendJson(`/api/rules/${ruleId}/test`, "POST", { eventType: "session.continue", resourceType: "SESSION", data: {} }), []);
   const transitionRule = useCallback(async (ruleId: string, action: string) => {
     const rule = ruleById(ruleId);
-    if (!rule) throw new Error("No rule is available");
+    if (!rule) throw new Error("没有可用的规则");
     await sendJson(`/api/rules/${rule.id}/${action}`, "POST", { expectedRevision: rule.revision });
   }, [ruleById]);
   const renderRuleInstructions = useCallback(async (target: string, apply: boolean) => {
@@ -740,7 +772,7 @@ export function App() {
   }, [data.projects, selectedProjectId]);
   const transitionDecision = useCallback(async (decisionId: string, action: string) => {
     const decision = decisionById(decisionId);
-    if (!decision) throw new Error("No decision is available");
+    if (!decision) throw new Error("没有可用的决策");
     if (action === "archive" && !confirmDestructiveAction(`Archive decision "${decision.title}"?`)) return;
     if (action === "supersede" && !confirmDestructiveAction(`Supersede accepted decision "${decision.title}"?`)) return;
     if (action === "reverse" && !confirmDestructiveAction(`Reverse accepted decision "${decision.title}"?`)) return;
@@ -748,33 +780,33 @@ export function App() {
   }, [confirmDestructiveAction, decisionById]);
   const transitionWorkItem = useCallback(async (workItemId: string, action: string) => {
     const item = workItemById(workItemId);
-    if (!item) throw new Error("No work item is available");
+    if (!item) throw new Error("没有可用的工作项");
     if (action === "cancel" && !confirmDestructiveAction(`取消 work item "${item.title}"?`)) return;
     await sendJson(`/api/work-items/${item.id}/${action}`, "POST", { expectedRevision: item.revision });
   }, [confirmDestructiveAction, workItemById]);
   const startWorkItemSession = useCallback(async (workItemId: string) => {
     const item = workItemById(workItemId);
-    if (!item) throw new Error("No work item is available");
+    if (!item) throw new Error("没有可用的工作项");
     await sendJson(`/api/work-items/${item.id}/start-session`, "POST", { expectedRevision: item.revision });
   }, [workItemById]);
   const resolveReview = useCallback(async (reviewId: string, input: AnyRecord) => {
     const review = reviewById(reviewId);
-    if (!review) throw new Error("No review item is available");
+    if (!review) throw new Error("没有可用的审查项");
     await sendJson(`/api/review-items/${review.id}/resolve`, "POST", { ...input, expectedRevision: review.revision });
   }, [reviewById]);
   const dismissReview = useCallback(async (reviewId: string, reason: string) => {
     const review = reviewById(reviewId);
-    if (!review) throw new Error("No review item is available");
+    if (!review) throw new Error("没有可用的审查项");
     await sendJson(`/api/review-items/${review.id}/dismiss`, "POST", { resolutionReason: reason, expectedRevision: review.revision });
   }, [reviewById]);
   const startReview = useCallback(async (reviewId: string) => {
     const review = reviewById(reviewId);
-    if (!review) throw new Error("No review item is available");
+    if (!review) throw new Error("没有可用的审查项");
     await sendJson(`/api/review-items/${review.id}/start`, "POST", { expectedRevision: review.revision });
   }, [reviewById]);
   const assignReview = useCallback(async (reviewId: string, reviewerId: string) => {
     const review = reviewById(reviewId);
-    if (!review) throw new Error("No review item is available");
+    if (!review) throw new Error("没有可用的审查项");
     await sendJson(`/api/review-items/${review.id}/assign`, "POST", { reviewerId, expectedRevision: review.revision });
   }, [reviewById]);
 
@@ -810,6 +842,11 @@ export function App() {
       if (!session) return setActionMessage({ text: "请先创建会话，再在智能体中继续", error: true });
       return void runAction(() => continueSession(session.id), "会话已在智能体中继续");
     }
+    if (action === "desktop-sync") {
+      const session = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : null;
+      if (!session) return setActionMessage({ text: "请先创建或选择会话，再绑定 Desktop 同步", error: true });
+      return setModal({ kind: "desktopSync", sessionId: session.id });
+    }
     if (action === "import-transcript") {
       const session = selectedSessionId ? data.sessions.find((item) => item.id === selectedSessionId) : data.sessions[0];
       if (!session) return setActionMessage({ text: "请先创建会话，再导入对话记录", error: true });
@@ -839,7 +876,7 @@ export function App() {
         confirmDestructiveActions: Boolean(confirm?.checked),
         launchAtStartup: Boolean(startup?.checked),
         expectedRevision: data.settings!.revision
-      }), "Settings saved");
+      }), "设置已保存");
     }
   }, [continueSession, data.context数据源, data.evidenceSnapshots, data.projects, data.reviews, data.sessions, data.settings, data.workItems, defaultAdapterId, exportSessionCapsule, loadData, runAction, selectedContextSourceId, selectedReviewId, selectedSessionId, startWorkItemSession, syncActive数据源, syncSessionTranscript, transitionWorkItem]);
 
@@ -851,7 +888,7 @@ export function App() {
 
   const renderPage = () => {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>正在加载工作区数据...</EmptyNote></>;
-    const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
+    const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
       case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -890,7 +927,7 @@ export function App() {
           <div className="crumbs mono"><span>工作区</span><span>/</span><span className="crumb-current">{pages[page].title}</span><ProjectPill project={data.projects[0]} /></div>
           <div className="top-actions">
             <div className="search">{icon("search")}<input placeholder="搜索项目、会话、决策..." /></div>
-            <div className="agent-pill mono"><span className="dot" /><span>{data.adapters.filter((adapter) => adapter.available).length} connected</span><span className="quiet">·</span><strong>{data.adapters.length} adapters available</strong></div>
+            <div className="agent-pill mono"><span className="dot" /><span>{data.adapters.filter((adapter) => adapter.available).length} 个已连接</span><span className="quiet">·</span><strong>{data.adapters.length} 个适配器可用</strong></div>
             <button className="icon-btn" title="刷新" onClick={() => void loadData()}>{icon("refresh")}</button>
             <div className="identity"><div className="avatar">AD</div><div><strong>Adam</strong><div className="daemon-sub mono">首席架构师</div></div></div>
           </div>
@@ -909,6 +946,7 @@ export function App() {
         selectedProjectId={selectedProjectId}
         runAction={runAction}
         confirmDestructiveAction={confirmDestructiveAction}
+        bindDesktopSync={bindDesktopSync}
       />
       <EvidenceDetail detail={evidenceDetail} onClose={() => setEvidenceDetail(null)} />
       <EvidenceCompare detail={evidenceCompare} onClose={() => setEvidenceCompare(null)} />
@@ -956,7 +994,7 @@ function OverviewPage({ data, header }: { data: 工作区Data; header: ReactNode
         <div className="span-8 stack">
           <Panel title="当前项目" iconName="folder_open">{activeProject ? <div className="pad stack"><div className="split"><div><div className="title-sm">{activeProject.name}</div><div className="muted">{activeProject.description || "智能体工作区治理"}</div></div><Badge text={activeProject.status} tone={toneForStatus(activeProject.status)} /></div><div className="progress"><span style={{ width: "72%" }} /></div><div className="split mono muted"><span>边界：{activeProject.rootPath}</span><span>版本：{activeProject.revision}</span></div></div> : <EmptyNote>请创建一个项目以开始使用 ContextOS。</EmptyNote>}</Panel>
           <Panel title="下一步工作项" iconName="task_alt" meta={`${nextWork.length} ready signals`}><Rows rows={nextWork.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="暂无就绪工作项。" /></Panel>
-          <Panel title="最新上下文包" iconName="inventory_2" meta={latestPackage?.id || "No package"}>
+          <Panel title="最新上下文包" iconName="inventory_2" meta={latestPackage?.id || "无上下文包"}>
             {latestPackage ? <div className="stack compact"><div className="metric-row"><span>用途</span><strong>{latestPackage.purpose}</strong></div><div className="metric-row"><span>进行中的工作项</span><strong>{latestPackage.workItems?.length || 0}</strong></div><div className="metric-row"><span>决策 / 规则</span><strong>{(latestPackage.decisions?.length || 0) + (latestPackage.rules?.length || 0)}</strong></div><div className="metric-row"><span>上下文 / 证据</span><strong>{latestPackage.contextItems.length} / {latestPackage.evidenceSnapshots.length}</strong></div>{[...(latestPackage.workItems || []), ...latestPackage.contextItems].slice(0, 4).map((item: AnyRecord) => <div className="metric-row" key={`${item.resourceType}-${item.id}`}><span>{item.title}</span><Badge text={item.selectionReason} tone="blue" /></div>)}</div> : <EmptyNote>请继续一个会话以生成上下文包。</EmptyNote>}
           </Panel>
         </div>
@@ -982,7 +1020,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
   const activeWork = projectWork.filter((item: AnyRecord) => ["READY", "IN_PROGRESS", "BLOCKED", "IN_REVIEW"].includes(item.status)).slice(0, 5);
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
     <Panel title="项目注册表" iconName="folder_open"><Table headers={["项目", "边界", "规则", "健康度", "操作"]} rows={data.projects.map((project: AnyRecord) => [
-      <div className={`session-cell ${project.id === selectedProject?.id ? "selected" : ""}`}><strong>{project.name}</strong><div className="muted">{project.description || "Agent workspace"}</div></div>,
+      <div className={`session-cell ${project.id === selectedProject?.id ? "selected" : ""}`}><strong>{project.name}</strong><div className="muted">{project.description || "智能体工作区"}</div></div>,
       <span className="mono">{project.rootPath}</span>,
       <Badge text={`${project.defaultRuleIds?.length || 0} defaults`} tone="blue" />,
       <Badge text={project.status} tone={toneForStatus(project.status)} />,
@@ -994,7 +1032,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
       </div>
     ])} empty="暂无项目。" /></Panel>
   </div><div className="span-4 stack">
-    <Panel title="所选项目" iconName="folder_open" meta={selectedProject?.id || "No project"}>
+    <Panel title="所选项目" iconName="folder_open" meta={selectedProject?.id || "未选择项目"}>
       {selectedProject ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">
           <div><span className="mono muted">状态</span><strong>{selectedProject.status}</strong></div>
@@ -1004,7 +1042,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
           <div className="detail-wide"><span className="mono muted">根路径</span><strong className="mono">{selectedProject.rootPath}</strong></div>
           <div className="detail-wide"><span className="mono muted">描述</span><strong>{selectedProject.description || "-"}</strong></div>
           <div className="detail-wide"><span className="mono muted">智能体适配器</span><strong>{selectedProject.agentAdapterIds?.length ? selectedProject.agentAdapterIds.join(", ") : "工作区 default"}</strong></div>
-          <div className="detail-wide"><span className="mono muted">默认规则</span><strong>{selectedProject.defaultRuleIds?.length ? selectedProject.defaultRuleIds.join(", ") : "No defaults"}</strong></div>
+          <div className="detail-wide"><span className="mono muted">默认规则</span><strong>{selectedProject.defaultRuleIds?.length ? selectedProject.defaultRuleIds.join(", ") : "无默认值"}</strong></div>
         </div>
         <div className="row-actions">
           <button className="btn" disabled={selectedProject.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionProject(selectedProject.id, "pause"), "项目已暂停")}>{icon("pause_circle")}<span>暂停</span></button>
@@ -1033,16 +1071,18 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function SessionsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, selectedSessionId, selectSession, sessionDetails: details, sessionDetailsLoading, actionLoading, runAction, archiveSession, continueSession, syncSessionTranscript, interruptSession, exportSessionCapsule, openEvidenceDetail, setModal } = props;
+  const { data, header, selectedSessionId, selectSession, sessionDetails: details, sessionDetailsLoading, actionLoading, runAction, archiveSession, continueSession, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, interruptSession, exportSessionCapsule, openEvidenceDetail, setModal } = props;
   const canContinue = (status: string) => ["CREATED", "PAUSED", "FAILED", "COMPLETED"].includes(status);
-  const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `adapter ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `external ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} messages` : null, item.metadata?.eventCount ? `${item.metadata.eventCount} events` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} turns` : null].filter(Boolean).join(" · ");
+  const evidenceMeta = (item: AnyRecord) => [item.metadata?.adapterId ? `适配器 ${item.metadata.adapterId}` : null, item.metadata?.externalSessionId ? `外部会话 ${item.metadata.externalSessionId}` : null, item.metadata?.parserVersion || null, item.metadata?.messageCount ? `${item.metadata.messageCount} 条消息` : null, item.metadata?.eventCount ? `${item.metadata.eventCount} 个事件` : null, item.metadata?.turnCount ? `${item.metadata.turnCount} 轮对话` : null].filter(Boolean).join(" · ");
   const selectedSession = data.sessions.find((session: AnyRecord) => session.id === selectedSessionId) || data.sessions[0];
   const contextItemCount = details?.contextPack?.contextItems?.length ?? 0;
   const evidencePackageCount = details?.contextPack?.evidenceSnapshots?.length ?? 0;
   const runtime = details?.runtimeStatus;
   const runs = details?.runs || [];
+  const desktopSync = details?.desktopSync ?? null;
+  const desktopSyncCapabilities = (desktopSync?.capabilities ?? {}) as AnyRecord;
   const latestAgentTranscript = details?.evidence.find((item: AnyRecord) => item.metadata?.stream === "imported-transcript" && item.metadata?.adapterId);
-  const syncLabel = latestAgentTranscript?.metadata?.sourceUpdatedAt ? `Last synced ${fmtDate(latestAgentTranscript.metadata.sourceUpdatedAt)}` : selectedSession?.externalSessionId ? "Bound, not synced yet" : "Not bound yet";
+  const syncLabel = latestAgentTranscript?.metadata?.sourceUpdatedAt ? `上次同步 ${fmtDate(latestAgentTranscript.metadata.sourceUpdatedAt)}` : selectedSession?.externalSessionId ? "已绑定，尚未同步" : "尚未绑定";
   return (
     <>{header}<div className="stack">
       <Panel title="会话片段" iconName="terminal"><Table headers={["会话", "智能体", "开始时间", "更新时间", "状态", "操作"]} rows={data.sessions.map((session: AnyRecord) => [
@@ -1062,7 +1102,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           <button className="icon-btn table-action" title="归档会话" disabled={session.status === "RUNNING" || actionLoading} onClick={() => runAction(() => archiveSession(session.id), "会话已归档")}>{icon("archive")}</button>
         </div>
       ])} empty="暂无会话。" /></Panel>
-      <Panel title="所选会话详情" iconName="inventory_2" meta={selectedSession ? selectedSession.id : "No session"}>
+      <Panel title="所选会话详情" iconName="inventory_2" meta={selectedSession ? selectedSession.id : "未选择会话"}>
         {sessionDetailsLoading ? <EmptyNote>正在加载所选会话详情...</EmptyNote> : null}
         {selectedSession && details ? <div className="session-detail">
           <div className="detail-grid">
@@ -1079,6 +1119,30 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <div className="kpi"><div className="kpi-value">{evidencePackageCount}</div><div className="kpi-label mono">上下文包证据</div></div>
             <div className="kpi"><div className="kpi-value">{details.evidence.length}</div><div className="kpi-label mono">会话证据</div></div>
             <div className="kpi"><div className="kpi-value">{details.resumeCapsule?.status || "-"}</div><div className="kpi-label mono">恢复状态</div></div>
+          </div>
+          <div>
+            <div className="title-sm evidence-section-title">Desktop 同步</div>
+            {desktopSync ? <div className="stack compact">
+              <div className="detail-grid">
+                <div><span className="mono muted">同步状态</span><strong><Badge text={desktopSyncStatusLabel(desktopSync.status)} tone={desktopSync.status === "ERROR" ? "red" : desktopSync.status === "WATCHING" ? "green" : "amber"} /></strong></div>
+                <div><span className="mono muted">已摄入事件</span><strong>{desktopSync.eventsIngested ?? 0}</strong></div>
+                <div><span className="mono muted">读取位置</span><strong className="mono">{desktopSync.byteOffset ?? 0}{desktopSync.fileSize === null || desktopSync.fileSize === undefined ? "" : ` / ${desktopSync.fileSize}`}</strong><div className="muted mono">已读字节 / 文件总字节</div></div>
+                <div><span className="mono muted">滞后</span><strong>{desktopSync.lagMs === null || desktopSync.lagMs === undefined ? "-" : `${desktopSync.lagMs} ms`}</strong></div>
+                <div className="detail-wide"><span className="mono muted">对话记录文件</span><strong className="mono">{desktopSync.transcriptPath || "未绑定"}</strong></div>
+                <div className="detail-wide"><span className="mono muted">最近同步</span><strong>{desktopSync.lastSyncedAt ? fmtDate(desktopSync.lastSyncedAt) : "尚未同步"}</strong><div className="muted mono">{desktopSync.lastEventAt ? `最近事件 ${fmtDate(desktopSync.lastEventAt)}` : "尚无结构化事件"}</div></div>
+                {desktopSync.lastError ? <div className="detail-wide"><span className="mono muted">错误</span><strong>{desktopSync.lastError}</strong></div> : null}
+              </div>
+              <div className="stack compact">
+                <div className="metric-row evidence-row"><div className="evidence-row-main"><div className="title-sm">只读增量读取对话记录</div><div className="muted">ContextOS 只读取智能体自己写入的 rollout 文件，从不回写。</div></div><Badge text={desktopSyncCapabilities.desktopReadSync ? "支持" : "不支持"} tone={desktopSyncCapabilities.desktopReadSync ? "green" : "amber"} /></div>
+                <div className="metric-row evidence-row"><div className="evidence-row-main"><div className="title-sm">同一 UUID 命令行续跑</div><div className="muted">绑定外部会话后可用受管 CLI 在同一 UUID 上继续。</div></div><Badge text={desktopSyncCapabilities.managedCliResume ? "支持" : "待绑定"} tone={desktopSyncCapabilities.managedCliResume ? "green" : "amber"} /></div>
+                <div className="metric-row evidence-row"><div className="evidence-row-main"><div className="title-sm">反向操控 Desktop 界面</div><div className="muted">需要 app-server 单写者锁，仍在调研。</div></div><Badge text="调研中" tone="blue" /></div>
+              </div>
+              <div className="row-actions">
+                <button className="btn primary" disabled={actionLoading} onClick={() => setModal({ kind: "desktopSync", sessionId: selectedSession.id })}>{icon("link")}<span>{desktopSync.transcriptPath ? "重新绑定" : "绑定会话"}</span></button>
+                <button className="btn" disabled={!desktopSync.transcriptPath || actionLoading} onClick={() => runAction(() => syncDesktopSync(selectedSession.id), "已从 Desktop 对话记录同步")}>{icon("sync")}<span>立即同步</span></button>
+                <button className="btn" disabled={!desktopSync.transcriptPath || actionLoading} onClick={() => runAction(() => unbindDesktopSync(selectedSession.id), "已解除 Desktop 同步绑定")}>{icon("link_off")}<span>解除绑定</span></button>
+              </div>
+            </div> : <EmptyNote>该会话的 Desktop 同步状态不可用。</EmptyNote>}
           </div>
           <div className="detail-grid">
             <div className="detail-wide detail-with-action"><div><span className="mono muted">上下文包</span><strong className="mono">{details.contextPack?.id || "Not generated"}</strong></div><button className="icon-btn table-action" title="复制上下文包 ID" disabled={!details.contextPack?.id} onClick={() => copyText(details.contextPack?.id)}>{icon("content_copy")}</button></div>
@@ -1110,16 +1174,16 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
           {details.activity.length ? <div>
             <div className="title-sm evidence-section-title">近期活动</div>
             <div className="stack compact">{details.activity.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={`${item.kind}-${item.id}`}><div className="evidence-row-main"><div className="title-sm">{item.summary || item.eventType}</div><div className="muted mono">{fmtDate(item.createdAt)} · {item.kind}{item.actorType ? ` · ${item.actorType}` : ""}</div>{Object.keys(item.metadata || {}).length ? <div className="muted mono">{Object.entries(item.metadata).slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(" · ")}</div> : null}</div><Badge text={item.eventType} tone={item.kind === "AUDIT" ? "blue" : toneForStatus(item.eventType)} /></div>)}</div>
-          </div> : <EmptyNote>No runtime activity has been recorded for this session yet.</EmptyNote>}
+          </div> : <EmptyNote>该会话还没有记录任何运行时活动。</EmptyNote>}
           {details.transcriptEvents?.events?.length ? <div>
             <div className="title-sm evidence-section-title">对话记录事件</div>
-            <div className="muted mono">{details.transcriptEvents.parserVersion || "unknown parser"} · {details.transcriptEvents.eventCount} events · showing latest {Math.min(12, details.transcriptEvents.returnedEventCount)}{details.transcriptEvents.eventsTruncated ? " from a 200-event window" : ""}{details.transcriptEvents.transcriptTruncated ? " · transcript truncated at import limit" : ""} · evidence {details.transcriptEvents.evidenceSnapshotId}</div>
+            <div className="muted mono">解析器 {details.transcriptEvents.parserVersion || "未知"} · {details.transcriptEvents.eventCount} 个事件 · 显示最近 {Math.min(12, details.transcriptEvents.returnedEventCount)} 条{details.transcriptEvents.eventsTruncated ? "（取自 200 条事件窗口）" : ""}{details.transcriptEvents.transcriptTruncated ? " · 对话记录在导入上限处被截断" : ""} · 证据 {details.transcriptEvents.evidenceSnapshotId}</div>
             <div className="stack compact">{details.transcriptEvents.events.slice(-12).map((event: AnyRecord) => <div className="metric-row evidence-row" key={`${event.ordinal}-${event.kind}`}><div className="evidence-row-main"><div className="title-sm">{transcriptEventLabel(event)}</div>{event.timestamp ? <div className="muted mono">{fmtDate(event.timestamp)}</div> : null}<div className="muted mono">{transcriptEventPreview(event)}</div></div><Badge text={`#${event.ordinal} ${event.kind}`} tone={event.kind === "message" ? "blue" : event.kind === "summary" ? "green" : "amber"} /></div>)}</div>
-          </div> : <EmptyNote>No structured transcript events have been imported for this session yet.</EmptyNote>}
+          </div> : <EmptyNote>该会话还没有导入任何结构化对话记录事件。</EmptyNote>}
           {details.evidence.length ? <div>
             <div className="title-sm evidence-section-title">证据快照</div>
             <div className="stack compact">{details.evidence.slice(0, 8).map((item: AnyRecord) => <div className="metric-row evidence-row" key={item.id}><div className="evidence-row-main"><div className="title-sm">{item.title}</div><div className="muted mono">{evidenceMeta(item) || item.storageRef || item.id}</div></div><div className="row-actions"><Badge text={item.evidenceType} tone="blue" /><button className="icon-btn table-action" title="查看证据内容" disabled={actionLoading} onClick={() => void openEvidenceDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="复制证据引用" disabled={actionLoading} onClick={() => copyText(`${item.id}\n${item.storageRef || ""}\n${item.contentHash || ""}`)}>{icon("content_copy")}</button></div></div>)}</div>
-          </div> : <EmptyNote>No evidence has been captured for this session yet.</EmptyNote>}
+          </div> : <EmptyNote>该会话还没有捕获任何证据快照。</EmptyNote>}
         </div> : !sessionDetailsLoading ? <EmptyNote>请选择或创建一个会话以检查其上下文包、运行时状态、证据及恢复胶囊。</EmptyNote> : null}
       </Panel>
     </div></>
@@ -1379,7 +1443,7 @@ function ContextPage(props: AnyRecord & { header: ReactNode }) {
           {sourceSnapshots.length ? <div className="stack compact source-linked-list">{sourceSnapshots.slice(0, 5).map((snapshot: AnyRecord) => <div className="metric-row evidence-row" key={snapshot.id}><div className="evidence-row-main"><div className="title-sm">{snapshot.title}</div><div className="muted mono">{fmtDate(snapshot.capturedAt)} · {snapshot.contentHash}</div></div><div className="row-actions"><button className="icon-btn table-action" title="查看证据内容" disabled={actionLoading} onClick={() => void openEvidenceDetail(snapshot)}>{icon("visibility")}</button><button className="icon-btn table-action" title="派生上下文项" disabled={actionLoading} onClick={() => setModal({ kind: "contextItem", sourceSnapshotId: snapshot.id })}>{icon("add_box")}</button><button className="icon-btn table-action" title="与最新快照比较" disabled={!latestSnapshot || latestSnapshot.id === snapshot.id || actionLoading} onClick={() => latestSnapshot ? void openEvidenceCompare(snapshot, latestSnapshot) : undefined}>{icon("compare_arrows")}</button><button className="icon-btn table-action" title="校验证据" disabled={actionLoading} onClick={() => runAction(() => verifyEvidence(snapshot.id), "证据已校验")}>{icon("verified")}</button></div></div>)}</div> : <EmptyNote>该源暂无捕获的快照。</EmptyNote>}
         </div> : <EmptyNote>未选择数据源。</EmptyNote>}
       </Panel>
-      <Panel title="派生上下文项" iconName="inventory_2" meta={selectedSource ? `${sourceItems.length} linked` : ""}><Table headers={["上下文项", "状态", "操作"]} rows={(selectedSource ? sourceItems : data.contextItems).slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence} · {item.sourceSnapshotId || "manual"}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="查看版本" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="编辑上下文项" disabled={actionLoading} onClick={() => setModal({ kind: "contextItemEdit", contextItemId: item.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="启用上下文项" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "Context item activated")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="标记为过期" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "Context item marked stale")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="归档上下文项" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "上下文项已归档")}>{icon("archive")}</button></div>])} empty={selectedSource ? "该源暂无派生的上下文项。" : "暂无上下文项。"} /></Panel>
+      <Panel title="派生上下文项" iconName="inventory_2" meta={selectedSource ? `${sourceItems.length} linked` : ""}><Table headers={["上下文项", "状态", "操作"]} rows={(selectedSource ? sourceItems : data.contextItems).slice(0, 8).map((item: AnyRecord) => [<><strong>{item.title}</strong><div className="muted">{item.summary}</div><div className="muted mono">{item.itemType} · {item.confidence} · {item.sourceSnapshotId || "manual"}</div></>, <Badge text={item.status} tone={toneForStatus(item.status)} />, <div className="row-actions"><button className="icon-btn table-action" title="查看版本" disabled={actionLoading} onClick={() => void openContextItemDetail(item)}>{icon("visibility")}</button><button className="icon-btn table-action" title="编辑上下文项" disabled={actionLoading} onClick={() => setModal({ kind: "contextItemEdit", contextItemId: item.id })}>{icon("edit_note")}</button><button className="icon-btn table-action" title="启用上下文项" disabled={item.status === "ACTIVE" || item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "activate"), "上下文项已启用")}>{icon("toggle_on")}</button><button className="icon-btn table-action" title="标记为过期" disabled={item.status !== "ACTIVE" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "mark-stale"), "上下文项已标记为过期")}>{icon("restart_alt")}</button><button className="icon-btn table-action" title="归档上下文项" disabled={item.status === "ARCHIVED" || actionLoading} onClick={() => runAction(() => transitionContextItem(item.id, "archive"), "上下文项已归档")}>{icon("archive")}</button></div>])} empty={selectedSource ? "该源暂无派生的上下文项。" : "暂无上下文项。"} /></Panel>
     </div></div></>
   );
 }
@@ -1597,7 +1661,7 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
   );
 }
 
-function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction }: AnyRecord) {
+function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction, bindDesktopSync }: AnyRecord) {
   const project = data.projects.find((item: AnyRecord) => item.id === selectedProjectId) || data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
@@ -1644,13 +1708,13 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
         acceptance: linesValue(values.get("acceptance")),
         executionContract: values.get("executionContract") || null,
         expectedRevision: workItem.revision
-      }), "Work item updated");
+      }), "工作项已更新");
     }
     if (kind === "workItemBlock") {
       void runAction(() => {
         confirmDestructiveAction(`Block work item "${workItem.title}"?`);
         return sendJson(`/api/work-items/${workItem.id}/block`, "POST", { reason: values.get("reason"), expectedRevision: workItem.revision });
-      }, "Work item blocked");
+      }, "工作项已阻塞");
     }
     if (kind === "workItemResolveBlocker") {
       void runAction(() => sendJson(`/api/work-items/${workItem.id}/resolve-blocker`, "POST", { resolution: values.get("resolution"), expectedRevision: workItem.revision }), "工作项阻塞已解决");
@@ -1669,7 +1733,7 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
         metadata: contextItem.metadata || {},
         expectedRevision: contextItem.revision
         });
-      }, "Context item updated");
+      }, "上下文项已更新");
     }
     if (kind === "transcript") {
       void runAction(() => sendJson(`/api/sessions/${session.id}/import-transcript`, "POST", { contentText: values.get("contentText"), title: values.get("title") || undefined, summary: values.get("summary") || undefined }), "对话记录已导入");
@@ -1679,7 +1743,14 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
         externalSessionId: String(values.get("externalSessionId") || "").trim() || undefined,
         title: values.get("title") || undefined,
         summary: values.get("summary") || undefined
-      }), "Existing agent session imported");
+      }), "已有智能体会话已导入");
+    }
+    if (kind === "desktopSync") {
+      void runAction(() => bindDesktopSync(session.id, {
+        externalSessionId: String(values.get("externalSessionId") || "").trim(),
+        transcriptPath: String(values.get("transcriptPath") || "").trim(),
+        fromBeginning: values.get("fromBeginning") === "true"
+      }), "已绑定 Desktop 对话记录");
     }
     if (kind === "resumeCapsule") {
       const nextAction = String(values.get("nextAction") || "").trim();
@@ -1687,7 +1758,7 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
         summary: values.get("summary"),
         nextAction: nextAction || null,
         expectedRevision: session.revision
-      }), "Resume capsule updated");
+      }), "摘要胶囊已更新");
     }
     if (kind === "source") {
       void runAction(() => sendJson("/api/context-sources", "POST", { projectId: project.id, sourceType: values.get("sourceType"), name: values.get("name"), locator: stripWrappingQuotes(values.get("locator")), description: values.get("description") || undefined, metadata: {} }), "数据源已创建");
@@ -1701,7 +1772,7 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
           metadata: source.metadata || {},
           expectedRevision: source.revision
         });
-      }, "Context source updated");
+      }, "数据源已更新");
     }
     if (kind === "reviewAssign") {
       void runAction(() => sendJson(`/api/review-items/${review.id}/assign`, "POST", { reviewerId: values.get("reviewerId"), expectedRevision: review.revision }), "审查已指派");
@@ -1715,8 +1786,8 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
   };
 
   if (!modal.kind) return null;
-  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "sourceEdit" ? "Edit Context Source" : modal.kind === "contextItem" ? "Add Context Item" : modal.kind === "contextItemEdit" ? "Edit Context Item" : modal.kind === "decision" ? "记录决策" : modal.kind === "decisionEdit" ? "Edit Decision" : modal.kind === "workItem" ? "Create Work Item" : modal.kind === "workItemEdit" ? "Edit Work Item" : modal.kind === "workItemBlock" ? "Block Work Item" : modal.kind === "workItemResolveBlocker" ? "Resolve Work Item Blocker" : modal.kind === "reviewAssign" ? "Assign Review" : modal.kind === "reviewResolve" ? "Resolve Review" : modal.kind === "reviewDismiss" ? "Dismiss Review" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : modal.kind === "resumeCapsule" ? "Edit Resume Capsule" : "导入对话记录";
-  const submitLabel = modal.kind === "project" ? "创建项目" : modal.kind === "session" ? "创建会话" : modal.kind === "rule" ? "创建规则" : modal.kind === "source" ? "创建数据源" : modal.kind === "sourceEdit" ? "保存数据源" : modal.kind === "contextItem" ? "创建上下文项" : modal.kind === "contextItemEdit" ? "保存上下文项" : modal.kind === "decision" ? "记录决策" : modal.kind === "decisionEdit" ? "保存决策" : modal.kind === "workItem" ? "创建工作项" : modal.kind === "workItemEdit" ? "保存工作项" : modal.kind === "workItemBlock" ? "阻塞工作" : modal.kind === "workItemResolveBlocker" ? "解决阻塞" : modal.kind === "reviewAssign" ? "指派" : modal.kind === "reviewResolve" ? "解决" : modal.kind === "reviewDismiss" ? "驳回" : modal.kind === "existingTranscript" ? "导入已有会话" : modal.kind === "resumeCapsule" ? "保存摘要胶囊" : "导入对话记录";
+  const title = modal.kind === "project" ? "Add Project" : modal.kind === "session" ? "New Session" : modal.kind === "rule" ? "New Rule" : modal.kind === "source" ? "Add Context Source" : modal.kind === "sourceEdit" ? "Edit Context Source" : modal.kind === "contextItem" ? "Add Context Item" : modal.kind === "contextItemEdit" ? "Edit Context Item" : modal.kind === "decision" ? "记录决策" : modal.kind === "decisionEdit" ? "Edit Decision" : modal.kind === "workItem" ? "Create Work Item" : modal.kind === "workItemEdit" ? "Edit Work Item" : modal.kind === "workItemBlock" ? "Block Work Item" : modal.kind === "workItemResolveBlocker" ? "Resolve Work Item Blocker" : modal.kind === "reviewAssign" ? "Assign Review" : modal.kind === "reviewResolve" ? "Resolve Review" : modal.kind === "reviewDismiss" ? "Dismiss Review" : modal.kind === "existingTranscript" ? "Import Existing Agent Session" : modal.kind === "desktopSync" ? "绑定 Desktop 同步" : modal.kind === "resumeCapsule" ? "Edit Resume Capsule" : "导入对话记录";
+  const submitLabel = modal.kind === "project" ? "创建项目" : modal.kind === "session" ? "创建会话" : modal.kind === "rule" ? "创建规则" : modal.kind === "source" ? "创建数据源" : modal.kind === "sourceEdit" ? "保存数据源" : modal.kind === "contextItem" ? "创建上下文项" : modal.kind === "contextItemEdit" ? "保存上下文项" : modal.kind === "decision" ? "记录决策" : modal.kind === "decisionEdit" ? "保存决策" : modal.kind === "workItem" ? "创建工作项" : modal.kind === "workItemEdit" ? "保存工作项" : modal.kind === "workItemBlock" ? "阻塞工作" : modal.kind === "workItemResolveBlocker" ? "解决阻塞" : modal.kind === "reviewAssign" ? "指派" : modal.kind === "reviewResolve" ? "解决" : modal.kind === "reviewDismiss" ? "驳回" : modal.kind === "existingTranscript" ? "导入已有会话" : modal.kind === "desktopSync" ? "绑定" : modal.kind === "resumeCapsule" ? "保存摘要胶囊" : "导入对话记录";
   return (
     <div className="dialog-backdrop">
       <form className="dialog-form dialog-card" onSubmit={submit}>
@@ -1737,6 +1808,7 @@ function 工作区Modal({ modal, setModal, data, defaultAdapterId, adapterList, 
           {modal.kind === "sourceEdit" && source ? <><label>数据源类型<input className="field mono" value={source.sourceType} disabled /></label><label>定位符<input className="field mono" value={source.locator} disabled /></label><label>名称<input className="field" name="name" required defaultValue={source.name} /></label><label>描述<input className="field" name="description" defaultValue={source.description || ""} /></label><div className="muted mono">rev {source.revision} · {source.status}</div></> : null}
           {modal.kind === "transcript" ? <><label>会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>标题<input className="field" name="title" defaultValue="Imported transcript" /></label><label>摘要<input className="field" name="summary" placeholder="摘要胶囊需要记住什么？" /></label><label>对话记录文本<textarea className="field" name="contentText" required rows={9} placeholder="粘贴 Codex 对话记录或重要片段" /></label></> : null}
           {modal.kind === "existingTranscript" ? <><label>ContextOS 会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>外部会话 ID<input className="field mono" name="externalSessionId" placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><label>标题<input className="field" name="title" defaultValue={`Imported ${session?.agentAdapterId || "agent"} transcript`} /></label><label>摘要<input className="field" name="summary" placeholder="摘要胶囊需要记住什么？" /></label></> : null}
+          {modal.kind === "desktopSync" ? <><label>ContextOS 会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>外部会话 ID<input className="field mono" name="externalSessionId" defaultValue={session?.externalSessionId || ""} placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><label>对话记录路径（可选）<input className="field mono" name="transcriptPath" placeholder="留空则按外部会话 ID 自动查找" /></label><label>起始位置<select className="field" name="fromBeginning" defaultValue="false"><option value="false">从文件末尾开始（只同步新内容）</option><option value="true">从文件开头重新读取</option></select></label></> : null}
           {modal.kind === "resumeCapsule" ? <><label>会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>摘要<textarea className="field" name="summary" required rows={4} defaultValue={resumeCapsule?.summary || ""} /></label><label>下一步动作<input className="field" name="nextAction" defaultValue={resumeCapsule?.nextAction || ""} placeholder="下一步应该做什么？" /></label></> : null}
           {modal.kind === "reviewAssign" ? <><label>审查<input className="field" value={review?.summary || ""} disabled /></label><label>审查人 ID<input className="field mono" name="reviewerId" required defaultValue={review?.reviewerId || "local-user"} placeholder="local-user" /></label></> : null}
           {modal.kind === "reviewResolve" ? <><label>审查<input className="field" value={review?.summary || ""} disabled /></label><label>解决方案<select name="resolutionType" defaultValue="APPROVED"><option>APPROVED</option><option>FIXED</option><option>ACKNOWLEDGED</option></select></label><label>原因<textarea className="field" name="resolutionReason" required rows={4} placeholder="检查或批准了什么？" /></label></> : null}

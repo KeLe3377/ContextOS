@@ -100,6 +100,30 @@ export class CodexAdapter implements AgentAdapter {
     }
   }
 
+  resolveTranscriptPath(input: { externalSessionId: string }): string | null {
+    const matches = listJsonlFiles(this.sessionsDir)
+      .map((path) => ({ path, metadata: readSessionMetadata(path) }))
+      .filter((entry): entry is { path: string; metadata: CodexSessionMetadata } => entry.metadata?.id === input.externalSessionId)
+      .sort((left, right) => statSync(right.path).mtimeMs - statSync(left.path).mtimeMs);
+    return matches[0]?.path ?? null;
+  }
+
+  parseTranscriptRows(input: { rows: string[]; startOrdinal: number }): AgentTranscriptEvent[] {
+    const events: AgentTranscriptEvent[] = [];
+    let ordinal = input.startOrdinal;
+    for (const line of input.rows) {
+      try {
+        const event = readCodexEvent(JSON.parse(line) as CodexJsonRow, ordinal + 1);
+        if (!event) continue;
+        ordinal += 1;
+        events.push(event);
+      } catch {
+        // A crash can leave one partial JSONL record; valid records remain importable.
+      }
+    }
+    return events;
+  }
+
   inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus {
     return input.supervisor.inspect(input.pid);
   }

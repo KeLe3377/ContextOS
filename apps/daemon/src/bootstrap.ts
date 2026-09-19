@@ -9,6 +9,7 @@ import { ContextItemService, ContextSourceService, EvidenceSnapshotService } fro
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
 import { RuleService } from "../../../packages/application/src/core/rule-service.js";
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
+import { DesktopSyncService } from "../../../packages/application/src/core/desktop-sync-service.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
@@ -32,6 +33,8 @@ import {
 import { SqliteProjectRepository } from "../../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteRuleRepository } from "../../../packages/infrastructure/src/sqlite/rule-repository.js";
 import { SqliteRuntimeRepository } from "../../../packages/infrastructure/src/sqlite/runtime-repository.js";
+import { SqliteSessionSyncRepository } from "../../../packages/infrastructure/src/sqlite/session-sync-repository.js";
+import { CodexTranscriptTailer } from "../../../packages/infrastructure/src/adapters/codex-transcript-tailer.js";
 import { SqliteClient } from "../../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../../packages/infrastructure/src/sqlite/migrations.js";
 import { ContextOsError } from "../../../packages/shared/src/errors.js";
@@ -129,6 +132,12 @@ export async function createDaemonServer(
       dataDirectory: config.dataDir
     });
     const settingsService = new SettingsService(runtimeRepository, startupRegistration);
+    const desktopSync = new DesktopSyncService({
+      sessions: new SqliteSessionRepository(sqlite.db),
+      sync: new SqliteSessionSyncRepository(sqlite.db),
+      adapters: adapterRegistry,
+      tailer: new CodexTranscriptTailer()
+    });
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
     const server = Fastify({
@@ -171,7 +180,8 @@ export async function createDaemonServer(
     sessions: sessionService,
     decisions: decisionService,
     workItems: workItemService,
-    reviewItems: reviewItemService
+    reviewItems: reviewItemService,
+    desktopSync
   });
     await registerContextResourceRoutes(server, {
     contextSources: contextSourceService,

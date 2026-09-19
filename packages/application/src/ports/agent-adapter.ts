@@ -64,4 +64,10 @@ export interface AgentAdapter {
   inspectStatus(input: { pid: number; supervisor: ProcessSupervisor }): SupervisedProcessStatus;
   interrupt(input: { pid: number; supervisor: ProcessSupervisor }): boolean;
   importTranscript(input: { cwd: string; externalSessionId?: string; correlationText?: string }): AgentTranscriptImportResult;
+  /**
+   * Level A desktop sync support. Optional so adapters without a discoverable
+   * transcript file (or without row level parsing yet) can opt out.
+   */
+  resolveTranscriptPath?(input: { externalSessionId: string }): string | null;
+  parseTranscriptRows?(input: { rows: string[]; startOrdinal: number }): AgentTranscriptEvent[];
 }

@@ -1,10 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../../../packages/application/src/core/core-services.js";
+import type { DesktopSyncService } from "../../../../../packages/application/src/core/desktop-sync-service.js";
 import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages/contracts/src/common.js";
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
 import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
-import { adapterTranscriptImportInputSchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
+import { adapterTranscriptImportInputSchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, sessionSyncBindSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
 import { workItemBlockSchema, workItemInputSchema, workItemPatchSchema, workItemResolveBlockerSchema, workItemStartSessionSchema } from "../../../../../packages/contracts/src/work-items.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
@@ -17,6 +18,7 @@ export async function registerCoreResourceRoutes(
     decisions: DecisionService;
     workItems: WorkItemService;
     reviewItems: ReviewItemService;
+    desktopSync?: DesktopSyncService;
   }
 ): Promise<void> {
   server.get("/api/sessions", async (request) => {
@@ -54,6 +56,25 @@ export async function registerCoreResourceRoutes(
     const result = services.sessions.importAdapterTranscript(id, adapterTranscriptImportInputSchema.parse(request.body ?? {}));
     reply.code(201);
     return result;
+  });
+  server.get("/api/sessions/:id/desktop-sync", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    return services.desktopSync!.status(id);
+  });
+  server.post("/api/sessions/:id/desktop-sync/bind", async (request, reply) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const result = services.desktopSync!.bind(id, sessionSyncBindSchema.parse(request.body ?? {}));
+    reply.code(201);
+    return result;
+  });
+  server.post("/api/sessions/:id/desktop-sync/sync", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    return services.desktopSync!.sync(id);
+  });
+  server.delete("/api/sessions/:id/desktop-sync", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    services.desktopSync!.unbind(id);
+    return { sessionId: id, unbound: true };
   });
   server.patch("/api/sessions/:id", async (request) => services.sessions.patch(paramsWithIdSchema.parse(request.params).id, sessionPatchSchema.parse(request.body)));
   server.post("/api/sessions/:id/interrupt", async (request) => {
