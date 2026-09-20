@@ -26,6 +26,7 @@ export const coreTableNames = [
   "automation_job_attempts",
   "extraction_candidates",
   "extraction_candidate_evidence",
+  "compaction_artifacts",
   "activity_events",
   "audit_events",
   "outbox_events",

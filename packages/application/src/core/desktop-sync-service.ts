@@ -226,12 +226,16 @@ export class DesktopSyncService {
       };
     }
 
-    const events = adapter.parseTranscriptRows({ rows: tailed.rows.map((row) => row.line), startOrdinal: state.events_ingested });
+    // An `offset_beyond_eof` reset rewinds the reader to the start of the file, so the ordinal
+    // space restarts with it. Keeping the old counter would attribute the re-read rows to
+    // positions that no longer correspond to the content being read.
+    const ordinalBase = tailed.resetReason ? 0 : state.events_ingested;
+    const events = adapter.parseTranscriptRows({ rows: tailed.rows.map((row) => row.line), startOrdinal: ordinalBase });
     const firstRow = tailed.rows[0];
     const nextState: SessionSyncStateUpsert = {
       ...rowToUpsert(state),
       byteOffset: tailed.nextOffset,
-      eventsIngested: state.events_ingested + events.length,
+      eventsIngested: ordinalBase + events.length,
       lastEventAt: events.filter((event) => Boolean(event.timestamp)).at(-1)?.timestamp ?? state.last_event_at,
       lastSyncedAt: isoNow(),
       status: "WATCHING",
@@ -253,8 +257,8 @@ export class DesktopSyncService {
             externalSessionId: state.external_session_id,
             transcriptPath: state.transcript_path,
             parserVersion: adapter.transcriptParserVersion ?? null,
-            startOrdinal: state.events_ingested,
-            endOrdinal: state.events_ingested + events.length,
+            startOrdinal: ordinalBase,
+            endOrdinal: ordinalBase + events.length,
             startByteOffset: firstRow.byteStart,
             endByteOffset: tailed.nextOffset,
             partialLine: tailed.partialLine,

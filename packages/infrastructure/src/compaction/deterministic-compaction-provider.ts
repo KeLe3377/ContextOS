@@ -1,4 +1,5 @@
 import {
+  compactionMessageChars,
   findDanglingToolResults,
   type CompactionDecision,
   type CompactionDecisionReason,
@@ -96,8 +97,8 @@ export class DeterministicCompactionProvider implements TranscriptCompactionProv
     const stats: CompactionStats = {
       messagesBefore: messages.length,
       messagesAfter: output.length,
-      charsBefore: messages.reduce((sum, message) => sum + messageChars(message), 0),
-      charsAfter: output.reduce((sum, message) => sum + messageChars(message), 0),
+      charsBefore: messages.reduce((sum, message) => sum + compactionMessageChars(message), 0),
+      charsAfter: output.reduce((sum, message) => sum + compactionMessageChars(message), 0),
       pairedCalls: pairing.paired.size,
       truncatedResults,
       pinnedMessages: pinned.size
@@ -232,11 +233,4 @@ function pinnedOrdinals(messages: readonly CompactionMessage[], preserveRecentMe
   }
 
   return pinned;
-}
-
-function messageChars(message: CompactionMessage): number {
-  let total = message.text.length;
-  for (const use of message.toolUses) total += (use.sourceText ?? JSON.stringify(use.input)).length;
-  for (const result of message.toolResults) total += result.text.length;
-  return total;
 }

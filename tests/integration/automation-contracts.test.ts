@@ -113,8 +113,9 @@ describe("automation settings contract", () => {
 });
 
 describe("automation job contract", () => {
-  test("exposes exactly the six planned job kinds", () => {
+  test("exposes exactly the seven planned job kinds", () => {
     expect([...automationJobKindSchema.options].sort()).toEqual([
+      "COMPACT_EVIDENCE",
       "DISCOVER_CODEX_THREADS",
       "DISCOVER_PROJECT_SOURCES",
       "EXTRACT_EVIDENCE_CONTEXT",

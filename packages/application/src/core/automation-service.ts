@@ -12,6 +12,7 @@ import { nowMs } from "../../../shared/src/clock.js";
 import type { EvidenceSnapshotService } from "./context-services.js";
 import type { DesktopSyncBatch, DesktopSyncRead, DesktopSyncService } from "./desktop-sync-service.js";
 import { AutomationDispatchError } from "./automation-scheduler.js";
+import { encodeTranscriptEvents, type TranscriptEventIdentity } from "./transcript-event-codec.js";
 import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./project-thread-matcher.js";
 
 /**
@@ -22,11 +23,6 @@ import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./pr
  * Design: docs/superpowers/specs/2026-09-20-contextos-zero-input-automation-design.md
  */
 
-/** Identity recorded on extraction jobs so a retry reuses the same idempotency key. */
-export type AutomationExtractorIdentity = { id: string; version: string };
-
-export const defaultAutomationExtractor: AutomationExtractorIdentity = { id: "codex-cli", version: "codex-cli.v1" };
-
 export type AutomationServiceOptions = {
   projects: SqliteProjectRepository;
   sessions: SqliteSessionRepository;
@@ -36,7 +32,6 @@ export type AutomationServiceOptions = {
   evidence: EvidenceSnapshotService;
   adapters: AgentAdapterRegistry;
   desktopSync: DesktopSyncService;
-  extractor?: AutomationExtractorIdentity;
   clock?: () => number;
 };
 
@@ -264,7 +259,8 @@ export class AutomationService {
       sessionId: batch.sessionId,
       stream: desktopSyncEvidenceStream,
       title: `Transcript events ${batch.startOrdinal}-${batch.endOrdinal}`,
-      contentText: canonicalBatchText(projectId, batch),
+      // The only writer of the stored event format; nothing downstream re-derives it by parsing.
+      contentText: encodeTranscriptEvents(batch.events, evidenceIdentity(projectId, batch)),
       // Identifiers, counters and byte ranges only: never the transcript body itself.
       metadata: {
         sessionId: batch.sessionId,
@@ -285,8 +281,8 @@ export class AutomationService {
       this.options.sync.runIngestionTransaction(() => {
         evidenceId = this.options.evidence.commitPreparedAgentOutput(prepared).id;
         this.options.sync.upsert(read.nextState);
-        // Only a newly captured batch needs extraction; a reused one was queued already.
-        if (!prepared.existing) this.enqueueExtraction({ projectId, batch, evidenceId: evidenceId!, now });
+        // Only a newly captured batch needs follow-up work; a reused one was queued already.
+        if (!prepared.existing) this.enqueueCompaction({ projectId, batch, evidenceId: evidenceId!, now });
       });
     } catch (error) {
       this.options.evidence.discardPreparedAgentOutput(prepared);
@@ -296,18 +292,22 @@ export class AutomationService {
     return { evidenceId: evidenceId!, reused: Boolean(prepared.existing) };
   }
 
-  /** Queues structured extraction for an Evidence Snapshot that was just committed. */
-  private enqueueExtraction(input: { projectId: string; batch: DesktopSyncBatch; evidenceId: string; now: number }): void {
-    const extractor = this.options.extractor ?? defaultAutomationExtractor;
+  /**
+   * Queues compaction for an Evidence Snapshot that was just committed.
+   *
+   * Extraction is deliberately not queued here: it runs against the compaction artifact, and
+   * CompactionService only queues it once that artifact exists.
+   */
+  private enqueueCompaction(input: { projectId: string; batch: DesktopSyncBatch; evidenceId: string; now: number }): void {
     this.options.automation.enqueue(
       {
-        kind: "EXTRACT_EVIDENCE_CONTEXT",
+        kind: "COMPACT_EVIDENCE",
         projectId: input.projectId,
         sessionId: input.batch.sessionId,
         resourceType: "EVIDENCE_SNAPSHOT",
         resourceId: input.evidenceId,
-        payload: { evidenceId: input.evidenceId, sessionId: input.batch.sessionId, extractorId: extractor.id },
-        idempotencyKey: `EXTRACT_EVIDENCE_CONTEXT:${input.evidenceId}:${extractor.version}`
+        payload: { evidenceId: input.evidenceId, sessionId: input.batch.sessionId },
+        idempotencyKey: `COMPACT_EVIDENCE:${input.evidenceId}`
       },
       input.now
     );
@@ -452,34 +452,12 @@ function emptySyncSummary(sessionId: string): AutomationSyncSummary {
   };
 }
 
-/**
- * Canonical, content-addressed identity of a synced batch.
- *
- * The header pins everything that makes two batches different batches — stream, Project,
- * Session, external thread and parser version — so an upgrade of the parser, or the same text
- * arriving under a different Session, produces its own Evidence instead of silently reusing an
- * unrelated snapshot.
- *
- * Ordinals and byte offsets are deliberately excluded: an offset reset re-reads the same rows
- * at different positions, and including them would give identical content a different hash and
- * defeat Evidence deduplication.
- */
-function canonicalBatchText(projectId: string, batch: DesktopSyncBatch): string {
-  const events = batch.events.map((event) => JSON.stringify({
-    timestamp: event.timestamp ?? null,
-    kind: event.kind,
-    role: event.role ?? null,
-    name: event.name ?? null,
-    callId: event.callId ?? null,
-    truncated: event.truncated ?? false,
-    text: event.text ?? null
-  }));
-  return [
-    `stream:${desktopSyncEvidenceStream}`,
-    `project:${projectId}`,
-    `session:${batch.sessionId}`,
-    `external:${batch.externalSessionId ?? ""}`,
-    `parser:${batch.parserVersion ?? ""}`,
-    ...events
-  ].join("\n");
+function evidenceIdentity(projectId: string, batch: DesktopSyncBatch): TranscriptEventIdentity {
+  return {
+    projectId,
+    sessionId: batch.sessionId,
+    externalSessionId: batch.externalSessionId,
+    parserVersion: batch.parserVersion,
+    stream: desktopSyncEvidenceStream
+  };
 }

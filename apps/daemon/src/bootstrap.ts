@@ -16,6 +16,12 @@ import {
 } from "../../../packages/application/src/core/automation-scheduler.js";
 import { AutomationJobRouter } from "../../../packages/application/src/core/automation-job-router.js";
 import { AutomationService } from "../../../packages/application/src/core/automation-service.js";
+import { CompactionService } from "../../../packages/application/src/core/compaction-service.js";
+import { ContextOsCompactionAdapter } from "../../../packages/application/src/core/compaction-adapter.js";
+import { PrefixTranscriptSanitizer } from "../../../packages/application/src/core/transcript-sanitizer.js";
+import type { CompactionOptions, TranscriptCompactionProvider } from "../../../packages/application/src/ports/transcript-compaction.js";
+import { DeterministicCompactionProvider, defaultCompactionOptions } from "../../../packages/infrastructure/src/compaction/deterministic-compaction-provider.js";
+import { SqliteCompactionArtifactRepository } from "../../../packages/infrastructure/src/sqlite/compaction-artifact-repository.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
@@ -70,6 +76,9 @@ export type CreateDaemonServerOptions = {
   /** Test seam: replaces the scheduler's real setTimeout with a controllable timer. */
   automationSetTimer?: AutomationSetTimer;
   automationTickIntervalMs?: number;
+  /** Test seams for the compaction stage. */
+  compactionProvider?: TranscriptCompactionProvider;
+  compactionOptions?: CompactionOptions;
 };
 
 const packageVersion = "0.1.3";
@@ -169,9 +178,19 @@ export async function createDaemonServer(
       adapters: adapterRegistry,
       desktopSync
     });
+    const compactionService = new CompactionService({
+      evidence: evidenceSnapshotRepository,
+      artifacts: new SqliteCompactionArtifactRepository(sqlite.db),
+      automation: automationRepository,
+      sanitizer: new PrefixTranscriptSanitizer(),
+      adapter: new ContextOsCompactionAdapter(),
+      provider: options.compactionProvider ?? new DeterministicCompactionProvider(),
+      options: options.compactionOptions ?? defaultCompactionOptions
+    });
     const automationJobRouter = new AutomationJobRouter()
       .register("DISCOVER_CODEX_THREADS", (job) => automationService.handleDiscoveryJob(job))
-      .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job));
+      .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job))
+      .register("COMPACT_EVIDENCE", (job) => compactionService.handleCompactionJob(job));
     const automationScheduler = new AutomationScheduler({
       repository: automationRepository,
       dispatcher: automationJobRouter,

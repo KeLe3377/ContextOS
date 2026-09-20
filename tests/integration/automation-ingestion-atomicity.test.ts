@@ -150,7 +150,6 @@ beforeEach(async () => {
     evidence: evidenceService,
     adapters,
     desktopSync,
-    extractor: { id: "codex-cli", version: "test.v1" },
     clock: () => clockNow
   });
 
@@ -166,7 +165,7 @@ afterEach(async () => {
 });
 
 describe("transcript ingestion commit boundary", () => {
-  test("commits Evidence, the reader offset and the extraction job together", async () => {
+  test("commits Evidence, the reader offset and the compaction job together", async () => {
     await bindAtEnd();
     await appendMessage("first message");
     const summary = await syncOnce();
@@ -175,7 +174,7 @@ describe("transcript ingestion commit boundary", () => {
     expect(state).toMatchObject({ events_ingested: 1, status: "WATCHING" });
     expect(state.byte_offset).toBe(summary.endByteOffset);
     expect(evidenceRows()).toHaveLength(1);
-    expect(jobsOf("EXTRACT_EVIDENCE_CONTEXT")).toEqual([
+    expect(jobsOf("COMPACT_EVIDENCE")).toEqual([
       expect.objectContaining({ status: "QUEUED", attempts: 0 })
     ]);
     await expect(evidenceFileCount()).resolves.toBe(1);
@@ -188,7 +187,7 @@ describe("transcript ingestion commit boundary", () => {
 
     const originalEnqueue = automation.enqueue.bind(automation);
     (automation as unknown as { enqueue: typeof automation.enqueue }).enqueue = (input, now) => {
-      if (input.kind === "EXTRACT_EVIDENCE_CONTEXT") throw new Error("automation queue unavailable");
+      if (input.kind === "COMPACT_EVIDENCE") throw new Error("automation queue unavailable");
       return originalEnqueue(input, now);
     };
 
@@ -198,14 +197,14 @@ describe("transcript ingestion commit boundary", () => {
     // Nothing may survive a failed unit: no offset advance, no Snapshot row, no job, no blob.
     expect(syncState()).toMatchObject({ byte_offset: offsetBefore, events_ingested: 0 });
     expect(evidenceRows()).toHaveLength(0);
-    expect(jobsOf("EXTRACT_EVIDENCE_CONTEXT")).toHaveLength(0);
+    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(0);
     await expect(evidenceFileCount()).resolves.toBe(0);
 
     // The reader is still behind the batch, so the next attempt ingests it exactly once.
     const retried = await syncOnce();
     expect(retried).toMatchObject({ newEvents: 1, evidenceReused: false });
     expect(evidenceRows()).toHaveLength(1);
-    expect(jobsOf("EXTRACT_EVIDENCE_CONTEXT")).toHaveLength(1);
+    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(1);
     await expect(evidenceFileCount()).resolves.toBe(1);
   });
 
@@ -265,7 +264,7 @@ describe("agent output evidence identity", () => {
     expect(first).toMatchObject({ newEvents: 1, evidenceReused: false });
 
     // Rewind the reader and re-read identical rows with a different parser version.
-    client.db.prepare("UPDATE session_sync_state SET byte_offset = 0 WHERE session_id = ?").run(sessionId);
+    client.db.prepare("UPDATE session_sync_state SET byte_offset = 0, events_ingested = 0 WHERE session_id = ?").run(sessionId);
     parserVersion = "codex-jsonl.test.v2";
     const second = await syncOnce();
 
@@ -279,12 +278,12 @@ describe("agent output evidence identity", () => {
     await appendMessage("stable identity");
     const first = await syncOnce();
 
-    client.db.prepare("UPDATE session_sync_state SET byte_offset = 0 WHERE session_id = ?").run(sessionId);
+    client.db.prepare("UPDATE session_sync_state SET byte_offset = 0, events_ingested = 0 WHERE session_id = ?").run(sessionId);
     const second = await syncOnce();
 
     expect(second).toMatchObject({ newEvents: 1, evidenceReused: true, evidenceId: first.evidenceId });
     expect(evidenceRows()).toHaveLength(1);
-    expect(jobsOf("EXTRACT_EVIDENCE_CONTEXT")).toHaveLength(1);
+    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(1);
   });
 });
 

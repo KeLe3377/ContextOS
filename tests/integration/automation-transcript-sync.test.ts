@@ -317,6 +317,27 @@ describe("background transcript sync", () => {
     ).rejects.toMatchObject({ code: "SYNC_JOB_MISSING_SESSION" });
   });
 
+  test("restarts the ordinal space when the reader rewinds after the file shrinks", async () => {
+    await writeFile(rolloutPath, "", "utf8");
+    await service.syncSessionTranscript({ sessionId });
+
+    const stamp = new Date(clockNow).toISOString();
+    await appendFile(rolloutPath, `${messageRow("user", "first message", stamp)}\n${messageRow("user", "second message", stamp)}\n`, "utf8");
+    clockNow += pollIntervalMs;
+    const first = await service.syncSessionTranscript({ sessionId });
+    expect(first).toMatchObject({ newEvents: 2, startOrdinal: 0, endOrdinal: 2, resetReason: null });
+
+    // A rollout rewritten shorter than the stored offset makes the reader rewind. The ordinal
+    // space has to restart with it, otherwise the re-read rows would claim positions that no
+    // longer match the content, and identical content could never deduplicate.
+    await writeFile(rolloutPath, `${messageRow("user", "only message", stamp)}\n`, "utf8");
+    clockNow += pollIntervalMs;
+    const rewound = await service.syncSessionTranscript({ sessionId });
+
+    expect(rewound).toMatchObject({ newEvents: 1, startOrdinal: 0, endOrdinal: 1, resetReason: "offset_beyond_eof" });
+    expect(syncStateRow()).toMatchObject({ events_ingested: 1 });
+  });
+
   test("records the sync activity timestamp for the status endpoint", async () => {
     await writeFile(rolloutPath, `${messageRow("user", "first", new Date(clockNow).toISOString())}\n`, "utf8");
     await service.syncSessionTranscript({ sessionId });

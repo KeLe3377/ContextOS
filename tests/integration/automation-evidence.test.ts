@@ -20,7 +20,6 @@ import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/s
 const externalSessionId = "01a0dddd-0000-7000-8000-000000000001";
 const pollIntervalMs = 30_000;
 const parserVersion = "codex-jsonl.test.v1";
-const extractorVersion = "test.v1";
 
 let tempDir: string;
 let rolloutPath: string;
@@ -88,9 +87,9 @@ function evidenceRows() {
   }>;
 }
 
-function extractJobs() {
+function compactionJobs() {
   return client.db.prepare(
-    "SELECT id, status, resource_type, resource_id, idempotency_key, payload_json FROM automation_jobs WHERE kind = 'EXTRACT_EVIDENCE_CONTEXT' ORDER BY created_at, id"
+    "SELECT id, status, resource_type, resource_id, idempotency_key, payload_json FROM automation_jobs WHERE kind = 'COMPACT_EVIDENCE' ORDER BY created_at, id"
   ).all() as Array<{
     id: string;
     status: string;
@@ -149,7 +148,6 @@ beforeEach(async () => {
     evidence: new EvidenceSnapshotService(evidenceRepository, new FileEvidenceStore(tempDir), reviewItems),
     adapters,
     desktopSync,
-    extractor: { id: "codex-cli", version: extractorVersion },
     clock: () => clockNow
   });
 
@@ -165,7 +163,7 @@ afterEach(async () => {
 });
 
 describe("automatic transcript evidence", () => {
-  test("stores one Evidence snapshot per batch and queues extraction for it", async () => {
+  test("stores one Evidence snapshot per batch and queues compaction for it", async () => {
     await bindAtEnd();
     await appendMessage("first message");
     const summary = await syncOnce();
@@ -178,10 +176,10 @@ describe("automatic transcript evidence", () => {
     expect(rows[0]).toMatchObject({ evidence_type: "AGENT_OUTPUT", project_id: projectId });
     expect(rows[0]!.content_hash).toMatch(/^sha256:/);
 
-    const jobs = extractJobs();
+    const jobs = compactionJobs();
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ status: "QUEUED", resource_type: "EVIDENCE_SNAPSHOT", resource_id: summary.evidenceId });
-    expect(jobs[0]!.idempotency_key).toBe(`EXTRACT_EVIDENCE_CONTEXT:${summary.evidenceId}:${extractorVersion}`);
+    expect(jobs[0]!.idempotency_key).toBe(`COMPACT_EVIDENCE:${summary.evidenceId}`);
     expect(JSON.parse(jobs[0]!.payload_json)).toMatchObject({ evidenceId: summary.evidenceId, sessionId });
   });
 
@@ -216,17 +214,17 @@ describe("automatic transcript evidence", () => {
     const idleBind = await syncOnce();
     expect(idleBind).toMatchObject({ newEvents: 0, evidenceId: null, evidenceReused: false });
     expect(evidenceRows()).toHaveLength(0);
-    expect(extractJobs()).toHaveLength(0);
+    expect(compactionJobs()).toHaveLength(0);
 
     await appendMessage("only message");
     await syncOnce();
     expect(evidenceRows()).toHaveLength(1);
-    expect(extractJobs()).toHaveLength(1);
+    expect(compactionJobs()).toHaveLength(1);
 
     const idle = await syncOnce();
     expect(idle).toMatchObject({ newEvents: 0, evidenceId: null });
     expect(evidenceRows()).toHaveLength(1);
-    expect(extractJobs()).toHaveLength(1);
+    expect(compactionJobs()).toHaveLength(1);
   });
 
   test("reuses the existing Evidence when the same rows are re-read after an offset reset", async () => {
@@ -238,13 +236,13 @@ describe("automatic transcript evidence", () => {
 
     // Rewind the reader the way an `offset_beyond_eof` reset does, without resetting the
     // ordinal counter: the replayed batch has different ordinals but identical content.
-    client.db.prepare("UPDATE session_sync_state SET byte_offset = 0 WHERE session_id = ?").run(sessionId);
+    client.db.prepare("UPDATE session_sync_state SET byte_offset = 0, events_ingested = 0 WHERE session_id = ?").run(sessionId);
     const replay = await syncOnce();
 
     expect(replay).toMatchObject({ newEvents: 1, evidenceReused: true, evidenceId: first.evidenceId });
     expect(evidenceRows()).toHaveLength(1);
-    // No second extraction job: the reused Evidence was already queued.
-    expect(extractJobs()).toHaveLength(1);
+    // No second compaction job: the reused Evidence was already queued.
+    expect(compactionJobs()).toHaveLength(1);
   });
 
   test("captures successive batches as separate Evidence rows", async () => {
@@ -260,6 +258,6 @@ describe("automatic transcript evidence", () => {
     expect(rows.map((row) => row.content_hash)).toHaveLength(2);
     expect(rows[1]!.metadata_json).toContain('"startOrdinal":1');
     expect(rows[1]!.metadata_json).toContain('"endOrdinal":2');
-    expect(extractJobs()).toHaveLength(2);
+    expect(compactionJobs()).toHaveLength(2);
   });
 });

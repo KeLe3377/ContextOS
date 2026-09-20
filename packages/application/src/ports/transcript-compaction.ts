@@ -171,3 +171,11 @@ function collectCallIds(messages: readonly CompactionMessage[]): Set<string> {
   }
   return ids;
 }
+
+/** Characters of text, tool input and tool output one message holds. */
+export function compactionMessageChars(message: CompactionMessage): number {
+  let total = message.text.length;
+  for (const use of message.toolUses) total += (use.sourceText ?? JSON.stringify(use.input)).length;
+  for (const result of message.toolResults) total += result.text.length;
+  return total;
+}

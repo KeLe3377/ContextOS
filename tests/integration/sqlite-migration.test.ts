@@ -33,7 +33,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(12);
+    expect(getSchemaVersion(client)).toBe(13);
     const tables = tableNames();
 
     for (const tableName of coreTableNames) {
@@ -41,7 +41,7 @@ describe("SQLite migrations", () => {
     }
   });
 
-  test("upgrades a schema 0011 database to 0012 and backfills project automation settings", async () => {
+  test("upgrades a schema 0011 database to the current version and backfills project automation settings", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "contextos-sqlite-"));
     const migrationsDir = resolve(process.cwd(), "migrations");
     const partialDir = join(tempDir, "migrations-through-0011");
@@ -62,7 +62,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(12);
+    expect(getSchemaVersion(client)).toBe(13);
     const tables = tableNames();
     for (const tableName of coreTableNames) {
       expect(tables).toContain(tableName);
