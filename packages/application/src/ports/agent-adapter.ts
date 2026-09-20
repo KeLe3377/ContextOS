@@ -52,6 +52,11 @@ export type AgentTranscriptEvent = {
   name?: string;
   callId?: string;
   truncated?: boolean;
+  /**
+   * Set when the transcript shows the tool invocation failed. Adapters that cannot detect it
+   * leave it undefined; compaction then treats the result as an ordinary one.
+   */
+  isError?: boolean;
 };
 
 export interface AgentAdapter {
