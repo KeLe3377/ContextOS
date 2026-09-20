@@ -175,6 +175,37 @@ export class EvidenceSnapshotService {
     return this.snapshots.create(input, nowMs(), stored);
   }
 
+  /**
+   * Idempotent Evidence creation for automatically ingested agent output.
+   *
+   * A snapshot's identity is its canonical content hash inside its Project, so a batch that is
+   * re-read (for example after a transcript offset reset) reuses the existing immutable
+   * snapshot instead of storing the same bytes twice.
+   */
+  createAgentOutput(input: {
+    projectId: string;
+    title: string;
+    contentText: string;
+    stream: string;
+    metadata: Record<string, unknown>;
+  }): { evidence: EvidenceSnapshotDto; reused: boolean } {
+    const contentHash = `sha256:${createHash("sha256").update(Buffer.from(input.contentText, "utf8")).digest("hex")}`;
+    const existing = this.snapshots.findByProjectAndContentHash(input.projectId, contentHash);
+    if (existing) return { evidence: existing, reused: true };
+
+    return {
+      evidence: this.create({
+        projectId: input.projectId,
+        evidenceType: "AGENT_OUTPUT",
+        title: input.title,
+        contentText: input.contentText,
+        contentHash,
+        metadata: { ...input.metadata, stream: input.stream }
+      }),
+      reused: false
+    };
+  }
+
   list(input: { projectId?: string; sourceId?: string; q?: string; limit: number }): EvidenceSnapshotDto[] {
     return this.snapshots.list(input);
   }

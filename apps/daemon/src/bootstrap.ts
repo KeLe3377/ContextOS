@@ -165,6 +165,7 @@ export async function createDaemonServer(
       sync: sessionSyncRepository,
       reviewItems: reviewItemRepository,
       automation: automationRepository,
+      evidence: evidenceSnapshotService,
       adapters: adapterRegistry,
       desktopSync
     });

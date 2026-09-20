@@ -14,9 +14,12 @@ import {
 import type { AgentAdapter, ExternalSessionCandidate } from "../../packages/application/src/ports/agent-adapter.js";
 import { AgentAdapterRegistry } from "../../packages/infrastructure/src/adapters/registry.js";
 import { CodexTranscriptTailer } from "../../packages/infrastructure/src/adapters/codex-transcript-tailer.js";
+import { EvidenceSnapshotService } from "../../packages/application/src/core/context-services.js";
+import { FileEvidenceStore } from "../../packages/infrastructure/src/evidence/evidence-store.js";
 import { DesktopSyncService } from "../../packages/application/src/core/desktop-sync-service.js";
 import { SqliteAutomationRepository } from "../../packages/infrastructure/src/sqlite/automation-repository.js";
 import { SqliteClient } from "../../packages/infrastructure/src/sqlite/client.js";
+import { SqliteEvidenceSnapshotRepository } from "../../packages/infrastructure/src/sqlite/context-repositories.js";
 import { SqliteReviewItemRepository, SqliteSessionRepository } from "../../packages/infrastructure/src/sqlite/core-repositories.js";
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { SqliteProjectRepository } from "../../packages/infrastructure/src/sqlite/project-repository.js";
@@ -60,6 +63,7 @@ function createService(adapters: AgentAdapter[]): AutomationService {
     sync,
     reviewItems,
     automation,
+    evidence: new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(client.db), new FileEvidenceStore(tempDir), reviewItems),
     adapters: registry,
     desktopSync,
     clock: () => now

@@ -9,7 +9,8 @@ import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/
 import type { ProjectDto } from "../../../contracts/src/projects.js";
 import type { AgentAdapter, ExternalSessionCandidate } from "../ports/agent-adapter.js";
 import { nowMs } from "../../../shared/src/clock.js";
-import type { DesktopSyncService } from "./desktop-sync-service.js";
+import type { EvidenceSnapshotService } from "./context-services.js";
+import type { DesktopSyncBatch, DesktopSyncService } from "./desktop-sync-service.js";
 import { AutomationDispatchError } from "./automation-scheduler.js";
 import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./project-thread-matcher.js";
 
@@ -21,14 +22,21 @@ import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./pr
  * Design: docs/superpowers/specs/2026-09-20-contextos-zero-input-automation-design.md
  */
 
+/** Identity recorded on extraction jobs so a retry reuses the same idempotency key. */
+export type AutomationExtractorIdentity = { id: string; version: string };
+
+export const defaultAutomationExtractor: AutomationExtractorIdentity = { id: "codex-cli", version: "codex-cli.v1" };
+
 export type AutomationServiceOptions = {
   projects: SqliteProjectRepository;
   sessions: SqliteSessionRepository;
   sync: SqliteSessionSyncRepository;
   reviewItems: SqliteReviewItemRepository;
   automation: SqliteAutomationRepository;
+  evidence: EvidenceSnapshotService;
   adapters: AgentAdapterRegistry;
   desktopSync: DesktopSyncService;
+  extractor?: AutomationExtractorIdentity;
   clock?: () => number;
 };
 
@@ -57,6 +65,10 @@ export type AutomationSyncSummary = {
   endByteOffset: number | null;
   partialLine: boolean;
   resetReason: "offset_beyond_eof" | null;
+  /** Evidence Snapshot that captured this batch, if any. */
+  evidenceId: string | null;
+  /** True when identical content had already been captured for this Project. */
+  evidenceReused: boolean;
   nextPollScheduled: boolean;
 };
 
@@ -202,6 +214,12 @@ export class AutomationService {
 
     const { result, batch } = this.options.desktopSync.syncForIngestion(session.id);
     this.options.automation.markProjectActivity(session.projectId, "SYNC", now);
+
+    // The transcript offset is already committed at this point, so Evidence can never be
+    // written for events the reader has not accounted for — and a failure below can never
+    // roll the reader back over them either.
+    const persisted = batch ? this.persistTranscriptBatch(session.projectId, batch, now) : null;
+
     const nextPollScheduled = this.scheduleNextSync(session.id, now, now + settings.pollIntervalMs);
 
     return {
@@ -214,8 +232,59 @@ export class AutomationService {
       endByteOffset: batch?.endByteOffset ?? null,
       partialLine: result.partialLine,
       resetReason: result.resetReason,
+      evidenceId: persisted?.evidenceId ?? null,
+      evidenceReused: persisted?.reused ?? false,
       nextPollScheduled
     };
+  }
+
+  /**
+   * Stores one synced batch as immutable Evidence and only then queues extraction.
+   *
+   * The enqueue happens strictly after the Evidence commit, so a failed enqueue leaves the
+   * Evidence intact and visible for a later repair pass rather than losing it.
+   */
+  private persistTranscriptBatch(
+    projectId: string,
+    batch: DesktopSyncBatch,
+    now: number
+  ): { evidenceId: string; reused: boolean } {
+    const { evidence, reused } = this.options.evidence.createAgentOutput({
+      projectId,
+      title: `Transcript events ${batch.startOrdinal}-${batch.endOrdinal}`,
+      contentText: canonicalBatchText(batch),
+      stream: "desktop-sync",
+      // Identifiers, counters and byte ranges only: never the transcript body itself.
+      metadata: {
+        sessionId: batch.sessionId,
+        adapterId: batch.adapterId,
+        externalSessionId: batch.externalSessionId,
+        parserVersion: batch.parserVersion,
+        startOrdinal: batch.startOrdinal,
+        endOrdinal: batch.endOrdinal,
+        startByteOffset: batch.startByteOffset,
+        endByteOffset: batch.endByteOffset,
+        partialLine: batch.partialLine,
+        resetReason: batch.resetReason
+      }
+    });
+
+    if (reused) return { evidenceId: evidence.id, reused: true };
+
+    const extractor = this.options.extractor ?? defaultAutomationExtractor;
+    this.options.automation.enqueue(
+      {
+        kind: "EXTRACT_EVIDENCE_CONTEXT",
+        projectId,
+        sessionId: batch.sessionId,
+        resourceType: "EVIDENCE_SNAPSHOT",
+        resourceId: evidence.id,
+        payload: { evidenceId: evidence.id, sessionId: batch.sessionId, extractorId: extractor.id },
+        idempotencyKey: `EXTRACT_EVIDENCE_CONTEXT:${evidence.id}:${extractor.version}`
+      },
+      now
+    );
+    return { evidenceId: evidence.id, reused: false };
   }
 
   /**
@@ -351,6 +420,29 @@ function emptySyncSummary(sessionId: string): AutomationSyncSummary {
     endByteOffset: null,
     partialLine: false,
     resetReason: null,
+    evidenceId: null,
+    evidenceReused: false,
     nextPollScheduled: false
   };
+}
+
+/**
+ * Canonical, content-addressed serialisation of a synced batch.
+ *
+ * Ordinals are deliberately excluded from the hash input: an offset reset re-reads the same
+ * rows with different ordinal numbers, and including them would give identical content a
+ * different hash and defeat Evidence deduplication. The Session id is included so two
+ * Sessions with identical text stay distinguishable.
+ */
+function canonicalBatchText(batch: DesktopSyncBatch): string {
+  const events = batch.events.map((event) => JSON.stringify({
+    timestamp: event.timestamp ?? null,
+    kind: event.kind,
+    role: event.role ?? null,
+    name: event.name ?? null,
+    callId: event.callId ?? null,
+    truncated: event.truncated ?? false,
+    text: event.text ?? null
+  }));
+  return [`session:${batch.sessionId}`, ...events].join("\n");
 }
