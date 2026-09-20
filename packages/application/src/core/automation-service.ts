@@ -1,11 +1,16 @@
 import { dirname } from "node:path";
+import { automationSettingsDefaults } from "../../../contracts/src/automation.js";
+import type { SessionSyncStatus } from "../../../contracts/src/sessions.js";
 import type { AutomationJobRecord, SqliteAutomationRepository } from "../../../infrastructure/src/sqlite/automation-repository.js";
 import type { SqliteReviewItemRepository, SqliteSessionRepository } from "../../../infrastructure/src/sqlite/core-repositories.js";
 import type { SqliteProjectRepository } from "../../../infrastructure/src/sqlite/project-repository.js";
+import type { SqliteSessionSyncRepository } from "../../../infrastructure/src/sqlite/session-sync-repository.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { ProjectDto } from "../../../contracts/src/projects.js";
 import type { AgentAdapter, ExternalSessionCandidate } from "../ports/agent-adapter.js";
 import { nowMs } from "../../../shared/src/clock.js";
+import type { DesktopSyncService } from "./desktop-sync-service.js";
+import { AutomationDispatchError } from "./automation-scheduler.js";
 import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./project-thread-matcher.js";
 
 /**
@@ -19,9 +24,11 @@ import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./pr
 export type AutomationServiceOptions = {
   projects: SqliteProjectRepository;
   sessions: SqliteSessionRepository;
+  sync: SqliteSessionSyncRepository;
   reviewItems: SqliteReviewItemRepository;
   automation: SqliteAutomationRepository;
   adapters: AgentAdapterRegistry;
+  desktopSync: DesktopSyncService;
   clock?: () => number;
 };
 
@@ -39,6 +46,25 @@ const discoveryThreadLimit = 100;
 
 /** Adapter id used for discovery when the Project does not name one explicitly. */
 const defaultDiscoveryAdapterId = "codex";
+
+export type AutomationSyncSummary = {
+  sessionId: string;
+  status: SessionSyncStatus;
+  newEvents: number;
+  startOrdinal: number | null;
+  endOrdinal: number | null;
+  startByteOffset: number | null;
+  endByteOffset: number | null;
+  partialLine: boolean;
+  resetReason: "offset_beyond_eof" | null;
+  nextPollScheduled: boolean;
+};
+
+export type AutomationDueSyncSummary = {
+  projectsScanned: number;
+  dueSessions: number;
+  jobsEnqueued: number;
+};
 
 export class AutomationService {
   constructor(private readonly options: AutomationServiceOptions) {}
@@ -135,10 +161,120 @@ export class AutomationService {
   /** Dispatcher entry point for DISCOVER_CODEX_THREADS jobs. */
   async handleDiscoveryJob(job: AutomationJobRecord): Promise<void> {
     await this.discoverCodexThreads(job.projectId ? { projectId: job.projectId } : {});
+    // Discovery doubles as the periodic entry point that re-arms poll chains which died
+    // (daemon restart, exhausted retries) without the browser being open.
+    await this.enqueueDueSyncJobs(job.projectId ? { projectId: job.projectId } : {});
+  }
+
+  /** Dispatcher entry point for SYNC_SESSION_TRANSCRIPT jobs. */
+  async handleSyncJob(job: AutomationJobRecord): Promise<void> {
+    if (!job.sessionId) {
+      throw new AutomationDispatchError("SYNC_JOB_MISSING_SESSION", "SYNC_SESSION_TRANSCRIPT requires a sessionId");
+    }
+    await this.syncSessionTranscript({ sessionId: job.sessionId });
+  }
+
+  /**
+   * Reads new transcript events for one bound Session and keeps the poll chain alive.
+   *
+   * Everything happens in the daemon: no browser request is involved, and a Session that was
+   * bound by discovery is bound from the end of the file first so enabling automation does not
+   * replay the whole history.
+   */
+  async syncSessionTranscript(input: { sessionId: string }): Promise<AutomationSyncSummary> {
+    const now = this.now();
+    const session = this.options.sessions.getByIdOrThrow(input.sessionId);
+    const settings = this.options.automation.getSettings(session.projectId, now);
+
+    if (settings.mode === "OFF") {
+      // OFF stops automatic syncing outright: no read, and no follow-up job.
+      return {
+        ...emptySyncSummary(session.id),
+        status: this.options.desktopSync.status(session.id).status,
+        nextPollScheduled: false
+      };
+    }
+
+    if (this.options.desktopSync.status(session.id).status === "UNBOUND") {
+      // Binding without `fromBeginning` starts at the current end of the rollout.
+      this.options.desktopSync.bind(session.id);
+    }
+
+    const { result, batch } = this.options.desktopSync.syncForIngestion(session.id);
+    this.options.automation.markProjectActivity(session.projectId, "SYNC", now);
+    const nextPollScheduled = this.scheduleNextSync(session.id, now, now + settings.pollIntervalMs);
+
+    return {
+      sessionId: session.id,
+      status: result.status,
+      newEvents: result.newEvents,
+      startOrdinal: batch?.startOrdinal ?? null,
+      endOrdinal: batch?.endOrdinal ?? null,
+      startByteOffset: batch?.startByteOffset ?? null,
+      endByteOffset: batch?.endByteOffset ?? null,
+      partialLine: result.partialLine,
+      resetReason: result.resetReason,
+      nextPollScheduled
+    };
+  }
+
+  /**
+   * Recovery sweep: enqueues a sync for every WATCHING Session whose last successful sync is
+   * older than its Project cadence. The cadence lives in project automation settings, so
+   * switching a Project to OFF stops the sweep for it too.
+   */
+  async enqueueDueSyncJobs(input: { projectId?: string } = {}): Promise<AutomationDueSyncSummary> {
+    const now = this.now();
+    const due = this.options.sync.listDueForSync({
+      now,
+      defaultPollIntervalMs: automationSettingsDefaults.pollIntervalMs,
+      limit: 200
+    });
+
+    const summary: AutomationDueSyncSummary = { projectsScanned: 0, dueSessions: 0, jobsEnqueued: 0 };
+    const touchedProjects = new Set<string>();
+    for (const state of due) {
+      const session = this.options.sessions.getById(state.session_id);
+      if (!session) continue;
+      if (input.projectId && session.projectId !== input.projectId) continue;
+      summary.dueSessions += 1;
+      if (this.scheduleNextSync(session.id, now, now)) summary.jobsEnqueued += 1;
+      touchedProjects.add(session.projectId);
+    }
+    summary.projectsScanned = touchedProjects.size;
+    return summary;
   }
 
   private now(): number {
     return this.options.clock?.() ?? nowMs();
+  }
+
+  /**
+   * Enqueues the next poll for a Session using a time-bucketed idempotency key, so repeated
+   * terminal attempts inside the same poll window collapse into a single job. Returns whether
+   * a new job was actually created.
+   */
+  private scheduleNextSync(sessionId: string, now: number, availableAt: number): boolean {
+    const session = this.options.sessions.getById(sessionId);
+    if (!session) return false;
+    const settings = this.options.automation.getSettings(session.projectId, now);
+    if (settings.mode === "OFF") return false;
+
+    const bucket = Math.floor(availableAt / settings.pollIntervalMs);
+    const job = this.options.automation.enqueue(
+      {
+        kind: "SYNC_SESSION_TRANSCRIPT",
+        projectId: session.projectId,
+        sessionId,
+        resourceType: "SESSION",
+        resourceId: sessionId,
+        payload: { adapterId: session.agentAdapterId, externalSessionId: session.externalSessionId },
+        idempotencyKey: `SYNC_SESSION_TRANSCRIPT:${sessionId}:poll:${bucket}`,
+        availableAt
+      },
+      now
+    );
+    return job.created;
   }
 
   private targets(projectId?: string): ProjectDto[] {
@@ -202,4 +338,19 @@ export class AutomationService {
 function threadQueryRoots(projectRoot: string): string[] {
   const parent = dirname(projectRoot);
   return parent && parent !== projectRoot ? [projectRoot, parent] : [projectRoot];
+}
+
+function emptySyncSummary(sessionId: string): AutomationSyncSummary {
+  return {
+    sessionId,
+    status: "UNBOUND",
+    newEvents: 0,
+    startOrdinal: null,
+    endOrdinal: null,
+    startByteOffset: null,
+    endByteOffset: null,
+    partialLine: false,
+    resetReason: null,
+    nextPollScheduled: false
+  };
 }

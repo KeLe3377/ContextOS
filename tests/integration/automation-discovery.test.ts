@@ -13,11 +13,14 @@ import {
 } from "../../packages/application/src/core/project-thread-matcher.js";
 import type { AgentAdapter, ExternalSessionCandidate } from "../../packages/application/src/ports/agent-adapter.js";
 import { AgentAdapterRegistry } from "../../packages/infrastructure/src/adapters/registry.js";
+import { CodexTranscriptTailer } from "../../packages/infrastructure/src/adapters/codex-transcript-tailer.js";
+import { DesktopSyncService } from "../../packages/application/src/core/desktop-sync-service.js";
 import { SqliteAutomationRepository } from "../../packages/infrastructure/src/sqlite/automation-repository.js";
 import { SqliteClient } from "../../packages/infrastructure/src/sqlite/client.js";
 import { SqliteReviewItemRepository, SqliteSessionRepository } from "../../packages/infrastructure/src/sqlite/core-repositories.js";
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { SqliteProjectRepository } from "../../packages/infrastructure/src/sqlite/project-repository.js";
+import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/sqlite/session-sync-repository.js";
 
 const now = 1_760_000_000_000;
 
@@ -40,12 +43,25 @@ function createFakeAdapter(id: string, threads: ExternalSessionCandidate[]): Age
 }
 
 function createService(adapters: AgentAdapter[]): AutomationService {
+  const registry = new AgentAdapterRegistry(adapters);
+  const sync = new SqliteSessionSyncRepository(client.db);
+  const desktopSync = new DesktopSyncService({
+    sessions,
+    sync,
+    adapters: registry,
+    tailer: new CodexTranscriptTailer(),
+    bindExternalSession: ({ sessionId, externalSessionId }) => {
+      client.db.prepare("UPDATE sessions SET external_session_id = ?, revision = revision + 1 WHERE id = ?").run(externalSessionId, sessionId);
+    }
+  });
   return new AutomationService({
     projects,
     sessions,
+    sync,
     reviewItems,
     automation,
-    adapters: new AgentAdapterRegistry(adapters),
+    adapters: registry,
+    desktopSync,
     clock: () => now
   });
 }

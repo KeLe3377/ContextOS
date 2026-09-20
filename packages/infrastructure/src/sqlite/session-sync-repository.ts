@@ -40,6 +40,31 @@ export class SqliteSessionSyncRepository {
     return this.db.prepare("SELECT * FROM session_sync_state ORDER BY updated_at DESC").all() as SessionSyncStateRow[];
   }
 
+  /**
+   * WATCHING sessions whose last successful sync is older than their Project's poll interval.
+   *
+   * The cadence comes from `project_automation_settings`, never from browser state, and OFF
+   * Projects are excluded so switching automation off also stops background polling.
+   */
+  listDueForSync(input: { now: number; defaultPollIntervalMs: number; limit?: number }): SessionSyncStateRow[] {
+    const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+    return this.db.prepare(
+      `SELECT state.*
+         FROM session_sync_state state
+         JOIN sessions ON sessions.id = state.session_id
+         LEFT JOIN project_automation_settings settings ON settings.project_id = sessions.project_id
+        WHERE state.status = 'WATCHING'
+          AND COALESCE(settings.mode, 'SUGGEST_ONLY') <> 'OFF'
+          AND (
+            state.last_synced_at IS NULL
+            OR CAST(strftime('%s', state.last_synced_at) AS INTEGER) * 1000
+               <= ? - COALESCE(settings.poll_interval_ms, ?)
+          )
+        ORDER BY (state.last_synced_at IS NULL) DESC, state.last_synced_at ASC, state.session_id ASC
+        LIMIT ?`
+    ).all(input.now, input.defaultPollIntervalMs, limit) as SessionSyncStateRow[];
+  }
+
   upsert(state: SessionSyncStateUpsert): SessionSyncStateRow {
     this.db.prepare(
       `INSERT INTO session_sync_state

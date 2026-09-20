@@ -57,6 +57,11 @@ export type AgentTranscriptEvent = {
 export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
+  /**
+   * Version of the transcript row parser. Recorded on Evidence derived from a synced
+   * batch so a derived artefact can be traced back to the parser that produced it.
+   */
+  readonly transcriptParserVersion?: string;
   discover(): AgentAdapterStatusDto;
   buildLaunchInfo(input: { cwd: string; prompt?: string }): AgentLaunchInfoDto;
   buildResumeInfo(input: { cwd: string; externalSessionId: string; prompt: string }): AgentLaunchInfoDto;

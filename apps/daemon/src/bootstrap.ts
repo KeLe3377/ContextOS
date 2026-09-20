@@ -142,9 +142,10 @@ export async function createDaemonServer(
       dataDirectory: config.dataDir
     });
     const settingsService = new SettingsService(runtimeRepository, startupRegistration);
+    const sessionSyncRepository = new SqliteSessionSyncRepository(sqlite.db);
     const desktopSync = new DesktopSyncService({
       sessions: new SqliteSessionRepository(sqlite.db),
-      sync: new SqliteSessionSyncRepository(sqlite.db),
+      sync: sessionSyncRepository,
       adapters: adapterRegistry,
       tailer: new CodexTranscriptTailer(),
       bindExternalSession: ({ sessionId, externalSessionId }) => {
@@ -161,14 +162,15 @@ export async function createDaemonServer(
     const automationService = new AutomationService({
       projects: projectRepository,
       sessions: new SqliteSessionRepository(sqlite.db),
+      sync: sessionSyncRepository,
       reviewItems: reviewItemRepository,
       automation: automationRepository,
-      adapters: adapterRegistry
+      adapters: adapterRegistry,
+      desktopSync
     });
-    const automationJobRouter = new AutomationJobRouter().register(
-      "DISCOVER_CODEX_THREADS",
-      (job) => automationService.handleDiscoveryJob(job)
-    );
+    const automationJobRouter = new AutomationJobRouter()
+      .register("DISCOVER_CODEX_THREADS", (job) => automationService.handleDiscoveryJob(job))
+      .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job));
     const automationScheduler = new AutomationScheduler({
       repository: automationRepository,
       dispatcher: automationJobRouter,

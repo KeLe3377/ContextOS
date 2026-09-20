@@ -8,9 +8,12 @@ import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
 import { CodexAppServerClient } from "./codex-app-server-client.js";
 
+const codexTranscriptParserVersion = "codex-jsonl.v5";
+
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex";
   readonly displayName = "Codex";
+  readonly transcriptParserVersion = codexTranscriptParserVersion;
   private readonly command: string;
   private readonly launchArgs: string[];
   private readonly platform: NodeJS.Platform;
@@ -292,7 +295,7 @@ function parseCodexTranscript(path: string, externalSessionId: string): AgentTra
     externalSessionId,
     contentText: selected.join(separator),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "codex-jsonl.v5",
+    parserVersion: codexTranscriptParserVersion,
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,

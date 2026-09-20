@@ -189,3 +189,73 @@ describe("desktop sync API", () => {
     expect(sessions.getByIdOrThrow(sessionId).externalSessionId).toBe(externalSessionId);
   });
 });
+
+/**
+ * The daemon-owned automation loop persists each ingested batch as immutable Evidence, which
+ * needs the exact ordinal and byte range the parser covered. These assertions pin that
+ * contract down so the ingestion path cannot silently drift.
+ */
+describe("desktop sync ingestion batches", () => {
+  const batchExternalSessionId = "01a0batch-0000-7000-8000-000000000001";
+  let batchDir: string;
+  let batchRollout: string;
+  let batchClient: SqliteClient | undefined;
+  let batchSessions: SqliteSessionRepository;
+  let batchSessionId: string;
+
+  beforeAll(async () => {
+    batchDir = await mkdtemp(join(tmpdir(), "contextos-batch-"));
+    batchRollout = join(batchDir, `rollout-${batchExternalSessionId}.jsonl`);
+    await writeFile(batchRollout, [
+      codexRow("session_meta", { id: batchExternalSessionId, cwd: batchDir }),
+      messageRow("user", "one", new Date(nowMs() - 3000).toISOString()),
+      messageRow("assistant", "two", new Date(nowMs() - 2000).toISOString()),
+      ""
+    ].join("\n"), "utf8");
+
+    batchClient = SqliteClient.open({ databaseFile: join(batchDir, "contextos.sqlite") });
+    runMigrations(batchClient);
+    const projects = new SqliteProjectRepository(batchClient.db);
+    batchSessions = new SqliteSessionRepository(batchClient.db);
+    const project = projects.create({ name: "Batch project", rootPath: batchDir, defaultRuleIds: [], agentAdapterIds: ["codex"] }, nowMs());
+    batchSessionId = batchSessions.create({ projectId: project.id, agentAdapterId: "codex", title: "Batch", intent: "batch" }, nowMs()).id;
+  });
+
+  afterAll(async () => {
+    batchClient?.close();
+    await rm(batchDir, { recursive: true, force: true });
+  });
+
+  it("returns the ordinal and byte range of the ingested batch", () => {
+    const service = new DesktopSyncService({
+      sessions: batchSessions,
+      sync: new SqliteSessionSyncRepository(batchClient!.db),
+      adapters: new AgentAdapterRegistry([new CodexAdapter("codex.cmd", ["exec"], "win32", batchDir)]),
+      tailer: new CodexTranscriptTailer()
+    });
+
+    service.bind(batchSessionId, { externalSessionId: batchExternalSessionId, fromBeginning: true });
+
+    const first = service.syncForIngestion(batchSessionId);
+    expect(first.result.newEvents).toBe(2);
+    expect(first.batch).toMatchObject({
+      sessionId: batchSessionId,
+      adapterId: "codex",
+      externalSessionId: batchExternalSessionId,
+      transcriptPath: batchRollout,
+      parserVersion: "codex-jsonl.v5",
+      startOrdinal: 0,
+      endOrdinal: 2,
+      partialLine: false,
+      resetReason: null
+    });
+    expect(first.batch!.startByteOffset).toBe(0);
+    expect(first.batch!.endByteOffset).toBe(first.result.byteOffset);
+    expect(first.batch!.events.map((event) => event.text)).toEqual(["one", "two"]);
+
+    // Nothing new to read means nothing to persist.
+    const second = service.syncForIngestion(batchSessionId);
+    expect(second.result.newEvents).toBe(0);
+    expect(second.batch).toBeNull();
+  });
+});

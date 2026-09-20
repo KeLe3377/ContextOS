@@ -8,9 +8,12 @@ import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
 import { resolveProcessCommand } from "./codex-adapter.js";
 
+const claudeTranscriptParserVersion = "claude-code-jsonl.v4";
+
 export class ClaudeCodeAdapter implements AgentAdapter {
   readonly id = "claude-code";
   readonly displayName = "Claude Code";
+  readonly transcriptParserVersion = claudeTranscriptParserVersion;
   private readonly command: string;
   private readonly launchArgs: string[];
   private readonly platform: NodeJS.Platform;
@@ -205,7 +208,7 @@ function parseClaudeTranscript(path: string, externalSessionId: string): AgentTr
     externalSessionId,
     contentText: selected.formatted.join("\n\n"),
     sourceUpdatedAt: file.mtime.toISOString(),
-    parserVersion: "claude-code-jsonl.v4",
+    parserVersion: claudeTranscriptParserVersion,
     eventCount: selectedEvents.length,
     eventCounts,
     events: selectedEvents,

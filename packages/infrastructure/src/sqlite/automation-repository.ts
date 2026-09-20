@@ -206,7 +206,13 @@ export class SqliteAutomationRepository {
     return this.getSettings(projectId, now);
   }
 
-  /** Records the last time a project completed a discovery, sync or extraction pass. */
+  /**
+   * Records the last time a project completed a discovery, sync or extraction pass.
+   *
+   * Deliberately leaves `revision` and `updated_at` alone: background activity is not a
+   * configuration change, and bumping the revision here would make a settings PATCH from the
+   * UI fail with a spurious revision conflict whenever a poll happened in between.
+   */
   markProjectActivity(projectId: string, activity: AutomationProjectActivity, now: number): void {
     this.ensureSettingsRow(projectId, now);
     const column = activity === "DISCOVERY"
@@ -214,8 +220,8 @@ export class SqliteAutomationRepository {
       : activity === "SYNC"
         ? "last_sync_at"
         : "last_extraction_at";
-    const result = this.db.prepare(`UPDATE project_automation_settings SET ${column} = ?, updated_at = ?, revision = revision + 1 WHERE project_id = ?`)
-      .run(now, now, projectId);
+    const result = this.db.prepare(`UPDATE project_automation_settings SET ${column} = ? WHERE project_id = ?`)
+      .run(now, projectId);
     if (result.changes !== 1) throw new ContextOsError("NOT_FOUND", "Project not found", { id: projectId });
   }
 

@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { dirname } from "node:path";
-import type { AgentAdapter, ExternalSessionCandidate } from "../ports/agent-adapter.js";
+import type { AgentAdapter, AgentTranscriptEvent, ExternalSessionCandidate } from "../ports/agent-adapter.js";
 import type { DesktopSyncCandidate, SessionSyncBindInput, SessionSyncResultDto, SessionSyncStateDto } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { CodexTranscriptTailer } from "../../../infrastructure/src/adapters/codex-transcript-tailer.js";
@@ -27,6 +27,26 @@ export type DesktopSyncServiceOptions = {
    * candidate list falls back to an unscoped (still read-only) listing.
    */
   resolveProjectRoot?: (projectId: string) => string | null;
+};
+
+/**
+ * Persistence input for one ingested transcript batch. It carries the exact ordinal and byte
+ * range covered by `events`, so the caller can store the batch as immutable Evidence with a
+ * reproducible provenance record — without re-reading or re-parsing the rollout.
+ */
+export type DesktopSyncBatch = {
+  sessionId: string;
+  adapterId: string;
+  externalSessionId: string | null;
+  transcriptPath: string;
+  parserVersion: string | null;
+  startOrdinal: number;
+  endOrdinal: number;
+  startByteOffset: number;
+  endByteOffset: number;
+  partialLine: boolean;
+  resetReason: "offset_beyond_eof" | null;
+  events: AgentTranscriptEvent[];
 };
 
 /**
@@ -149,6 +169,18 @@ export class DesktopSyncService {
   }
 
   sync(sessionId: string): SessionSyncResultDto {
+    return this.syncForIngestion(sessionId).result;
+  }
+
+  /**
+   * Same parser/offset path as `sync()`, plus the descriptor the automation pipeline needs
+   * to persist the newly ingested batch as immutable Evidence.
+   *
+   * The offset is already committed by the time this returns, so a later Evidence write can
+   * never roll the reader back over events that have been accounted for. `batch` is null when
+   * the read produced no new events.
+   */
+  syncForIngestion(sessionId: string): { result: SessionSyncResultDto; batch: DesktopSyncBatch | null } {
     const state = this.options.sync.get(sessionId);
     if (!state) {
       throw new ContextOsError("NOT_FOUND", "Session is not bound to a transcript", { sessionId });
@@ -162,9 +194,14 @@ export class DesktopSyncService {
     try {
       result = this.options.tailer.read({ path: state.transcript_path, offset: state.byte_offset });
     } catch (error) {
+      // A temporarily unreadable rollout keeps the last successful offset, so the next poll
+      // retries from the same place instead of dropping or replaying events.
       const message = error instanceof Error ? error.message : "Failed to read transcript";
       this.options.sync.upsert({ ...rowToUpsert(state), status: "ERROR", lastError: message, updatedAt: isoNow() });
-      return { ...this.status(sessionId), newEvents: 0, newEventTimestamps: 0, partialLine: false, resetReason: null, events: [] };
+      return {
+        result: { ...this.status(sessionId), newEvents: 0, newEventTimestamps: 0, partialLine: false, resetReason: null, events: [] },
+        batch: null
+      };
     }
 
     const lines = result.rows.map((row) => row.line);
@@ -183,22 +220,41 @@ export class DesktopSyncService {
       updatedAt: isoNow()
     });
 
+    const firstRow = result.rows[0];
     return {
-      ...this.status(sessionId),
-      newEvents: events.length,
-      newEventTimestamps: timestamped.length,
-      partialLine: result.partialLine,
-      resetReason: result.resetReason,
-      events: events.map((event) => ({
-        ordinal: event.ordinal,
-        timestamp: event.timestamp,
-        kind: event.kind,
-        role: event.role,
-        text: event.text,
-        name: event.name,
-        callId: event.callId,
-        truncated: event.truncated
-      }))
+      result: {
+        ...this.status(sessionId),
+        newEvents: events.length,
+        newEventTimestamps: timestamped.length,
+        partialLine: result.partialLine,
+        resetReason: result.resetReason,
+        events: events.map((event) => ({
+          ordinal: event.ordinal,
+          timestamp: event.timestamp,
+          kind: event.kind,
+          role: event.role,
+          text: event.text,
+          name: event.name,
+          callId: event.callId,
+          truncated: event.truncated
+        }))
+      },
+      batch: events.length > 0 && firstRow
+        ? {
+            sessionId,
+            adapterId: state.adapter_id,
+            externalSessionId: state.external_session_id,
+            transcriptPath: state.transcript_path,
+            parserVersion: adapter.transcriptParserVersion ?? null,
+            startOrdinal: state.events_ingested,
+            endOrdinal: state.events_ingested + events.length,
+            startByteOffset: firstRow.byteStart,
+            endByteOffset: result.nextOffset,
+            partialLine: result.partialLine,
+            resetReason: result.resetReason,
+            events
+          }
+        : null
     };
   }
 
