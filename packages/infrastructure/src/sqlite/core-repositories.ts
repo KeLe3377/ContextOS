@@ -88,6 +88,62 @@ export class SqliteSessionRepository {
     ensureChanged(changes, before ?? this.getById(id), "Session", id, expectedRevision);
     return this.getByIdOrThrow(id);
   }
+
+  /**
+   * Looks up the Session that already owns an external agent thread. The Session row is the
+   * authoritative binding: Desktop sync writes the external id there so `continue` can decide
+   * between launch and resume.
+   */
+  findByExternalSession(input: { agentAdapterId: string; externalSessionId: string }): SessionDto | null {
+    const row = this.db.prepare(
+      "SELECT * FROM sessions WHERE agent_adapter_id = ? AND external_session_id = ? ORDER BY created_at ASC, id ASC LIMIT 1"
+    ).get(input.agentAdapterId, input.externalSessionId) as SessionRow | undefined;
+    return row ? mapSession(row) : null;
+  }
+
+  listBoundExternalSessionIds(agentAdapterId: string): string[] {
+    return (this.db.prepare(
+      "SELECT DISTINCT external_session_id FROM sessions WHERE agent_adapter_id = ? AND external_session_id IS NOT NULL"
+    ).all(agentAdapterId) as Array<{ external_session_id: string }>).map((row) => row.external_session_id);
+  }
+
+  /**
+   * Creates a Session that is already bound to a discovered external thread.
+   *
+   * Atomic: the existence check and the insert share one transaction, so if another writer
+   * bound the same (adapter, externalSessionId) in between, that Session is returned with
+   * `created: false` rather than producing a duplicate.
+   */
+  createDiscovered(input: {
+    projectId: string;
+    agentAdapterId: string;
+    externalSessionId: string;
+    title: string;
+  }, now: number): { session: SessionDto; created: boolean } {
+    return this.db.transaction(() => {
+      const existing = this.findByExternalSession({
+        agentAdapterId: input.agentAdapterId,
+        externalSessionId: input.externalSessionId
+      });
+      if (existing) return { session: existing, created: false };
+
+      const id = newId("sess");
+      this.db.prepare(
+        "INSERT INTO sessions (id, project_id, agent_adapter_id, external_session_id, title, intent, status, runtime_state, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, NULL, 'CREATED', '{}', ?, ?, 1)"
+      ).run(id, input.projectId, input.agentAdapterId, input.externalSessionId, input.title, now, now);
+      // Metadata stays to identifiers only: the rollout body is never copied here.
+      const metadata = JSON.stringify({
+        adapterId: input.agentAdapterId,
+        externalSessionId: input.externalSessionId,
+        source: "automation-discovery"
+      });
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'SESSION', ?, 'SESSION_DISCOVERED', 'Session discovered from an external agent thread', ?, ?)")
+        .run(newId("act"), input.projectId, id, metadata, now);
+      this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'SESSION', ?, 'CREATE', ?, ?)")
+        .run(newId("audit"), input.projectId, id, JSON.stringify({ id, title: input.title, ...JSON.parse(metadata) }), now);
+      return { session: this.getByIdOrThrow(id), created: true };
+    })();
+  }
 }
 
 function mapSession(row: SessionRow): SessionDto {
@@ -495,6 +551,15 @@ export class SqliteReviewItemRepository {
   }
 
   findOrCreateOpenEvidenceIssue(input: ReviewItemInput, now: number): ReviewItemDto {
+    return this.findOrCreateOpen(input, now);
+  }
+
+  /**
+   * Deduplicated Review Item creation: an open item for the same
+   * (sourceType, sourceId, triggerType) is reused instead of piling up duplicates, which is
+   * what keeps repeated discovery passes from flooding the Review Inbox.
+   */
+  findOrCreateOpen(input: ReviewItemInput, now: number): ReviewItemDto {
     return this.db.transaction(() => {
       const existing = this.db.prepare(`
         SELECT * FROM review_items
@@ -509,8 +574,8 @@ export class SqliteReviewItemRepository {
       this.db.prepare("INSERT INTO review_items (id, project_id, source_type, source_id, trigger_type, status, priority, summary, proposed_resolution, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, 1)")
         .run(id, input.projectId, input.sourceType, input.sourceId, input.triggerType, input.priority, input.summary, input.proposedResolution ?? null, now, now);
       const created = this.getByIdOrThrow(id);
-      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'EVIDENCE_SNAPSHOT', ?, ?, ?, ?, ?)")
-        .run(newId("act"), input.projectId, input.sourceId, input.triggerType, input.summary, JSON.stringify({ reviewItemId: id }), now);
+      this.db.prepare("INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(newId("act"), input.projectId, input.sourceType, input.sourceId, input.triggerType, input.summary, JSON.stringify({ reviewItemId: id }), now);
       this.db.prepare("INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, after_json, created_at) VALUES (?, ?, 'SYSTEM', 'REVIEW_ITEM', ?, 'CREATE', ?, ?)")
         .run(newId("audit"), input.projectId, id, JSON.stringify(created), now);
       return created;

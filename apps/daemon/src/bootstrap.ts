@@ -11,10 +11,11 @@ import { RuleService } from "../../../packages/application/src/core/rule-service
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
 import { DesktopSyncService } from "../../../packages/application/src/core/desktop-sync-service.js";
 import {
-  AutomationDispatchError,
   AutomationScheduler,
   type AutomationSetTimer
 } from "../../../packages/application/src/core/automation-scheduler.js";
+import { AutomationJobRouter } from "../../../packages/application/src/core/automation-job-router.js";
+import { AutomationService } from "../../../packages/application/src/core/automation-service.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
@@ -154,16 +155,23 @@ export async function createDaemonServer(
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
     // Automation runs inside the daemon, so background discovery, sync and extraction keep
-    // working while the browser is closed. The scheduler owns only job lifecycle; discovery,
-    // ingestion and extraction handlers are registered on the dispatcher by later tasks.
+    // working while the browser is closed. The scheduler owns only job lifecycle; the router
+    // maps a claimed job kind onto AutomationService, which holds every domain decision.
     const automationRepository = new SqliteAutomationRepository(sqlite.db);
+    const automationService = new AutomationService({
+      projects: projectRepository,
+      sessions: new SqliteSessionRepository(sqlite.db),
+      reviewItems: reviewItemRepository,
+      automation: automationRepository,
+      adapters: adapterRegistry
+    });
+    const automationJobRouter = new AutomationJobRouter().register(
+      "DISCOVER_CODEX_THREADS",
+      (job) => automationService.handleDiscoveryJob(job)
+    );
     const automationScheduler = new AutomationScheduler({
       repository: automationRepository,
-      dispatcher: {
-        dispatch: async (job) => {
-          throw new AutomationDispatchError("AUTOMATION_HANDLER_MISSING", `No handler registered for ${job.kind}`);
-        }
-      },
+      dispatcher: automationJobRouter,
       setTimer: options.automationSetTimer,
       tickIntervalMs: options.automationTickIntervalMs
     });
