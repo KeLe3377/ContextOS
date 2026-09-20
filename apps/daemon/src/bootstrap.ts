@@ -21,6 +21,7 @@ import { ContextOsCompactionAdapter } from "../../../packages/application/src/co
 import { PrefixTranscriptSanitizer } from "../../../packages/application/src/core/transcript-sanitizer.js";
 import type { CompactionOptions, TranscriptCompactionProvider } from "../../../packages/application/src/ports/transcript-compaction.js";
 import { DeterministicCompactionProvider, defaultCompactionOptions } from "../../../packages/infrastructure/src/compaction/deterministic-compaction-provider.js";
+import { CodexContextExtractor, extractionRunsRoot } from "../../../packages/infrastructure/src/extraction/codex-context-extractor.js";
 import { SqliteCompactionArtifactRepository } from "../../../packages/infrastructure/src/sqlite/compaction-artifact-repository.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
@@ -176,7 +177,11 @@ export async function createDaemonServer(
       automation: automationRepository,
       evidence: evidenceSnapshotService,
       adapters: adapterRegistry,
-      desktopSync
+      desktopSync,
+      // The extractor runs inside its own workspace under the data directory. Treating anything
+      // under it as runtime plumbing keeps an extraction run from being discovered as project
+      // work, which would otherwise let the pipeline feed itself.
+      ignoredWorkspaceRoots: [extractionRunsRoot(config.dataDir)]
     });
     const compactionService = new CompactionService({
       evidence: evidenceSnapshotService,
@@ -191,6 +196,13 @@ export async function createDaemonServer(
       .register("DISCOVER_CODEX_THREADS", (job) => automationService.handleDiscoveryJob(job))
       .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job))
       .register("COMPACT_EVIDENCE", (job) => compactionService.handleCompactionJob(job));
+
+    // The extractor is wired here, but EXTRACT_EVIDENCE_CONTEXT stays deliberately unregistered:
+    // candidates cannot be persisted until the next stage lands, and a job that reported success
+    // without storing anything would lose the extraction silently. Because the scheduler only
+    // claims kinds that have a handler, those jobs stay QUEUED with their retry budget intact
+    // until the handler that persists candidates is registered.
+    const contextExtractor = new CodexContextExtractor({ dataDir: config.dataDir });
     const automationScheduler = new AutomationScheduler({
       repository: automationRepository,
       dispatcher: automationJobRouter,

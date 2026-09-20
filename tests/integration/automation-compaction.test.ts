@@ -442,6 +442,14 @@ describe("compaction of a committed Evidence batch", () => {
     await scheduler.stop();
 
     expect(extractJobs()).toEqual([expect.objectContaining({ status: "QUEUED", attempts: 0 })]);
+
+    // The daemon registers discovery, sync and compaction — and deliberately not extraction, so
+    // the queue keeps the job until the handler that persists candidates exists.
+    const daemonRouter = new AutomationJobRouter()
+      .register("DISCOVER_CODEX_THREADS", async () => {})
+      .register("SYNC_SESSION_TRANSCRIPT", async () => {})
+      .register("COMPACT_EVIDENCE", async () => {});
+    expect(daemonRouter.registeredKinds()).not.toContain("EXTRACT_EVIDENCE_CONTEXT");
   });
 });
 

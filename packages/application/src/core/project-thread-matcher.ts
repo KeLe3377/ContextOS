@@ -32,7 +32,8 @@ export const threadMatchReasons = {
   noProjectMatch: "NO_PROJECT_MATCH",
   projectArchived: "PROJECT_ARCHIVED",
   multipleProjects: "MULTIPLE_PROJECTS_MATCH",
-  parentDirectory: "PARENT_DIRECTORY_MATCH"
+  parentDirectory: "PARENT_DIRECTORY_MATCH",
+  runtimeWorkspace: "RUNTIME_WORKSPACE"
 } as const;
 
 /**
@@ -58,9 +59,19 @@ export function normalizeProjectPath(input: string | null | undefined): string {
 export function matchThreadToProject(input: {
   cwd: string | null | undefined;
   projects: readonly ThreadMatchProject[];
+  /**
+   * Roots the automation runtime owns — the extraction run workspace, for instance. A thread
+   * recorded under one of them is runtime plumbing, never business work, so it is ignored
+   * before any Project matching happens.
+   */
+  ignoredRoots?: readonly string[];
 }): ThreadMatchResult {
   const threadPath = normalizeProjectPath(input.cwd);
   if (!threadPath) return { kind: "IGNORE", reason: threadMatchReasons.missingCwd };
+
+  if (isUnderAnyRoot(threadPath, input.ignoredRoots ?? [])) {
+    return { kind: "IGNORE", reason: threadMatchReasons.runtimeWorkspace };
+  }
 
   const candidates = input.projects
     .map((project) => ({ project, path: normalizeProjectPath(project.rootPath) }))
@@ -114,4 +125,13 @@ function clipLabel(value: string | null | undefined): string | null {
   const collapsed = value?.replace(/\s+/g, " ").trim();
   if (!collapsed) return null;
   return collapsed.length <= maxTitleLength ? collapsed : collapsed.slice(0, maxTitleLength);
+}
+
+function isUnderAnyRoot(path: string, roots: readonly string[]): boolean {
+  for (const root of roots) {
+    const normalized = normalizeProjectPath(root);
+    if (!normalized) continue;
+    if (path === normalized || path.startsWith(`${normalized}/`)) return true;
+  }
+  return false;
 }

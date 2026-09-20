@@ -1,9 +1,15 @@
 import type { Database } from "better-sqlite3";
-import type {
-  CompactionArtifactDto,
-  CompactionArtifactIdentity,
-  CompactionArtifactStatus,
-  CompactionEvent
+import type { z } from "zod";
+import {
+  compactionDecisionsSchema,
+  compactionEventsSchema,
+  compactionStatsSchema,
+  type CompactionArtifactDto,
+  type CompactionArtifactIdentity,
+  type CompactionArtifactStats,
+  type CompactionArtifactStatus,
+  type CompactionDecision,
+  type CompactionEvent
 } from "../../../contracts/src/compaction.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
@@ -14,6 +20,11 @@ import { newId } from "../../../shared/src/id.js";
  * The identity index is what makes compaction idempotent: the same source content under the same
  * provider, sanitizer and options resolves to the artifact that already exists, so a daemon
  * restart or a retried job never recomputes or duplicates it.
+ *
+ * Every JSON column is validated on the way out. `JSON.parse(...) as T` would hand the extractor
+ * whatever the database happens to contain, so a malformed or mismatched row fails loudly with a
+ * stable code instead — and the raw JSON is never echoed into the error, because it holds
+ * transcript content.
  */
 
 export type CompactionArtifactInput = {
@@ -27,8 +38,8 @@ export type CompactionArtifactInput = {
   optionsHash: string;
   status: CompactionArtifactStatus;
   events: CompactionEvent[];
-  decisions: Array<Record<string, unknown>>;
-  stats: Record<string, unknown>;
+  decisions: CompactionDecision[];
+  stats: CompactionArtifactStats;
   failureCode: string | null;
 };
 
@@ -50,17 +61,25 @@ export type CompactionArtifactRow = {
   created_at: number;
   updated_at: number;
   revision: number;
+  /** Joined from the source Evidence row so the artifact can be tied to the exact bytes. */
+  source_evidence_content_hash: string;
 };
+
+const artifactSelect = `
+  SELECT artifact.*, evidence.content_hash AS source_evidence_content_hash
+    FROM compaction_artifacts artifact
+    JOIN evidence_snapshots evidence ON evidence.id = artifact.source_evidence_id
+`;
 
 export class SqliteCompactionArtifactRepository {
   constructor(private readonly db: Database) {}
 
   findByIdentity(identity: CompactionArtifactIdentity): CompactionArtifactDto | null {
     const row = this.db.prepare(
-      `SELECT * FROM compaction_artifacts
-        WHERE source_content_hash = ? AND provider_id = ? AND provider_version = ?
-          AND sanitizer_version = ? AND options_hash = ?
-        ORDER BY created_at ASC, id ASC
+      `${artifactSelect}
+        WHERE artifact.source_content_hash = ? AND artifact.provider_id = ? AND artifact.provider_version = ?
+          AND artifact.sanitizer_version = ? AND artifact.options_hash = ?
+        ORDER BY artifact.created_at ASC, artifact.id ASC
         LIMIT 1`
     ).get(
       identity.sourceContentHash,
@@ -125,7 +144,7 @@ export class SqliteCompactionArtifactRepository {
   }
 
   getById(id: string): CompactionArtifactDto | null {
-    const row = this.db.prepare("SELECT * FROM compaction_artifacts WHERE id = ?").get(id) as CompactionArtifactRow | undefined;
+    const row = this.db.prepare(`${artifactSelect} WHERE artifact.id = ?`).get(id) as CompactionArtifactRow | undefined;
     return row ? mapArtifact(row) : null;
   }
 
@@ -137,12 +156,16 @@ export class SqliteCompactionArtifactRepository {
 
   listByEvidence(evidenceId: string): CompactionArtifactDto[] {
     return (this.db.prepare(
-      "SELECT * FROM compaction_artifacts WHERE source_evidence_id = ? ORDER BY created_at ASC, id ASC"
+      `${artifactSelect} WHERE artifact.source_evidence_id = ? ORDER BY artifact.created_at ASC, artifact.id ASC`
     ).all(evidenceId) as CompactionArtifactRow[]).map(mapArtifact);
   }
 }
 
 function mapArtifact(row: CompactionArtifactRow): CompactionArtifactDto {
+  const events = parseColumn("events_json", row.events_json, compactionEventsSchema);
+  assertAscendingEventOrdinals(events);
+  assertSourceHashMatches(row);
+
   return {
     id: row.id,
     projectId: row.project_id,
@@ -154,12 +177,56 @@ function mapArtifact(row: CompactionArtifactRow): CompactionArtifactDto {
     sanitizerVersion: row.sanitizer_version,
     optionsHash: row.options_hash,
     status: row.status,
-    events: JSON.parse(row.events_json) as CompactionEvent[],
-    decisions: JSON.parse(row.decisions_json) as Array<Record<string, unknown>>,
-    stats: JSON.parse(row.stats_json) as Record<string, unknown>,
+    events,
+    decisions: parseColumn("decisions_json", row.decisions_json, compactionDecisionsSchema),
+    stats: parseColumn("stats_json", row.stats_json, compactionStatsSchema),
     failureCode: row.failure_code,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
     revision: row.revision
   };
+}
+
+function parseColumn<T>(column: string, raw: string, schema: z.ZodType<T>): T {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw invalidArtifact(column, "JSON_PARSE");
+  }
+  const result = schema.safeParse(parsed);
+  if (!result.success) throw invalidArtifact(column, "SCHEMA_MISMATCH");
+  return result.data;
+}
+
+function assertAscendingEventOrdinals(events: readonly CompactionEvent[]): void {
+  let previous: number | null = null;
+  for (const event of events) {
+    if (previous === null) {
+      previous = event.ordinal;
+      continue;
+    }
+    if (event.ordinal === previous) throw invalidArtifact("events_json", "DUPLICATE_ORDINAL");
+    if (event.ordinal < previous) throw invalidArtifact("events_json", "NON_INCREASING_ORDINAL");
+    previous = event.ordinal;
+  }
+}
+
+/** The artifact must still point at the exact Evidence bytes it was derived from. */
+function assertSourceHashMatches(row: CompactionArtifactRow): void {
+  if (row.source_evidence_content_hash !== row.source_content_hash) {
+    throw invalidArtifact("source_content_hash", "SOURCE_HASH_MISMATCH");
+  }
+}
+
+/**
+ * A stable failure the scheduler can retry on. `column` and `reason` are fixed vocabulary and
+ * never carry database content.
+ */
+function invalidArtifact(column: string, reason: string): ContextOsError {
+  return new ContextOsError("CONFLICT", "Compaction artifact content failed validation", {
+    failureCode: "COMPACTION_ARTIFACT_INVALID",
+    column,
+    reason
+  });
 }

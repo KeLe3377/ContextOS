@@ -45,7 +45,10 @@ function createFakeAdapter(id: string, threads: ExternalSessionCandidate[]): Age
   } as unknown as AgentAdapter;
 }
 
-function createService(adapters: AgentAdapter[]): AutomationService {
+function createService(
+  adapters: AgentAdapter[],
+  extra: { ignoredWorkspaceRoots?: readonly string[] } = {}
+): AutomationService {
   const registry = new AgentAdapterRegistry(adapters);
   const sync = new SqliteSessionSyncRepository(client.db);
   const desktopSync = new DesktopSyncService({
@@ -66,6 +69,7 @@ function createService(adapters: AgentAdapter[]): AutomationService {
     evidence: new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(client.db), new FileEvidenceStore(tempDir), reviewItems),
     adapters: registry,
     desktopSync,
+    ignoredWorkspaceRoots: extra.ignoredWorkspaceRoots,
     clock: () => now
   });
 }
@@ -176,6 +180,30 @@ describe("project thread matching", () => {
       .toEqual({ kind: "IGNORE", reason: threadMatchReasons.missingCwd });
     expect(matchThreadToProject({ cwd: "D:\\elsewhere", projects: projectsFixture }))
       .toEqual({ kind: "IGNORE", reason: threadMatchReasons.noProjectMatch });
+  });
+
+  test("ignores threads recorded under a runtime workspace", () => {
+    const ignoredRoots = ["D:\\data\\runs\\extraction"];
+
+    expect(matchThreadToProject({
+      cwd: "D:\\data\\runs\\extraction\\cmp_1",
+      projects: projectsFixture,
+      ignoredRoots
+    })).toEqual({ kind: "IGNORE", reason: threadMatchReasons.runtimeWorkspace });
+
+    // Even a Project registered inside the runtime workspace does not win: plumbing is plumbing.
+    expect(matchThreadToProject({
+      cwd: "D:\\data\\runs\\extraction\\cmp_1",
+      projects: [{ id: "proj_run", rootPath: "D:\\data\\runs\\extraction\\cmp_1", status: "ACTIVE" }],
+      ignoredRoots
+    })).toEqual({ kind: "IGNORE", reason: threadMatchReasons.runtimeWorkspace });
+
+    // A sibling that merely shares a name prefix is not ignored.
+    expect(matchThreadToProject({
+      cwd: "D:\\data\\runs\\extraction-other",
+      projects: projectsFixture,
+      ignoredRoots
+    })).toEqual({ kind: "IGNORE", reason: threadMatchReasons.noProjectMatch });
   });
 
   test("falls back from name to preview to the external id prefix", () => {
@@ -332,6 +360,24 @@ describe("automation discovery", () => {
 
     expect(summary).toMatchObject({ projectsScanned: 0, threadsSeen: 0 });
     expect(projectStatus(project.id).lastDiscoveryAt).toBeNull();
+  });
+
+  test("never binds a thread recorded in the extraction run workspace", async () => {
+    const runsRoot = join(tempDir, "runs", "extraction");
+    const runDir = join(runsRoot, "cmp_1");
+    // The Project root is deliberately placed *inside* the run workspace: without the ignore the
+    // exact match would bind, which is exactly the recursion this guard exists to prevent.
+    const project = createProject("Extraction runs", runDir);
+    const service = createService(
+      [createFakeAdapter("codex", [thread({ externalSessionId: "01a0bbbb-0000-7000-8000-0000000000f1", cwd: runDir })])],
+      { ignoredWorkspaceRoots: [runsRoot] }
+    );
+
+    const summary = await service.discoverCodexThreads();
+
+    expect(summary).toMatchObject({ sessionsCreated: 0, needsReview: 0, ignored: 1 });
+    expect(allSessions()).toHaveLength(0);
+    expect(reviewItems.list({ projectId: project.id, limit: 50 })).toHaveLength(0);
   });
 
   test("scopes discovery to a single project when asked", async () => {

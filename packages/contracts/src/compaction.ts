@@ -15,6 +15,9 @@ export const compactionArtifactStatusSchema = z.enum(["SUCCEEDED", "FALLBACK"]);
 /**
  * Mirrors the transcript event shape. Declared here rather than imported so the contract stays
  * self-contained and validates what it stores.
+ *
+ * Strict on purpose: an event may not smuggle an extra identity or content field past the row
+ * level checks.
  */
 export const compactionEventSchema = z.object({
   ordinal: z.number().int(),
@@ -27,7 +30,30 @@ export const compactionEventSchema = z.object({
   truncated: z.boolean().optional(),
   /** Absent means the transcript carried no outcome signal; it never means "succeeded". */
   isError: z.boolean().optional()
-});
+}).strict();
+
+export const compactionEventsSchema = z.array(compactionEventSchema);
+
+export const compactionDecisionSchema = z.object({
+  callId: z.string().nullable(),
+  ordinal: z.number().int().nullable(),
+  action: z.enum(["KEEP", "TRUNCATE_RESULT"]),
+  reason: z.string().min(1).max(64),
+  charsBefore: z.number().int().nonnegative(),
+  charsAfter: z.number().int().nonnegative()
+}).strict();
+
+export const compactionDecisionsSchema = z.array(compactionDecisionSchema);
+
+export const compactionStatsSchema = z.object({
+  messagesBefore: z.number().int().nonnegative(),
+  messagesAfter: z.number().int().nonnegative(),
+  charsBefore: z.number().int().nonnegative(),
+  charsAfter: z.number().int().nonnegative(),
+  pairedCalls: z.number().int().nonnegative(),
+  truncatedResults: z.number().int().nonnegative(),
+  pinnedMessages: z.number().int().nonnegative()
+}).strict();
 
 export const compactionArtifactIdentitySchema = z.object({
   sourceContentHash: z.string().min(1),
@@ -47,14 +73,16 @@ export const compactionArtifactDtoSchema = resourceMetaSchema.extend({
   sanitizerVersion: z.string(),
   optionsHash: z.string(),
   status: compactionArtifactStatusSchema,
-  events: z.array(compactionEventSchema),
-  decisions: z.array(z.record(z.unknown())),
-  stats: z.record(z.unknown()),
+  events: compactionEventsSchema,
+  decisions: compactionDecisionsSchema,
+  stats: compactionStatsSchema,
   /** Populated only for FALLBACK artifacts; never contains transcript content. */
   failureCode: z.string().nullable()
 });
 
 export type CompactionArtifactStatus = z.infer<typeof compactionArtifactStatusSchema>;
 export type CompactionEvent = z.infer<typeof compactionEventSchema>;
+export type CompactionDecision = z.infer<typeof compactionDecisionSchema>;
+export type CompactionArtifactStats = z.infer<typeof compactionStatsSchema>;
 export type CompactionArtifactIdentity = z.infer<typeof compactionArtifactIdentitySchema>;
 export type CompactionArtifactDto = z.infer<typeof compactionArtifactDtoSchema>;

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { CompactionArtifactStats, CompactionDecision } from "../../../contracts/src/compaction.js";
 import type { EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AutomationJobRecord, SqliteAutomationRepository } from "../../../infrastructure/src/sqlite/automation-repository.js";
 import type { SqliteCompactionArtifactRepository } from "../../../infrastructure/src/sqlite/compaction-artifact-repository.js";
@@ -12,6 +13,7 @@ import {
 } from "./transcript-event-codec.js";
 import {
   compactionMessageChars,
+  findDanglingToolResults,
   type CompactionMessage,
   type CompactionOptions,
   type TranscriptCompactionProvider,
@@ -85,13 +87,19 @@ export class CompactionService {
     let status: "SUCCEEDED" | "FALLBACK" = "SUCCEEDED";
     let failureCode: string | null = null;
     let events = sanitized.events;
-    let decisions: Array<Record<string, unknown>> = [];
-    let stats: Record<string, unknown> = fallbackStats(messages);
+    let decisions: CompactionDecision[] = [];
+    let stats: CompactionArtifactStats = fallbackStats(messages);
 
     try {
       const output = await this.options.provider.compact({ messages, options: this.options.options });
+      // A provider may truncate or drop, but it must never keep a result whose call it removed.
+      // The check lives here because only this layer still holds the input to compare against.
+      const dangling = findDanglingToolResults(messages, output.messages);
+      if (dangling.length > 0) {
+        throw new CompactionInvariantError(`Compaction kept ${dangling.length} tool result(s) without their call`);
+      }
       events = this.options.adapter.toEvents(output.messages);
-      decisions = output.decisions.map((decision) => ({ ...decision }));
+      decisions = [...output.decisions];
       stats = { ...output.stats };
     } catch (error) {
       // The provider failed, not the batch: keep the sanitized events verbatim and record why.
@@ -179,7 +187,7 @@ function expectedIdentity(evidence: EvidenceSnapshotDto): Partial<TranscriptEven
   return expected;
 }
 
-function fallbackStats(messages: readonly CompactionMessage[]): Record<string, unknown> {
+function fallbackStats(messages: readonly CompactionMessage[]): CompactionArtifactStats {
   const chars = messages.reduce((sum, message) => sum + compactionMessageChars(message), 0);
   return {
     messagesBefore: messages.length,
@@ -190,4 +198,14 @@ function fallbackStats(messages: readonly CompactionMessage[]): Record<string, u
     truncatedResults: 0,
     pinnedMessages: 0
   };
+}
+
+/** A provider that violated the compaction contract; its code is recorded on the artifact. */
+class CompactionInvariantError extends Error {
+  readonly code = "COMPACTION_INVARIANT_VIOLATION";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "CompactionInvariantError";
+  }
 }

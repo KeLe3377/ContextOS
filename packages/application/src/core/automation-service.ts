@@ -32,6 +32,11 @@ export type AutomationServiceOptions = {
   evidence: EvidenceSnapshotService;
   adapters: AgentAdapterRegistry;
   desktopSync: DesktopSyncService;
+  /**
+   * Runtime-owned roots (the extraction run workspace) that must never be attributed to a
+   * business Project, so an extraction run cannot feed itself back into the pipeline.
+   */
+  ignoredWorkspaceRoots?: readonly string[];
   clock?: () => number;
 };
 
@@ -120,7 +125,11 @@ export class AutomationService {
           continue;
         }
 
-        const match = matchThreadToProject({ cwd: thread.cwd, projects: matchProjects });
+        const match = matchThreadToProject({
+          cwd: thread.cwd,
+          projects: matchProjects,
+          ignoredRoots: this.options.ignoredWorkspaceRoots ?? []
+        });
         if (match.kind === "IGNORE") {
           summary.ignored += 1;
           continue;
