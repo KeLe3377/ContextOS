@@ -106,6 +106,17 @@ function buildChecks(dir) {
       name: "daemon 入口存在",
       pass: existsSync(join(dir, "dist", "apps", "daemon", "src", "main.js")),
       detail: "编译产物没打进包"
+    },
+    {
+      name: "app-server 线程发现客户端",
+      pass: has("dist/packages/infrastructure/src/adapters/codex-app-server-client.js", "thread/list")
+         && has("dist/packages/infrastructure/src/adapters/codex-adapter.js", "listExternalSessions"),
+      detail: "缺失时 Desktop 同步拿不到候选线程列表"
+    },
+    {
+      name: "候选线程查询路由",
+      pass: has("dist/apps/daemon/src/http/routes/core-resources.js", "desktop-sync/candidates"),
+      detail: "缺失时前端绑定弹窗是空的（会退回手工填 UUID）"
     }
   ];
 }

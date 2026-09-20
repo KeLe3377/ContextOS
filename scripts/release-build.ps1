@@ -108,7 +108,7 @@ try {
   Write-Ok "安装包已生成：$installer ($sizeMb MB)"
 
   if ($SkipVerify) {
-    Write-Step "4/4 跳过自检 (-SkipVerify)"
+    Write-Step "3-4/4 跳过自检 (-SkipVerify)"
     Write-Host ""
     Write-Host "安装包已就绪，但未经自检。发给别人之前请至少手工装一次。" -ForegroundColor Yellow
     exit 0
@@ -136,6 +136,11 @@ try {
   # ------------------------------------------------------------ 4. 内容自检
 
   Write-Step "4/4 内容自检"
+
+  # 自检逻辑放在 scripts/verify-install.mjs 里，这里只负责调用，
+  # 避免同一套 grep 规则在 ps1 与 mjs 两处各写一遍、改的时候漏改。
+  $verifyScript = Join-Path $root "scripts\verify-install.mjs"
+  if (-not (Test-Path $verifyScript)) { Write-Bad "缺少 $verifyScript"; exit 1 }
 
   & $node.Source $verifyScript $verifyDir
   $verifyExit = $LASTEXITCODE

@@ -107,7 +107,7 @@ mv inst/contextos-installer.exe .workbuddy-ai/tmp/...   # 备份旧包
 
 | 文件 | 作用 |
 |---|---|
-| `scripts/verify-install.mjs` | 自检逻辑的**唯一实现**（node）。9 项检查，退出码 0/1/2 |
+| `scripts/verify-install.mjs` | 自检逻辑的**唯一实现**（node）。11 项检查，退出码 0/1/2 |
 | `scripts/release-build.ps1` | 编排：前置检查 → `npm run build:all` → ISCC → 静默安装 → 调 mjs 自检（UTF-8 **带 BOM**） |
 | `scripts/release-build.cmd` | 双击入口（`chcp 65001`） |
 
@@ -125,7 +125,11 @@ node scripts/verify-install.mjs <安装目录>
 node scripts/verify-install.mjs --installer inst/contextos-installer.exe
 ```
 
-自检的 9 项：Desktop 绑定回写 external id、后端 contextHealth 字段名、前端无乱码标识符 `active数据源`、前端 `activeSources`、前端 `desktopSyncAuto`、启动脚本 `Test-NodeCommand`、迁移文件 ≥ 11、前端入口存在、daemon 入口存在。
+自检的 11 项：Desktop 绑定回写 external id、后端 contextHealth 字段名、前端无乱码标识符 `active数据源`、前端 `activeSources`、前端 `desktopSyncAuto`、启动脚本 `Test-NodeCommand`、迁移文件 ≥ 11、前端入口存在、daemon 入口存在、**app-server 线程发现客户端**、**候选线程查询路由**。
+
+后两项是 2026-09-20 补的。原因：L0 那条链路（线程发现）此前一项都没覆盖，
+包里缺了照样 9/9 全绿——自检只能证明“以前踩过的坑没再犯”，补上这两项后
+才覆盖到新功能。
 
 ### 5.1 自检脚本做过正反向测试
 
@@ -146,6 +150,55 @@ node scripts/verify-install.mjs --installer inst/contextos-installer.exe
 ### 5.2 已知限制
 
 `.ps1` 只做了**语法解析校验**（`Parser::ParseFile` → PARSE OK），**未在本环境实跑** —— 当前沙箱的 PowerShell 工具无法执行外部程序（node/npm/ISCC/安装包），且从 bash 调 `powershell` 会被安全策略拒绝。需用户在正常 PowerShell 里跑一次确认。
+
+### 5.3 写完之后发现的三个脚本自身缺陷
+
+语法解析能过不代表能跑通。逐个读完 `.ps1` 之后发现三处，都已修：
+
+| # | 问题 | 后果 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 早先用 `$args` 存安装包参数 | 与 PowerShell **自动变量 `$args`** 冲突，参数会被脚本自己的入参覆盖 | 改名 `$instArgs` |
+| 2 | 自检逻辑在 `.ps1` 里重复实现了一遍 | 同一套 grep 规则两处各写一遍，改的时候必漏一处 | 删掉 ps1 里的副本，改为调用 `verify-install.mjs` |
+| 3 | 改完 #2 后 `$verifyScript` **忘了定义**（第 140 行直接用了） | 第 4 步必然失败：node 收到不存在的路径 | 补 `$verifyScript = Join-Path $root "scripts\verify-install.mjs"`，并加存在性检查 |
+
+第 3 个最典型：它是修第 2 个问题时引入的，而语法解析完全查不出来
+（PowerShell 里引用未定义变量不是语法错误，运行时静默展开成 `$null`）。
+**结论：这类脚本不能只靠 ParseFile 验收，必须实跑一次。**
+
+### 5.4 第二次复跑（含 L0 代码）：11/11 通过
+
+```
+已静默安装到: .workbuddy-ai\tmp\release-verify-l0b
+  [OK] × 11
+自检全部通过 (11/11)。安装包可以分发。
+```
+
+新包 `inst/contextos-installer.exe` = **2,303,045 字节**（10:28 编译，
+ISCC 1.422s）。
+
+### 5.5 包内产物实跑过一次（不只是 grep）
+
+grep 只能证明“文件在包里”，证明不了“能跑起来”。所以又做了一次：
+
+1. 静默安装到 `.workbuddy-ai/tmp/rv-run`
+2. 用**独立数据目录 + 独立端口**启动包内 daemon：
+   `CONTEXTOS_DATA_DIR=...\rv-data CONTEXTOS_PORT=4799 node dist/apps/daemon/src/main.js`
+3. 建项目（`rootPath: D:\project`）→ 建会话 → 打候选接口
+
+结果：
+
+```
+health: 200 {"version":"0.1.3","schemaVersion":11,"processState":"ready",...}
+capabilities: {"desktopReadSync":true,"desktopThreadDiscovery":true,
+               "managedCliResume":false,"desktopUiControl":false}
+candidates HTTP 200
+候选数: 47
+  01a0bc9a | notLoaded | vscode | hello
+cwd 命中 D:\project 的候选: 47
+```
+
+`desktopThreadDiscovery: true`，47 条候选，第 1 条正是新建的 `hello` 线程。
+**安装包里的 L0 是真能用的，不是只把文件打进去了。** 测完卸载并清理。
 
 ---
 

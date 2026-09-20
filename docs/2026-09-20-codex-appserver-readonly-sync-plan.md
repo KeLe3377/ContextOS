@@ -561,3 +561,95 @@ deprecationNotice :: {"summary":"Full-history hydration is deprecated for
 
 相关实测脚本（临时，未纳入仓库）：`.workbuddy-ai/tmp/probe-list.mjs`、`.workbuddy-ai/tmp/probe-read.mjs`。
 此前的协议探针：`scripts/probe-codex-appserver*.mjs`。
+
+---
+
+## 13. Codex 数据落盘位置（2026-09-20 清点）
+
+清点 Codex 对话到底存在哪、有没有漏，是为 L1 做「读取换 app-server」时判断
+还有没有别的入口。结论：**只有一个真实数据目录**，但里面有 4 处容易漏。
+
+### 13.1 唯一根目录
+
+```
+C:\Users\cxsy5\.codex          (CODEX_HOME)
+```
+
+`initialize` 响应的 `codexHome` 指向这里；`config.toml` 里给 MCP server 注入的
+`CODEX_HOME` 也是这个值。**Codex Desktop 与 CLI 共用这一个目录**——Desktop
+装在 `C:\Program Files\WindowsApps\OpenAI.Codex_26.915.4065.0_x64__...`，
+但数据不落在安装包旁边，仍然写 `.codex`。
+
+`AppData\Local\OpenAI\Codex\` 只有 `bin\` 和 `runtimes\`（运行时与缓存），
+**没有对话记录**。全盘搜 `rollout-*.jsonl`，排除 `.codex` 后剩下的全是
+ContextOS 自己的测试残留（`AppData\Local\Temp\contextos-*`）。
+
+### 13.2 四处存放对话的地方
+
+| 位置 | 内容 | 本次清点 |
+| --- | --- | --- |
+| `.codex\sessions\<年>\<月>\<日>\rollout-<时间戳>-<UUID>.jsonl` | 当前 rollout 正文（JSONL） | **375** 个，566 MB |
+| `.codex\archived_sessions\*.jsonl` | 归档 rollout（**平铺，无日期层级**） | **27** 个，4.5 MB |
+| `.codex\state_5.sqlite` → `threads` 表 | 线程元数据索引 | **402** 行 |
+| `.codex\thread_history_1.sqlite` → `thread_turns` / `thread_items` | 历史投影（含 `rollout_byte_offset`） | 3045 / 40525 行 |
+
+**375 + 27 = 402，与 `threads` 表行数完全一致**；双向差集都是 0
+（磁盘有表无 = 0，表有盘无 = 0）。即 `thread/list` 的结果集 =
+`sessions/` ∪ `archived_sessions/`，归档线程照样会出现在列表里，
+只是 rollout 正文换了个目录。
+
+> 易漏点 1：只扫 `sessions/` 会漏掉 27 条归档线程。
+> 易漏点 2：`.codex\session_index.jsonl` 只有 **181** 行，远小于 402，
+> 它是残缺索引/缓存，**不能当全量清单用**。
+> 易漏点 3：`.codex\sqlite\` 下有一份 **6 月的旧 `state_5.sqlite` 副本**
+> （Jun 13），是迁移残留，不是活跃库。别读错。
+> 易漏点 4：`threads.cwd` 存的是 `\\?\D:\project` 这种 **带 `\\?\` 前缀**的
+> 路径，`normalizeTranscriptPath()` 已经在剥这个前缀。
+
+### 13.3 `threads` 表里有 `originator` 列（重要）
+
+不需要解析 rollout 的 `session_meta` 就能分辨 Desktop：
+
+```sql
+SELECT originator, COUNT(*) FROM threads GROUP BY originator;
+-- NULL             375
+-- Codex Desktop     26
+-- codex_vscode       1
+```
+
+26 条 Desktop 线程的 `cwd` 全部是 `\\?\D:\project`，最新的 5 条按
+`updated_at` 降序：
+
+```
+01a0bc9a | hello                          | 1789871926   <- 新建的测试线程，候选列表第 1 位
+01a0bc62 | 查看"D:\project\ContextOS\...   | 1789871903
+01a0bc7d | The following is the Codex...  | 1789868720
+01a0b216 | 查看agent_chat_extractor...     | 1789866897
+01a0ade8 | ``` 请进入 D:\project\Co...    | 1789716157
+```
+
+同一批线程的 `source` 列分布（`source` 存的是**原始 JSON**，app-server 的
+`thread/list` 会把它折叠成顶层键）：
+
+```
+vscode                                        184   <- 26 条 Desktop 混在这里
+{"subagent":{"other":"guardian"}}             173
+cli                                            20
+exec                                            1
+{"subagent":{"thread_spawn":{...}}}  × 24       24
+```
+
+再次印证 §3.2①：**Desktop 线程在 `thread/list` 里报 `source: "vscode"`**，
+`sourceKinds` 里没有 `desktop` 这个枚举值，靠 `source` 分辨不出来。
+
+### 13.4 对 L1 的意义：多了一个本地数据源
+
+`thread/list` 不返回 `originator`，所以走协议仍然拿不到「这条是不是 Desktop
+建的」。但 `state_5.sqlite.threads` 直接有 `originator` + `rollout_path` +
+`archived`，一次查询就是全量 402 条，不必 spawn 进程、不受单写者锁影响。
+
+**暂不采用**，理由：直接读别人的 WAL 模式 SQLite 有锁与版本漂移风险
+（`state_5` 这个文件名后缀本身就说明它会随迁移改名）。列在这里作为 L1 的
+备选方案：如果将来 `thread/list` 的性能或字段不够用，可以退到这条路上，
+用一个「文件名按 glob 匹配 `state_*.sqlite` + 只读连接 + 失败即回退协议」
+的薄封装来做。

@@ -2,7 +2,37 @@
 
 这份文档面向日常使用，不是架构设计稿。目标是让你打开 ContextOS 后知道每个页面能做什么、按钮是什么意思、常见状态如何判断。
 
+更新时间：2026-09-20。当前版本：`0.1.3`。
+
+## 页面与能力总览
+
+| 页面 | 主要用途 | 当前可执行操作 |
+|---|---|---|
+| 概览 | 恢复最近工作 | 查看当前项目、最近 Session、待审查项、就绪 Work Item、Context 健康状态，刷新数据 |
+| 项目 | 定义工作区边界 | 创建、选择、暂停、启用、归档 Project |
+| 会话 | 管理 Agent 工作过程 | 创建、继续、中断、归档、导入或同步 transcript、Desktop 只读同步、编辑和导出 Resume Capsule |
+| 审查收件箱 | 处理治理问题 | 开始、指派、批准、解决、驳回 Review Item，查看操作日志 |
+| 决策 | 保存长期选择 | 创建、编辑、送审、提交审议、接受、取代、撤销、归档，查看版本与对比 |
+| 工作项 | 管理可验收任务 | 创建、编辑、设置父子项和依赖、就绪、开始、阻塞、解阻、送审、完成、重开、取消、启动 Agent Session |
+| 上下文 | 管理证据和派生信息 | 创建/编辑/暂停/恢复/归档 Source，同步文件，查看/比较/校验 Evidence，创建/编辑/版本化 Context Item |
+| 规则 | 管理 Agent 治理指令 | 创建、校验、试算、启用、停用，预览或应用到 `AGENTS.md` / `CLAUDE.md` |
+| 设置 | 管理本地运行选项 | 默认 Adapter、破坏性操作确认、Windows 开机启动、运行健康和 Adapter 可用性 |
+
 ## 启动
+
+### 已安装版本
+
+运行 `inst\contextos-installer.exe` 后，ContextOS 默认安装到 `%LOCALAPPDATA%\ContextOS`，用户数据保存在 `%APPDATA%\ContextOS\.contextos`。
+
+从桌面或开始菜单的 ContextOS 快捷方式启动。启动窗口必须保持打开，然后访问：
+
+```text
+http://127.0.0.1:4721/
+```
+
+卸载会删除安装目录和运行依赖，但保留用户数据。安装版仍要求本机可用 Node.js；首次安装运行时依赖需要网络，尚未覆盖“未安装 Node 且完全离线”的全新机器。
+
+### 从源码启动
 
 在项目根目录运行：
 
@@ -16,6 +46,8 @@ npm run start:local
 ```text
 http://127.0.0.1:4721/
 ```
+
+`start:local` 会优先运行 `dist/apps/daemon/src/main.js`；没有构建产物时回退到 `tsx apps/daemon/src/main.ts`。源码模式默认数据目录是仓库下的 `.contextos/`。
 
 开发验证可运行 `npm test` 做后端/集成回归，运行 `npm run test:e2e` 做桌面与移动视口的浏览器主流程检查。首次运行 E2E 前需要执行一次 `npx playwright install chromium`。
 
@@ -39,7 +71,7 @@ http://127.0.0.1:4721/
 Get-Content -Raw ".contextos\.daemon.lock\owner.json"
 ```
 
-如果里面的 pid 已经不存在，可以删除锁再启动；正常情况下这一步已经由启动过程自动完成：
+如果里面的 pid 已经不存在，可以删除锁再启动；正常情况下这一步已经由启动过程自动完成。删除前必须确认 owner 中的 PID 已不存在：
 
 ```powershell
 Remove-Item -Recurse -Force ".contextos\.daemon.lock"
@@ -68,12 +100,27 @@ npm run start:local
 
 1. 在 `Projects` 确认项目存在，Root path 是 `D:\project\ContextOS`。
 2. 在 `Sessions` 创建一个 Session，写清楚 title 和 intent。
-3. 如果你已经在 Codex 里有一段对话，优先用 `Import Existing Session` 绑定这段已有对话。
-4. 如果只是想保存一段摘要或手动整理内容，用 `Import Transcript` 粘贴文本。
-5. 在 `Context` 添加重要文件为 Source，例如 `README.md` 或设计文档。
-6. 点击 Source 的 sync，生成 Evidence Snapshot。
-7. 在 `Rules` 创建、validate、activate 规则。
-8. 后续再用 `Continue in Agent` 从已绑定的 Session 继续。
+3. 如果你已经在 Codex 或 Claude Code 里有一段对话，用 `Import Existing Session` 导入并绑定它。
+4. 如果你希望持续读取 Codex Desktop 后续新事件，再使用 `Desktop 同步` 选择候选线程或手填 UUID。
+5. 如果只是保存一段摘要或复制来的内容，用 `Import Transcript` 手动粘贴，不要把它当成外部会话绑定。
+6. 在 `Context` 添加重要的 `FILE` Source，例如 `README.md` 或设计文档，并同步生成 Evidence Snapshot。
+7. 从 Evidence 派生 Context Item，按需要启用、标记过期、恢复版本或归档。
+8. 在 `Rules` 创建、校验、试算并启用规则；应用到规则文件前先预览。
+9. 用 `Work Items` 定义可验收任务，必要时从就绪项启动 Session。
+10. 用 `Continue in Agent` 构建不可变 Context Package 并启动或续跑 Agent。
+
+## 概览页面
+
+概览是恢复工作的入口，不用于编辑完整对象。它会显示：
+
+- 当前活动 Project；
+- Session、待处理 Review、就绪 Work Item、活动 Context Item 和活动 Rule 数量；
+- 最近一次 Session；
+- 下一批可执行 Work Item；
+- Context Source 和 Evidence 的健康摘要；
+- 最近 Activity。
+
+点击 `刷新上下文` 会重新加载当前工作区数据。对象的具体修改仍应进入各自页面完成。
 
 ## Sessions 页面
 
@@ -136,6 +183,48 @@ External session ID:
 
 如果 Codex Desktop 是从父目录打开的，例如 transcript metadata 里的 cwd 是 `D:\project`，而 ContextOS Project root 是 `D:\project\ContextOS`，请显式填写 External session ID。显式导入会允许这种父子目录匹配；不填 ID 的自动发现仍然只扫描 Project root 内的 transcript，避免误导入隔壁项目。
 
+### Desktop 同步
+
+Desktop 同步用于持续、只读地摄入 Codex rollout 文件中新追加的结构化事件。它不会向 Codex Desktop 写消息，也不会控制当前 Desktop 窗口。
+
+操作步骤：
+
+1. 在 `Sessions` 选择目标 Session。
+2. 点击顶部 `Desktop 同步`，或详情中的 `绑定会话`。
+3. 等待候选列表加载。ContextOS 会通过 Codex app-server 的只读 `thread/list` 查询项目目录及其父目录下的线程。
+4. 从候选中点击正确线程；候选会显示 UUID 前缀、对话摘要和 cwd。
+5. 如果没有候选，手动粘贴 External session ID。
+6. 选择起始位置后点击绑定。
+
+起始位置：
+
+| 选项 | 行为 | 适用场景 |
+|---|---|---|
+| 从文件末尾开始 | 绑定时不导入历史，只读取绑定后的新内容 | 默认推荐，避免重复摄入大量历史 |
+| 从文件开头重新读取 | 从 byte offset 0 开始读取 | 首次需要完整回放该线程时 |
+
+候选标记“已被其他会话绑定”时不可选择，避免同一外部线程同时绑定多个 ContextOS Session。
+
+绑定成功后可以：
+
+- `立即同步`：读取一次新增的完整 JSONL 行；
+- `自动同步`：停留在 Sessions 页面且会话已绑定时，每 5 秒读取一次；
+- `停止自动同步`：停止轮询，绑定关系仍保留；
+- `重新绑定`：选择另一个路径或重新设定读取起点；
+- `解除绑定`：删除 Desktop 同步状态。
+
+面板会显示同步状态、已摄入事件数、已读字节/文件总字节、最近事件时间、滞后、transcript 路径和最近错误。
+
+需要区分三种相关功能：
+
+| 功能 | 是否绑定 UUID | 是否保存 Evidence | 是否持续增量读取 |
+|---|---:|---:|---:|
+| Import Existing Session | 是 | 是 | 否 |
+| Sync Transcript | 使用现有绑定 | 是 | 手动执行一次完整导入/reconcile |
+| Desktop 同步 | 是，并回写 Session | 否；只持久化同步状态、offset 和计数 | 是，按 byte offset 增量读取 |
+
+候选发现依赖本机 `codex app-server`。如果 app-server 不可用，候选列表会为空，但手动输入 UUID 和文件 tail 同步仍然保留。
+
 ### Import Transcript
 
 用于手动粘贴文本。它只会新增 Evidence，并更新 Resume Capsule；不会绑定外部 Codex session。
@@ -182,6 +271,21 @@ codex exec resume <externalSessionId> -
 
 使用 `Ctrl+C` 正常关闭 ContextOS 时，仍在运行的受管 Agent 进程会被终止；对应 Run 和 Job 会记录为 `CANCELED / DAEMON_SHUTDOWN`，Session 回到 `PAUSED`，下次启动后可以继续。只有 daemon 异常退出、来不及执行关闭流程时，遗留的 `RUNNING` 记录才会在下次启动时恢复为 `FAILED / DAEMON_RESTARTED`。
 
+### Resume Capsule
+
+Resume Capsule 是 Session 的可编辑继续工作摘要。它与不可变 Evidence 不同：可以点击编辑按钮更新摘要、下一步、风险等派生信息，并通过 revision 防止并发覆盖。
+
+点击 `导出摘要胶囊` 会下载当前 Session 的 Capsule 文件，适合交接、归档或交给不直接连接 ContextOS 的 Agent。导出不会修改 Session。
+
+### Sync Transcript
+
+`同步对话记录` 会让当前 Adapter 再次查找已绑定外部会话的 transcript，并按完整导入逻辑进行 reconcile：
+
+- 内容有变化时创建新的 transcript Evidence；
+- 内容未变化时复用已有 Evidence；
+- 更新规范化事件、计数和 Resume Capsule；
+- 不等同于 Desktop 同步的 byte-offset 增量读取。
+
 ### Runtime 信息
 
 `Latest Session Context` 里有一块 `RUNTIME`：
@@ -224,10 +328,10 @@ Codex 本地 transcript 通常在：
 C:\Users\cxsy5\.codex\sessions\YYYY\MM\DD\
 ```
 
-列出今天最新的文件：
+列出最近的文件：
 
 ```powershell
-Get-ChildItem -Recurse -File "C:\Users\cxsy5\.codex\sessions\2026\09\17" -Filter "rollout-*.jsonl" |
+Get-ChildItem -Recurse -File "$env:USERPROFILE\.codex\sessions" -Filter "rollout-*.jsonl" |
   Sort-Object LastWriteTime -Descending |
   Select-Object -First 10 FullName,Length,LastWriteTime
 ```
@@ -235,7 +339,7 @@ Get-ChildItem -Recurse -File "C:\Users\cxsy5\.codex\sessions\2026\09\17" -Filter
 按关键词查：
 
 ```powershell
-rg -n "ContextOS|Continue in Agent|Imported transcript" "C:\Users\cxsy5\.codex\sessions\2026\09\17" -S
+rg -n "ContextOS|Continue in Agent|Imported transcript" "$env:USERPROFILE\.codex\sessions" -S
 ```
 
 文件名里这段就是可用于导入的外部 session ID：
@@ -252,6 +356,8 @@ Projects 管理项目边界。
 常用操作：
 
 - `Add Project`：添加一个工作区。
+- `Pause`：暂停项目；暂停时不能继续启动该项目的 Session。
+- `Activate`：重新启用暂停的项目。
 - `Archive project`：归档项目。归档后默认列表隐藏。
 
 Root path 要填真实项目根目录，例如：
@@ -264,6 +370,8 @@ D:\project\ContextOS
 
 Project 的意义是限制 transcript 自动发现范围。ContextOS 只会导入 cwd 属于该 Project root 的 agent transcript，避免把别的项目对话混进来。
 
+创建 Project 时可以指定允许的 Agent Adapter。Project 详情还会显示关联 Session、Decision、Work Item、Review Item、Context Source 和 Rule 的数量。当前前端没有 Project 编辑表单，顶部 `编辑默认值` 也是禁用入口；全局默认 Adapter 应到 Settings 修改。
+
 ## Context 页面
 
 Context 页面管理上下文来源和 Evidence。
@@ -272,13 +380,13 @@ Context 页面管理上下文来源和 Evidence。
 
 可以添加：
 
-| 类型 | 用途 |
+| 类型 | 当前用途 |
 |---|---|
-| `FILE` | 单个文件，例如 `README.md` |
-| `DIRECTORY` | 目录，例如 `docs/` |
-| `URL` | 网页 |
-| `USER_NOTE` | 手工说明 |
-| `AGENT_OUTPUT` | Agent 输出 |
+| `FILE` | 单个本地文件，例如 `README.md`；当前唯一支持 Sync 的类型 |
+| `DIRECTORY` | 可登记目录位置，但当前不能执行 Sync |
+| `URL` | 可登记网页地址，但当前没有网页抓取器 |
+| `USER_NOTE` | 可登记手工说明来源，但当前没有专用内容编辑器 |
+| `AGENT_OUTPUT` | 可登记 Agent 输出来源；实际运行输出通常由 Session 自动保存为 Evidence |
 
 建议先添加：
 
@@ -292,13 +400,39 @@ Locator: README.md
 
 点击 source 行内的 sync 图标会抓取当前内容，生成 Evidence Snapshot。
 
+当前只支持同步 `ACTIVE + FILE` Source。Locator 可以是 Project root 下的相对路径，也可以是项目边界内的绝对文件路径。`DIRECTORY`、`URL`、`USER_NOTE` 和 `AGENT_OUTPUT` 目前只能登记，点击 Sync 会被后端拒绝。
+
 Evidence Snapshot 是只读证据，用来支撑后续 Context Item、Resume Capsule、Decision 等内容。
+
+内容 hash 与已有 Snapshot 相同时会复用现有 Evidence，不重复写入相同内容。Source 还可以执行编辑、暂停、恢复和归档。
 
 ### Verify Evidence
 
 Evidence 行内 verify 会检查文件型 Evidence 是否仍存在且 hash 匹配。
 
 如果 Evidence 文件丢失或不匹配，系统会生成 Review Item。
+
+Evidence 还支持：
+
+- 查看经过完整性校验的证据正文和 metadata；
+- 复制 Evidence ID、storage ref 和 hash；
+- 将历史 Snapshot 与该 Source 的最新 Snapshot 做文本对比；
+- 从 Snapshot 派生 Context Item。
+
+### Context Item
+
+Context Item 是可治理的派生内容，可以来自 Evidence Snapshot，也可以手动创建。支持的类型包括 `FACT`、`SUMMARY`、`CONSTRAINT`、`OPEN_QUESTION`、`RISK` 和 `HANDOFF`。
+
+可以执行：
+
+- 创建和编辑标题、摘要、正文、置信度；
+- 启用 Draft Item；
+- 将 Active Item 标记为 Stale；
+- 归档 Item；
+- 查看版本历史；
+- 恢复指定历史版本。
+
+只有 `ACTIVE` Context Item 会进入后续 Context Package 的候选集合。Context Item 是派生信息，不应替代它引用的原始 Evidence。
 
 ## Rules 页面
 
@@ -346,7 +480,18 @@ Review 的 start、assign、resolve、dismiss 都会保留 Activity/Audit 记录
 
 Decisions 是长期决策登记。
 
-可以通过 `Record Decision` 创建 Decision，填写 statement、rationale、problem context、alternatives、consequences 和 references。Draft/Proposed Decision 可以编辑，每次正文修改都会生成新版本；详情中可以查看版本历史。当前 UI 提供 Propose、Accept 和 Archive 生命周期动作，已接受或关闭的版本不会被静默改写。
+可以通过 `Record Decision` 创建 Decision，填写 statement、rationale、problem context、alternatives、consequences 和 references。Draft/Proposed Decision 可以编辑，每次正文修改都会生成新版本；详情中可以查看版本历史并选择两个版本对比。
+
+当前生命周期操作：
+
+- `Review`：将 Draft 或 Proposed Decision 送审并创建 Review Item；
+- `Propose`：把 Draft 提交为 Proposed；
+- `Accept`：接受 Draft 或 Proposed Decision；
+- `Supersede`：将已接受决策标记为已被后续决策取代；
+- `Reverse`：撤销已接受决策；
+- `Archive`：归档 Draft、Proposed、Superseded 或 Reversed Decision。
+
+已接受或关闭的版本不会被静默改写；需要改变结果时使用 Supersede 或 Reverse。
 
 适合记录：
 
@@ -389,38 +534,54 @@ Codex adapter 正常应显示 `Available` 和版本号。
 
 现在 ContextOS 可以做：
 
-- 本地 daemon + React 前端运行；
-- 创建、归档 Project；
-- 创建、归档 Session；
-- 启动、继续、中断 Codex managed process；
+- 通过源码或 Windows Inno Setup 安装包运行本地 daemon + React 前端；
+- 使用 SQLite、本地 Evidence 文件和单实例数据目录锁；
+- 创建、暂停、启用、归档 Project；
+- 创建、编辑摘要、归档 Session；
+- 启动、继续、中断 Codex 或 Claude Code managed process；
 - 通过 stdin 给 Codex exec 传 handoff/resume prompt；
-- 自动导入并绑定已有 Codex transcript；
+- 根据已绑定 UUID 执行 Codex CLI resume；
+- 自动导入并绑定已有 Codex 或 Claude Code transcript；
 - 手动粘贴 transcript 作为 Evidence；
-- 查看 Session context package、runtime、resume capsule、Evidence；
-- 添加和同步 Context Source；
-- 创建 Evidence Snapshot；
-- 校验 Evidence 文件完整性；
+- 手动同步已绑定 Agent transcript，并去重 Evidence；
+- 通过 Codex app-server 只读发现候选线程，仍可手填 UUID；
+- 从文件末尾或开头绑定 rollout，立即同步或每 5 秒自动增量读取；
+- 查看 Desktop 同步 offset、文件大小、事件计数、滞后和错误；
+- 查看 Session Context Package、选择原因、runtime、Run History、Activity、Resume Capsule 和 Evidence；
+- 编辑和导出 Resume Capsule；
+- 查看带时间戳和截断标记的 message、tool call、tool result、summary 事件；
+- 添加、编辑、暂停、恢复、归档 Context Source；
+- 同步 FILE Source，按内容 hash 创建或复用 Evidence Snapshot；
+- 查看、复制、比较和校验 Evidence；
+- 从 Evidence 创建 Context Item，编辑、启用、标记过期、归档、查看和恢复版本；
 - 创建、验证、测试、激活、禁用 Rule；
 - 将 ACTIVE Rules 预览并应用到项目 `AGENTS.md` / `CLAUDE.md` 托管块；
 - 完整处理 Review Item 的 start、assign、resolve、dismiss；
-- 创建、编辑、版本化并流转 Decision；
+- 创建、编辑、版本化、对比并完整流转 Decision；
 - 创建、编辑、分层、阻塞并执行 Work Item；
 - 从 Work Item 启动 Session，并回写 Agent Attempt 结果；
-- 查看带时间戳和截断标记的规范化 transcript 事件；
 - 使用 Codex 和 Claude Code adapter；
 - 在 Windows 登录后自动启动本地 daemon；
-- 运行隔离数据目录的桌面/移动端 Playwright 主流程测试。
+- 查看 Runtime Health、失败 Job 和失败 Run；
+- 运行隔离数据目录的桌面/移动端 Playwright 主流程测试；
+- 卸载程序时保留 `%APPDATA%\ContextOS\.contextos` 用户数据。
 
 ## 当前限制
 
 现在还不完善的地方：
 
-- `Continue in Agent` 启动的后台进程不是当前 Codex UI 对话本身；
-- 已有 Codex 对话需要通过 `Import Existing Session` 绑定；
+- `Continue in Agent` 启动的是受管 CLI turn，不是当前 Codex Desktop UI 对话；
+- ContextOS 不能向已打开的 Desktop 任务发消息、点击按钮或控制其 UI；`desktopUiControl` 仍为 false；
+- Desktop 同步是只读文件 tail。app-server 当前只用于发现候选线程，不用于通知流或同步读取；
+- 候选发现依赖 experimental app-server；不可用时需要手填 External session ID；
+- 已绑定的 Desktop 线程仍通过 CLI `resume` 继续，不会让焦点切回 Desktop 原窗口；
 - Cursor adapter 尚未启用；
 - Claude Code 已具备共享 adapter 生命周期和 transcript 规范化，但真实日常主链路仍以 Codex 验证为主；
-- 当前是本地开发版，没有安装器或系统服务；开机启动依赖当前仓库路径和现有 PowerShell 启动脚本；
-- transcript 同步是运行期间轮询和退出后 reconcile，不是 Codex Desktop 当前任务的实时双向 UI 镜像。
+- Context Source 目前只有 `FILE` 类型支持实际 Sync；没有 Directory crawler、URL fetcher 或 User Note 专用编辑器；
+- daemon 重启后会恢复数据库中的孤儿 Run 状态，但不能重新接管旧进程的内存控制句柄；
+- 当前没有 Windows Service；开机启动通过 Startup 文件夹中的 `ContextOS.cmd`；
+- 安装包仍依赖本机 Node.js，尚未完成无 Node、无网络全新机器的完整验证；
+- 当前是单机单用户本地产品，不提供云端账户、多机同步或协作权限系统。
 
 ## 常见问题
 
@@ -481,6 +642,32 @@ stderr
 
 要绑定已有 Codex 对话，用 `Import Existing Session`。
 
+### Desktop 同步没有候选会话
+
+先确认 Codex CLI 可用：
+
+```powershell
+codex --version
+```
+
+候选发现使用 `codex app-server` 的只读 `thread/list`，默认查询 Project root 及其父目录。没有候选不影响手动绑定：从 rollout 文件名复制 UUID，粘贴到 `外部会话 ID`。
+
+如果 UUID 正确但仍无法绑定，检查该线程是否属于当前 Project 或父子 cwd，以及对应 JSONL 是否仍存在。
+
+### Desktop 同步绑定后没有历史事件
+
+默认的“从文件末尾开始”只读取绑定后新增的内容，这是预期行为。需要读取历史时重新绑定并选择“从文件开头重新读取”。
+
+若自动同步已开启但没有变化，确认当前仍停留在 Sessions 页面；5 秒轮询只在会话页、已绑定且开关开启时运行。
+
+### Context Source 无法同步
+
+当前只有 `ACTIVE + FILE` Source 支持 Sync。确认 Locator 指向 Project root 内实际存在的文件。`DIRECTORY`、`URL`、`USER_NOTE` 和 `AGENT_OUTPUT` 暂时不能同步。
+
+### 安装版提示找不到 Node 或依赖
+
+安装版启动脚本会先执行 `node -v`，并检查 `fastify`、`better-sqlite3`、`zod` 等运行依赖。确认 Node.js 已安装并位于 PATH，然后在有网络的环境中重新运行安装程序或启动脚本完成 `npm install --omit=dev`。
+
 ### 怎么把这次 Codex 对话导入
 
 找到 transcript 文件：
@@ -510,6 +697,6 @@ git diff --check
 当前健康基线：
 
 ```text
-Test Files  19 passed
-Tests       97 passed
+Test Files  24 passed
+Tests       124 passed
 ```
