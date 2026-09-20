@@ -10,6 +10,11 @@ import { DecisionService, ReviewItemService, SessionService, WorkItemService } f
 import { RuleService } from "../../../packages/application/src/core/rule-service.js";
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
 import { DesktopSyncService } from "../../../packages/application/src/core/desktop-sync-service.js";
+import {
+  AutomationDispatchError,
+  AutomationScheduler,
+  type AutomationSetTimer
+} from "../../../packages/application/src/core/automation-scheduler.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
@@ -19,6 +24,7 @@ import { AgentAdapterRegistry } from "../../../packages/infrastructure/src/adapt
 import { FileEvidenceStore } from "../../../packages/infrastructure/src/evidence/evidence-store.js";
 import { ProcessSupervisor } from "../../../packages/infrastructure/src/process-supervisor.js";
 import { WindowsStartupRegistration } from "../../../packages/infrastructure/src/startup/windows-startup-registration.js";
+import { SqliteAutomationRepository } from "../../../packages/infrastructure/src/sqlite/automation-repository.js";
 import {
   SqliteDecisionRepository,
   SqliteReviewItemRepository,
@@ -60,6 +66,9 @@ export type CreateDaemonServerOptions = {
   agentAdapter?: AgentAdapter;
   agentAdapters?: AgentAdapter[];
   startupRegistration?: StartupRegistration;
+  /** Test seam: replaces the scheduler's real setTimeout with a controllable timer. */
+  automationSetTimer?: AutomationSetTimer;
+  automationTickIntervalMs?: number;
 };
 
 const packageVersion = "0.1.3";
@@ -144,6 +153,21 @@ export async function createDaemonServer(
     });
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
+    // Automation runs inside the daemon, so background discovery, sync and extraction keep
+    // working while the browser is closed. The scheduler owns only job lifecycle; discovery,
+    // ingestion and extraction handlers are registered on the dispatcher by later tasks.
+    const automationRepository = new SqliteAutomationRepository(sqlite.db);
+    const automationScheduler = new AutomationScheduler({
+      repository: automationRepository,
+      dispatcher: {
+        dispatch: async (job) => {
+          throw new AutomationDispatchError("AUTOMATION_HANDLER_MISSING", `No handler registered for ${job.kind}`);
+        }
+      },
+      setTimer: options.automationSetTimer,
+      tickIntervalMs: options.automationTickIntervalMs
+    });
+
     const server = Fastify({
       logger: false,
       genReqId: (request) => request.headers["x-request-id"]?.toString() ?? randomUUID()
@@ -171,6 +195,7 @@ export async function createDaemonServer(
     processState: "ready",
     recovery: {
       orphanContinuesRecovered,
+      automationJobsRecovered: automationScheduler.getRecoveredJobCount(),
       evidence: {
         ...evidenceFilesRecovery,
         ...evidenceIntegrityRecovery
@@ -243,7 +268,14 @@ export async function createDaemonServer(
     });
   });
 
+    server.addHook("onReady", async () => {
+      automationScheduler.start();
+    });
+
     server.addHook("onClose", async () => {
+      // Stop automation before SQLite closes, otherwise an in-flight dispatch would
+      // fail against a closed database connection.
+      await automationScheduler.stop();
       continueSessionService.shutdown();
       if (sqlite) sqlite.close();
       runtimeLock.release();
