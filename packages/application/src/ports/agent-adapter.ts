@@ -1,4 +1,5 @@
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
+import type { DesktopSyncCandidate } from "../../../contracts/src/sessions.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../../../infrastructure/src/process-supervisor.js";
 
 export type AgentLaunchInput = {
@@ -70,4 +71,13 @@ export interface AgentAdapter {
    */
   resolveTranscriptPath?(input: { externalSessionId: string }): string | null;
   parseTranscriptRows?(input: { rows: string[]; startOrdinal: number }): AgentTranscriptEvent[];
+  /**
+   * Level A thread discovery. Optional: adapters without a live session
+   * index — or a machine where the agent's app-server is unavailable —
+   * resolve to an empty list, and the UI keeps manual id entry as fallback.
+   * `alreadyBound` is filled in by the service, not the adapter.
+   */
+  listExternalSessions?(input: { cwd?: string; limit?: number }): Promise<ExternalSessionCandidate[]>;
 }
+
+export type ExternalSessionCandidate = Omit<DesktopSyncCandidate, "alreadyBound">;

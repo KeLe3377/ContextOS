@@ -658,6 +658,12 @@ export function App() {
     await sendJson(`/api/sessions/${session.id}/desktop-sync`, "DELETE", {});
   }, [sessionById]);
 
+  // Discovery is best effort: an empty list just means manual id entry stays.
+  const loadDesktopSyncCandidates = useCallback(async (sessionId: string) => {
+    const result = (await fetchJson(`/api/sessions/${sessionId}/desktop-sync/candidates`)) as AnyRecord;
+    return (result.candidates ?? []) as AnyRecord[];
+  }, []);
+
   const interruptSession = useCallback(async (sessionId: string) => {
     const session = sessionById(sessionId);
     if (!session) throw new Error("没有可中断的会话");
@@ -976,6 +982,7 @@ export function App() {
         runAction={runAction}
         confirmDestructiveAction={confirmDestructiveAction}
         bindDesktopSync={bindDesktopSync}
+        loadDesktopSyncCandidates={loadDesktopSyncCandidates}
       />
       <EvidenceDetail detail={evidenceDetail} onClose={() => setEvidenceDetail(null)} />
       <EvidenceCompare detail={evidenceCompare} onClose={() => setEvidenceCompare(null)} />
@@ -1692,9 +1699,26 @@ function ContextItemDetail({ detail, actionLoading, runAction, restoreContextIte
   );
 }
 
-function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction, bindDesktopSync }: AnyRecord) {
+function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, sessionDetails, decisionVersions, workItemDetail, selectedProjectId, runAction, confirmDestructiveAction, bindDesktopSync, loadDesktopSyncCandidates }: AnyRecord) {
+  const [desktopCandidates, setDesktopCandidates] = useState<AnyRecord[] | null>(null);
+  const [desktopCandidatePath, setDesktopCandidatePath] = useState("");
+  const [manualExternalId, setManualExternalId] = useState("");
+  const desktopSyncOpen = modal.kind === "desktopSync";
+  const desktopSyncSessionId = desktopSyncOpen ? String(modal.sessionId || "") : "";
   const project = data.projects.find((item: AnyRecord) => item.id === selectedProjectId) || data.projects[0];
   const session = modal.sessionId ? data.sessions.find((item: AnyRecord) => item.id === modal.sessionId) : data.sessions[0];
+  useEffect(() => {
+    if (!desktopSyncOpen || !desktopSyncSessionId || !loadDesktopSyncCandidates) return;
+    let cancelled = false;
+    setDesktopCandidates(null);
+    setDesktopCandidatePath("");
+    setManualExternalId(String(session?.externalSessionId || ""));
+    void loadDesktopSyncCandidates(desktopSyncSessionId)
+      .then((items: AnyRecord[]) => { if (!cancelled) setDesktopCandidates(items); })
+      .catch(() => { if (!cancelled) setDesktopCandidates([]); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktopSyncOpen, desktopSyncSessionId]);
   const review = modal.reviewId ? data.reviews.find((item: AnyRecord) => item.id === modal.reviewId) : data.reviews[0];
   const decision = modal.decisionId ? data.decisions.find((item: AnyRecord) => item.id === modal.decisionId) : data.decisions[0];
   const modalDecisionVersions = decision && decisionVersions?.decisionId === decision.id ? decisionVersions.items : [];
@@ -1839,7 +1863,7 @@ function WorkspaceModal({ modal, setModal, data, defaultAdapterId, adapterList, 
           {modal.kind === "sourceEdit" && source ? <><label>数据源类型<input className="field mono" value={source.sourceType} disabled /></label><label>定位符<input className="field mono" value={source.locator} disabled /></label><label>名称<input className="field" name="name" required defaultValue={source.name} /></label><label>描述<input className="field" name="description" defaultValue={source.description || ""} /></label><div className="muted mono">rev {source.revision} · {source.status}</div></> : null}
           {modal.kind === "transcript" ? <><label>会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>标题<input className="field" name="title" defaultValue="Imported transcript" /></label><label>摘要<input className="field" name="summary" placeholder="摘要胶囊需要记住什么？" /></label><label>对话记录文本<textarea className="field" name="contentText" required rows={9} placeholder="粘贴 Codex 对话记录或重要片段" /></label></> : null}
           {modal.kind === "existingTranscript" ? <><label>ContextOS 会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>外部会话 ID<input className="field mono" name="externalSessionId" placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><label>标题<input className="field" name="title" defaultValue={`Imported ${session?.agentAdapterId || "agent"} transcript`} /></label><label>摘要<input className="field" name="summary" placeholder="摘要胶囊需要记住什么？" /></label></> : null}
-          {modal.kind === "desktopSync" ? <><label>ContextOS 会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>外部会话 ID<input className="field mono" name="externalSessionId" defaultValue={session?.externalSessionId || ""} placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><label>对话记录路径（可选）<input className="field mono" name="transcriptPath" placeholder="留空则按外部会话 ID 自动查找" /></label><label>起始位置<select className="field" name="fromBeginning" defaultValue="false"><option value="false">从文件末尾开始（只同步新内容）</option><option value="true">从文件开头重新读取</option></select></label></> : null}
+          {modal.kind === "desktopSync" ? <><label>ContextOS 会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label>{desktopCandidates === null ? <div className="muted mono">正在查找可绑定的智能体会话...</div> : desktopCandidates.length > 0 ? <div className="detail-wide"><span className="mono muted">发现的会话（点选以填入）</span><div className="stack compact">{desktopCandidates.slice(0, 12).map((candidate: AnyRecord) => <button type="button" className={`btn candidate-btn${manualExternalId === candidate.externalSessionId ? " primary" : ""}`} key={String(candidate.externalSessionId)} disabled={candidate.alreadyBound === true} onClick={() => { setManualExternalId(String(candidate.externalSessionId)); setDesktopCandidatePath(String(candidate.transcriptPath || "")); }}><span className="mono">{String(candidate.externalSessionId).slice(0, 8)}…</span><span className="muted">{String(candidate.preview || "(无摘要)").slice(0, 60)}</span><span className="muted mono">{String(candidate.cwd || "-")}{candidate.alreadyBound === true ? " · 已被其他会话绑定" : ""}</span></button>)}</div></div> : <div className="muted mono">没有自动发现可绑定的会话，可手动粘贴外部会话 ID。</div>}<label>外部会话 ID<input className="field mono" name="externalSessionId" value={manualExternalId} onChange={(event) => { setManualExternalId(event.target.value); setDesktopCandidatePath(""); }} placeholder="01a0ade8-6848-7d91-a328-b7780587365e" /></label><input type="hidden" name="transcriptPath" value={desktopCandidatePath} /><label>起始位置<select className="field" name="fromBeginning" defaultValue="false"><option value="false">从文件末尾开始（只同步新内容）</option><option value="true">从文件开头重新读取</option></select></label></> : null}
           {modal.kind === "resumeCapsule" ? <><label>会话<input className="field mono" value={session?.title || session?.id || ""} disabled /></label><label>摘要<textarea className="field" name="summary" required rows={4} defaultValue={resumeCapsule?.summary || ""} /></label><label>下一步动作<input className="field" name="nextAction" defaultValue={resumeCapsule?.nextAction || ""} placeholder="下一步应该做什么？" /></label></> : null}
           {modal.kind === "reviewAssign" ? <><label>审查<input className="field" value={review?.summary || ""} disabled /></label><label>审查人 ID<input className="field mono" name="reviewerId" required defaultValue={review?.reviewerId || "local-user"} placeholder="local-user" /></label></> : null}
           {modal.kind === "reviewResolve" ? <><label>审查<input className="field" value={review?.summary || ""} disabled /></label><label>解决方案<select name="resolutionType" defaultValue="APPROVED"><option>APPROVED</option><option>FIXED</option><option>ACKNOWLEDGED</option></select></label><label>原因<textarea className="field" name="resolutionReason" required rows={4} placeholder="检查或批准了什么？" /></label></> : null}

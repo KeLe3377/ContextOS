@@ -280,6 +280,12 @@ listExternalSessions?(input: { cwd?: string; limit?: number }): Promise<DesktopS
 
 **风险**：极低。app-server 不可用时该接口返回空数组 + 提示，手动粘贴路径完全保留。
 
+### 5.2.1 实现时从实测修正的三点（与上面原始设计不同）
+
+1. **必须显式传 `sourceKinds`**。协议的默认值是“只返回 interactive 来源”，实测漏掉了 20 条（默认 60 vs 显式 80）。`DEFAULT_SOURCE_KINDS = ["cli","vscode","exec","appServer","unknown"]`，刻意排除 `subAgent*`。
+2. **`source` 不一定是字符串**。可能是对象，例如 `{"subAgent":{"other":"guardian"}}`。客户端统一取顶层键（`subAgent`），并在 adapter 层把这类线程过滤掉——它们是内部记账线程，不是用户工作。
+3. **`turnCount` 对未加载线程不可信**。`thread/list` 对 `status=notLoaded` 的线程返回空 `turns` 数组，显示成“0 轮”会误导。客户端在这种情况下返回 `null`，真实轮数要走 `thread/read`。
+
 ### 5.3 L1：读取改走 app-server（含兜底）
 
 **新增 `packages/infrastructure/src/adapters/codex-app-server-client.ts`**
@@ -391,11 +397,25 @@ parseAppServerItems?(input: { items: unknown[]; startOrdinal: number }): AgentTr
 
 ## 8. 验证计划
 
-**G0（门禁，先做）**
+**G0（门禁）—— 已于 2026-09-20 在 Desktop 运行窗口内实测，结论：部分通过**
 
-- 打开 Codex Desktop 并建/开一个线程，或人工造一条 `source=desktop` 的线程。
-- 跑 `thread/list`，确认该线程出现、且 `path` / `status` 可读。
-- 判定：出现 → L0 可动工；不出现 → L0 收益归零（只剩 P3 可优化），重新评估。
+Desktop 当时确实在运行（`ChatGPT.exe` × 11、`codex` × 2、`codex-code-mode-host`）。实测结果：
+
+| 观察 | 结果 |
+|---|---|
+| `thread/list` 全量（显式传全部 `sourceKinds`） | 80 条：`vscode` 31 / `subAgent` 47 / `exec` 1 / `cli` 1 |
+| 是否存在 `source=desktop` 的线程 | **没有**。`ThreadSourceKind` 枚举里也**没有** desktop 这个值 |
+| `sourceKinds=["appServer"]` | **0 条** |
+| 那 47 条是什么 | `source` 是对象 `{"subAgent":{"other":"guardian"}}`，即 guardian 子代理，`turns=0` |
+| 默认查询（不传 `sourceKinds`） | 只返回 60 条，且**把非 interactive 的线程全过滤掉** |
+
+结论：
+
+1. **无法证实**“Desktop 建的线程会出现在 `thread/list`”——当前机器上所有线程都来自 VS Code 扩展 / CLI / 子代理，没有任何一条可归因于 Desktop。
+2. 但**发现了一个更紧迫的实现陷阱**：不显式传 `sourceKinds` 会静默丢线程（60 vs 80）。已并入实现。
+3. 因此 L0 的价值从“发现 Desktop 线程”降级为“发现本机 Codex 线程”——对 VS Code / CLI 场景**已经可用**，对 Desktop 场景**待补测**。
+
+判定：**L0 继续做**（已实现），但 Desktop 那一半仍标记为未验证。补测方法：在 Desktop 里新建/打开一个线程后，再跑一次 `thread/list` 看是否出现新条目。
 
 **L0 验收**
 
@@ -437,7 +457,31 @@ A：协议带 `[experimental]` 标记且已在发 deprecationNotice，短期成�
 
 ---
 
-## 11. 附录：本次实测原始输出
+## 11. 实现进度
+
+**L0 已落地（2026-09-20）**
+
+| 层 | 改动 |
+|---|---|
+| 新增 | `packages/infrastructure/src/adapters/codex-app-server-client.ts`（stdio JSON-RPC，`initialize` + `thread/list`，含路径/状态/来源/时间戳规范化） |
+| 契约 | `packages/contracts/src/sessions.ts`：`desktopSyncCandidateSchema`、`DesktopSyncCandidate`、`desktopSyncCandidatesQuerySchema`；`SessionSyncCapabilities` 增加 `desktopThreadDiscovery` |
+| 端口 | `agent-adapter.ts`：可选 `listExternalSessions?()`，返回 `ExternalSessionCandidate`（= 候选去掉 `alreadyBound`） |
+| adapter | `codex-adapter.ts` 实现 `listExternalSessions`；失败静默返回 `[]`，保留手动输入路径 |
+| 服务 | `desktop-sync-service.ts`：`listCandidates()` —— 项目 root + 父目录两次查询、按 id 合并去重、标记 `alreadyBound`（排除本会话自身的绑定） |
+| 路由 | `GET /api/sessions/:id/desktop-sync/candidates?cwd=&limit=` |
+| 装配 | `bootstrap.ts` 注入 `resolveProjectRoot` |
+| 前端 | 绑定弹窗增加候选列表（点选填入，已绑定置灰），保留手动粘贴；新增 `.candidate-btn` 样式 |
+| 测试 | `tests/integration/codex-app-server-client.test.ts`（9）、`tests/integration/desktop-sync-candidates.test.ts`（6） |
+
+真实环境验证（Desktop 运行中，会话所属项目 rootPath `D:\work\gdPortMcp`）：接口返回 25 条候选，limit 生效，`turnCount` 为 `null`，`alreadyBound` 正常。
+
+**未做**
+
+- G0 的 Desktop 那一半（见 §8）：未观测到任何可归因于 Desktop 的线程。
+- L1（读取换 app-server + cursor 记账 + 迁移 0012）。
+- L2（通知流）。
+
+## 12. 附录：本次实测原始输出
 
 ```
 $ codex --version

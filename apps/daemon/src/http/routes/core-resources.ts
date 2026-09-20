@@ -5,7 +5,7 @@ import type { DesktopSyncService } from "../../../../../packages/application/src
 import { expectedRevisionSchema, listQuerySchema } from "../../../../../packages/contracts/src/common.js";
 import { decisionInputSchema, decisionPatchSchema } from "../../../../../packages/contracts/src/decisions.js";
 import { reviewAssignSchema, reviewDismissSchema, reviewItemInputSchema, reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
-import { adapterTranscriptImportInputSchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, sessionSyncBindSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
+import { adapterTranscriptImportInputSchema, desktopSyncCandidatesQuerySchema, resumeCapsulePatchSchema, sessionInputSchema, sessionPatchSchema, sessionSyncBindSchema, transcriptImportInputSchema } from "../../../../../packages/contracts/src/sessions.js";
 import { workItemBlockSchema, workItemInputSchema, workItemPatchSchema, workItemResolveBlockerSchema, workItemStartSessionSchema } from "../../../../../packages/contracts/src/work-items.js";
 
 const paramsWithIdSchema = z.object({ id: z.string().min(1) });
@@ -60,6 +60,11 @@ export async function registerCoreResourceRoutes(
   server.get("/api/sessions/:id/desktop-sync", async (request) => {
     const { id } = paramsWithIdSchema.parse(request.params);
     return services.desktopSync!.status(id);
+  });
+  server.get("/api/sessions/:id/desktop-sync/candidates", async (request) => {
+    const { id } = paramsWithIdSchema.parse(request.params);
+    const query = desktopSyncCandidatesQuerySchema.parse(request.query ?? {});
+    return { sessionId: id, candidates: await services.desktopSync!.listCandidates(id, query) };
   });
   server.post("/api/sessions/:id/desktop-sync/bind", async (request, reply) => {
     const { id } = paramsWithIdSchema.parse(request.params);

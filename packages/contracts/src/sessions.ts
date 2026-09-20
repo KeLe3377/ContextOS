@@ -104,11 +104,39 @@ export const sessionSyncBindSchema = z.object({
   fromBeginning: z.boolean().optional()
 });
 
+export const desktopSyncThreadStatusSchema = z.enum(["notLoaded", "idle", "active", "systemError", "unknown"]);
+
+/**
+ * A discoverable external agent thread offered to the user at bind time.
+ * `alreadyBound` marks threads another ContextOS Session already points at,
+ * so the UI can grey them out instead of letting bind fail with CONFLICT.
+ */
+export const desktopSyncCandidateSchema = z.object({
+  externalSessionId: z.string(),
+  transcriptPath: z.string().nullable(),
+  cwd: z.string().nullable(),
+  preview: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  status: desktopSyncThreadStatusSchema.nullable(),
+  source: z.string().nullable(),
+  turnCount: z.number().nullable(),
+  alreadyBound: z.boolean()
+});
+
+export const desktopSyncCandidatesQuerySchema = z.object({
+  cwd: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional()
+});
+
 export type SessionSyncBindInput = z.infer<typeof sessionSyncBindSchema>;
+export type DesktopSyncCandidate = z.infer<typeof desktopSyncCandidateSchema>;
+export type DesktopSyncThreadStatus = z.infer<typeof desktopSyncThreadStatusSchema>;
 export type SessionSyncStatus = "UNBOUND" | "IDLE" | "WATCHING" | "ERROR";
 
 export type SessionSyncCapabilities = {
   desktopReadSync: boolean;
+  /** The adapter can list discoverable external threads for binding. */
+  desktopThreadDiscovery: boolean;
   managedCliResume: boolean;
   desktopUiControl: boolean;
 };

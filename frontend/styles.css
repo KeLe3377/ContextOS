@@ -511,3 +511,14 @@ dialog::backdrop { background: rgb(15 23 42 / 35%); }
   .version-selectors, .compare-values { grid-template-columns: 1fr; }
   .version-row { flex-direction: column; }
 }
+
+.candidate-btn {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-height: 0;
+  width: 100%;
+  text-align: left;
+  font-weight: 500;
+}
+.candidate-btn > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

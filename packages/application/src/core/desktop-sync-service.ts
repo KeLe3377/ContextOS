@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
-import type { AgentAdapter } from "../ports/agent-adapter.js";
-import type { SessionSyncBindInput, SessionSyncResultDto, SessionSyncStateDto } from "../../../contracts/src/sessions.js";
+import { dirname } from "node:path";
+import type { AgentAdapter, ExternalSessionCandidate } from "../ports/agent-adapter.js";
+import type { DesktopSyncCandidate, SessionSyncBindInput, SessionSyncResultDto, SessionSyncStateDto } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { CodexTranscriptTailer } from "../../../infrastructure/src/adapters/codex-transcript-tailer.js";
 import type { SqliteSessionRepository } from "../../../infrastructure/src/sqlite/core-repositories.js";
@@ -21,7 +22,25 @@ export type DesktopSyncServiceOptions = {
    * agent thread instead of resuming the same UUID.
    */
   bindExternalSession?: (input: { sessionId: string; externalSessionId: string }) => void;
+  /**
+   * Used to scope thread discovery to the Session's Project. Without it the
+   * candidate list falls back to an unscoped (still read-only) listing.
+   */
+  resolveProjectRoot?: (projectId: string) => string | null;
 };
+
+/**
+ * Thread discovery is scoped to the Project root first. Codex threads are
+ * usually recorded against a parent directory (a Desktop thread opened for
+ * ContextOS reports `D:\project`, not `D:\project\ContextOS`), so the parent
+ * is queried too and the two result sets are merged.
+ */
+function candidateRoots(explicitCwd: string | undefined, projectRoot: string | null): (string | null)[] {
+  if (explicitCwd) return [explicitCwd];
+  if (!projectRoot) return [null];
+  const parent = dirname(projectRoot);
+  return parent && parent !== projectRoot ? [projectRoot, parent] : [projectRoot];
+}
 
 function isoNow(): string {
   return new Date(nowMs()).toISOString();
@@ -186,12 +205,49 @@ export class DesktopSyncService {
   unbind(sessionId: string): void {
     this.options.sync.remove(sessionId);
   }
+
+  /**
+   * Level A discovery: external agent threads the user could bind to.
+   *
+   * Read-only, never opens or resumes a thread, so it is safe to call while
+   * Codex Desktop is running. Returns an empty list when the adapter has no
+   * discovery support or the agent's app-server is unavailable; the UI then
+   * keeps its manual id entry path.
+   */
+  async listCandidates(sessionId: string, input: { cwd?: string; limit?: number } = {}): Promise<DesktopSyncCandidate[]> {
+    const session = this.options.sessions.getByIdOrThrow(sessionId);
+    const adapter = this.options.adapters.getOrThrow(session.agentAdapterId);
+    if (!adapter.listExternalSessions) return [];
+
+    const projectRoot = this.options.resolveProjectRoot?.(session.projectId) ?? null;
+    const merged = new Map<string, ExternalSessionCandidate>();
+    for (const root of candidateRoots(input.cwd, projectRoot)) {
+      const found = await adapter.listExternalSessions({ cwd: root ?? undefined, limit: input.limit ?? 50 });
+      for (const item of found) {
+        if (!merged.has(item.externalSessionId)) merged.set(item.externalSessionId, item);
+      }
+    }
+
+    const boundElsewhere = new Set(
+      this.options.sync
+        .list()
+        .filter((row) => row.session_id !== sessionId && row.external_session_id)
+        .map((row) => row.external_session_id as string)
+    );
+
+    return [...merged.values()].map((item) => ({
+      ...item,
+      alreadyBound: boundElsewhere.has(item.externalSessionId)
+    }));
+  }
 }
 
 function capabilitiesFor(adapter: AgentAdapter | null, externalSessionId: string | null) {
   return {
     // Reading the agent's own rollout file incrementally is supported.
     desktopReadSync: Boolean(adapter?.resolveTranscriptPath && adapter?.parseTranscriptRows),
+    // Listing discoverable external threads (read-only app-server) is supported.
+    desktopThreadDiscovery: Boolean(adapter?.listExternalSessions),
     // Starting a managed CLI turn against the same UUID is supported.
     managedCliResume: Boolean(adapter && externalSessionId),
     // Driving the open Codex Desktop task is still under investigation.

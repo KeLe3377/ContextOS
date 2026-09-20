@@ -2,10 +2,11 @@ import { spawnSync } from "node:child_process";
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptEvent, AgentTranscriptImportResult } from "../../../application/src/ports/agent-adapter.js";
+import type { AgentAdapter, AgentLaunchInput, AgentLaunchResult, AgentResumeInput, AgentTranscriptEvent, AgentTranscriptImportResult, ExternalSessionCandidate } from "../../../application/src/ports/agent-adapter.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto } from "../../../contracts/src/runtime.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import type { ProcessExitInfo, ProcessSupervisor, SupervisedProcessStatus } from "../process-supervisor.js";
+import { CodexAppServerClient } from "./codex-app-server-client.js";
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex";
@@ -14,17 +15,49 @@ export class CodexAdapter implements AgentAdapter {
   private readonly launchArgs: string[];
   private readonly platform: NodeJS.Platform;
   private readonly sessionsDir: string;
+  private readonly appServer: CodexAppServerClient | null;
 
   constructor(
     command = process.env.CONTEXTOS_CODEX_COMMAND ?? defaultCodexCommand(),
     launchArgs = defaultCodexLaunchArgs(),
     platform = process.platform,
-    sessionsDir = defaultCodexSessionsDir()
+    sessionsDir = defaultCodexSessionsDir(),
+    appServer: CodexAppServerClient | null = null
   ) {
     this.command = command;
     this.launchArgs = launchArgs;
     this.platform = platform;
     this.sessionsDir = sessionsDir;
+    this.appServer = appServer;
+  }
+
+  /**
+   * Level A discovery via `codex app-server` (read-only).
+   *
+   * Swallows failures on purpose: the protocol is marked experimental and
+   * the app-server may be missing or broken. An empty list just means the
+   * UI keeps its manual "paste the external session id" path.
+   */
+  async listExternalSessions(input: { cwd?: string; limit?: number } = {}): Promise<ExternalSessionCandidate[]> {
+    const client = this.appServer ?? new CodexAppServerClient();
+    try {
+      const threads = await client.listThreads({ cwd: input.cwd, limit: input.limit });
+      return threads
+        // Guardian / review sub-agents are internal bookkeeping, not user work.
+        .filter((thread) => thread.source !== "subAgent")
+        .map<ExternalSessionCandidate>((thread) => ({
+          externalSessionId: thread.id,
+          transcriptPath: thread.transcriptPath,
+          cwd: thread.cwd,
+          preview: thread.preview,
+          updatedAt: thread.updatedAt,
+          status: thread.status,
+          source: thread.source,
+          turnCount: thread.turnCount
+        }));
+    } catch {
+      return [];
+    }
   }
 
   discover(): AgentAdapterStatusDto {

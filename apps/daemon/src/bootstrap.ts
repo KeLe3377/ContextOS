@@ -139,7 +139,8 @@ export async function createDaemonServer(
       tailer: new CodexTranscriptTailer(),
       bindExternalSession: ({ sessionId, externalSessionId }) => {
         runtimeRepository.bindExternalSession(sessionId, externalSessionId, nowMs());
-      }
+      },
+      resolveProjectRoot: (projectId) => projectRepository.getById(projectId)?.rootPath ?? null
     });
     const agentAdapterService = new AgentAdapterService(adapterRegistry);
 
