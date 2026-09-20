@@ -61,7 +61,9 @@ function toMessage(event: AgentTranscriptEvent): CompactionMessage {
       role: "user",
       text: "",
       toolUses: [],
-      toolResults: [{ callId: event.callId ?? null, text: event.text ?? "", isError: event.isError === true }],
+      // The outcome stays three-state: `undefined` means the transcript gave no signal, and
+      // compaction must then keep the result rather than assume it succeeded.
+      toolResults: [{ callId: event.callId ?? null, text: event.text ?? "", isError: event.isError }],
       origin
     };
   }
@@ -100,7 +102,8 @@ function toEvent(message: CompactionMessage): AgentTranscriptEvent {
       kind: origin.kind,
       callId: result?.callId ?? origin.callId,
       text: result?.text ?? "",
-      isError: result?.isError === true ? true : undefined
+      // Passed through unchanged so all three states survive the round trip.
+      isError: result?.isError
     });
   }
 

@@ -12,7 +12,7 @@ const transcript: AgentTranscriptEvent[] = [
   { ordinal: 1, timestamp: "2026-09-20T00:00:01.000Z", kind: "message", role: "user", text: "Please fix the parser" },
   { ordinal: 2, timestamp: "2026-09-20T00:00:02.000Z", kind: "summary", text: "Earlier turns summarised" },
   { ordinal: 3, timestamp: "2026-09-20T00:00:03.000Z", kind: "tool_call", name: "shell", callId: "call_a", text: '{"command":"ls -la","cwd":"D:\\\\project"}' },
-  { ordinal: 4, timestamp: "2026-09-20T00:00:04.000Z", kind: "tool_result", callId: "call_a", text: "total 12\ndrwxr-xr-x" },
+  { ordinal: 4, timestamp: "2026-09-20T00:00:04.000Z", kind: "tool_result", callId: "call_a", text: "total 12\ndrwxr-xr-x", isError: false },
   { ordinal: 5, kind: "tool_call", name: "read_file", callId: "call_b", text: '["a.ts","b.ts"]' },
   { ordinal: 6, kind: "tool_result", callId: "call_b", text: "cannot read array input" },
   { ordinal: 7, kind: "tool_call", name: "grep", callId: "call_c", text: "not json at all" },
@@ -48,6 +48,9 @@ describe("compaction adapter round trip", () => {
     const result = messages.find((message) => message.origin.ordinal === 4)!;
     expect(result.toolResults[0]).toMatchObject({ callId: "call_a", text: "total 12\ndrwxr-xr-x", isError: false });
 
+    // Ordinal 6 has no outcome signal at all: it must stay `undefined`, not become `false`.
+    expect(messages.find((message) => message.origin.ordinal === 6)!.toolResults[0]!.isError).toBeUndefined();
+
     const errorResult = messages.find((message) => message.origin.ordinal === 8)!;
     expect(errorResult.toolResults[0]!.isError).toBe(true);
 
@@ -65,6 +68,28 @@ describe("compaction adapter round trip", () => {
     const messages = adapter().toMessages(events);
     expect(messages[0]!.toolUses[0]!.input).toEqual({ command: "ls", cwd: "D:\\project" });
     expect(adapter().toEvents(messages)).toEqual(events);
+  });
+
+  test("preserves all three outcome states through the round trip", () => {
+    const events: AgentTranscriptEvent[] = [
+      { ordinal: 1, kind: "tool_call", name: "shell", callId: "call_ok", text: "{}" },
+      { ordinal: 2, kind: "tool_result", callId: "call_ok", text: "confirmed success", isError: false },
+      { ordinal: 3, kind: "tool_call", name: "shell", callId: "call_bad", text: "{}" },
+      { ordinal: 4, kind: "tool_result", callId: "call_bad", text: "confirmed failure", isError: true },
+      { ordinal: 5, kind: "tool_call", name: "shell", callId: "call_unknown", text: "{}" },
+      { ordinal: 6, kind: "tool_result", callId: "call_unknown", text: "no signal" }
+    ];
+
+    const messages = adapter().toMessages(events);
+    expect(messages.find((message) => message.origin.ordinal === 2)!.toolResults[0]!.isError).toBe(false);
+    expect(messages.find((message) => message.origin.ordinal === 4)!.toolResults[0]!.isError).toBe(true);
+    expect(messages.find((message) => message.origin.ordinal === 6)!.toolResults[0]!.isError).toBeUndefined();
+
+    const rebuilt = adapter().toEvents(messages);
+    expect(rebuilt).toEqual(events);
+    expect(rebuilt.find((event) => event.ordinal === 2)!.isError).toBe(false);
+    expect(rebuilt.find((event) => event.ordinal === 4)!.isError).toBe(true);
+    expect(rebuilt.find((event) => event.ordinal === 6)).not.toHaveProperty("isError");
   });
 
   test("orders output by the original ordinal whatever order the provider returned", () => {

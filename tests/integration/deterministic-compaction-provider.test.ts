@@ -19,15 +19,24 @@ const longText = "x".repeat(6_000);
 const adapter = new ContextOsCompactionAdapter();
 const provider = new DeterministicCompactionProvider();
 
+type ToolOutcome = "success" | "error" | "unknown";
+
+/** `undefined` means the transcript carried no outcome signal at all. */
+function outcomeFlag(outcome: ToolOutcome): boolean | undefined {
+  if (outcome === "error") return true;
+  if (outcome === "unknown") return undefined;
+  return false;
+}
+
 /**
  * A transcript whose oversized tool result sits well before the newest turns:
  * real messages are 1, 4-9, so the newest six are 4-9 and the tail anchor is 9.
  */
-function buildTranscript(overrides: { resultIsError?: boolean; tailToolCall?: boolean } = {}): AgentTranscriptEvent[] {
+function buildTranscript(overrides: { outcome?: ToolOutcome; tailToolCall?: boolean } = {}): AgentTranscriptEvent[] {
   const events: AgentTranscriptEvent[] = [
     { ordinal: 1, kind: "message", role: "user", text: "first turn" },
     { ordinal: 2, kind: "tool_call", name: "shell", callId: "call_1", text: '{"command":"cat big.txt"}' },
-    { ordinal: 3, kind: "tool_result", callId: "call_1", text: longText, isError: overrides.resultIsError === true ? true : undefined },
+    { ordinal: 3, kind: "tool_result", callId: "call_1", text: longText, isError: outcomeFlag(overrides.outcome ?? "success") },
     { ordinal: 4, kind: "message", role: "assistant", text: "reading" },
     { ordinal: 5, kind: "message", role: "user", text: "continue" },
     { ordinal: 6, kind: "message", role: "assistant", text: "working" },
@@ -38,7 +47,7 @@ function buildTranscript(overrides: { resultIsError?: boolean; tailToolCall?: bo
   if (overrides.tailToolCall) {
     events.push(
       { ordinal: 10, kind: "tool_call", name: "shell", callId: "call_tail", text: '{"command":"tail -n 5"}' },
-      { ordinal: 11, kind: "tool_result", callId: "call_tail", text: longText }
+      { ordinal: 11, kind: "tool_result", callId: "call_tail", text: longText, isError: false }
     );
   }
   return events;
@@ -88,11 +97,32 @@ describe("deterministic compaction policy", () => {
   });
 
   test("never truncates an error result", async () => {
-    const { output } = await compact(buildTranscript({ resultIsError: true }));
+    const { output } = await compact(buildTranscript({ outcome: "error" }));
 
     expect(resultTextOf(output, 3)).toBe(longText);
     expect(decisionAt(output, 3)).toMatchObject({ action: "KEEP", reason: "ERROR_RESULT", charsBefore: 6_000, charsAfter: 6_000 });
     expect(output.stats.truncatedResults).toBe(0);
+  });
+
+  test("never truncates a result whose outcome is unknown", async () => {
+    const { output } = await compact(buildTranscript({ outcome: "unknown" }));
+
+    // The transcript carried no signal, so the conservative choice is to keep the text whole.
+    expect(resultTextOf(output, 3)).toBe(longText);
+    expect(decisionAt(output, 3)).toMatchObject({ action: "KEEP", reason: "UNKNOWN_OUTCOME", charsBefore: 6_000, charsAfter: 6_000 });
+    expect(output.stats.truncatedResults).toBe(0);
+  });
+
+  test("truncates only when the outcome is confirmed successful", async () => {
+    const reasons = new Map<ToolOutcome, { action: string; reason: string }>();
+    for (const outcome of ["success", "error", "unknown"] as const) {
+      const { output } = await compact(buildTranscript({ outcome }));
+      reasons.set(outcome, { action: decisionAt(output, 3).action, reason: decisionAt(output, 3).reason });
+    }
+
+    expect(reasons.get("success")).toEqual({ action: "TRUNCATE_RESULT", reason: "TRUNCATED" });
+    expect(reasons.get("error")).toEqual({ action: "KEEP", reason: "ERROR_RESULT" });
+    expect(reasons.get("unknown")).toEqual({ action: "KEEP", reason: "UNKNOWN_OUTCOME" });
   });
 
   test("pins tool work that happened after the newest pinned turn", async () => {
@@ -123,7 +153,7 @@ describe("deterministic compaction policy", () => {
     const atThreshold: AgentTranscriptEvent[] = [
       { ordinal: 1, kind: "message", role: "user", text: "first" },
       { ordinal: 2, kind: "tool_call", name: "shell", callId: "call_1", text: "{}" },
-      { ordinal: 3, kind: "tool_result", callId: "call_1", text: "y".repeat(100) },
+      { ordinal: 3, kind: "tool_result", callId: "call_1", text: "y".repeat(100), isError: false },
       { ordinal: 4, kind: "message", role: "assistant", text: "recent" }
     ];
     const options: CompactionOptions = { preserveRecentMessages: 1, maxToolResultChars: 100, truncateHeadChars: 50 };
@@ -143,12 +173,12 @@ describe("deterministic compaction policy", () => {
   test("never truncates a result whose pairing is missing or ambiguous", async () => {
     const events: AgentTranscriptEvent[] = [
       { ordinal: 1, kind: "message", role: "user", text: "first" },
-      { ordinal: 2, kind: "tool_result", callId: "call_orphan", text: longText },
-      { ordinal: 3, kind: "tool_result", text: longText },
+      { ordinal: 2, kind: "tool_result", callId: "call_orphan", text: longText, isError: false },
+      { ordinal: 3, kind: "tool_result", text: longText, isError: false },
       { ordinal: 4, kind: "tool_call", name: "shell", callId: "call_dup", text: "{}" },
       { ordinal: 5, kind: "tool_call", name: "shell", callId: "call_dup", text: "{}" },
-      { ordinal: 6, kind: "tool_result", callId: "call_dup", text: longText },
-      { ordinal: 7, kind: "tool_result", callId: "call_dup", text: longText },
+      { ordinal: 6, kind: "tool_result", callId: "call_dup", text: longText, isError: false },
+      { ordinal: 7, kind: "tool_result", callId: "call_dup", text: longText, isError: false },
       { ordinal: 8, kind: "message", role: "assistant", text: "recent" }
     ];
 

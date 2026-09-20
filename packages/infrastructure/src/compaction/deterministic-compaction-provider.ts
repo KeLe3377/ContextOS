@@ -172,8 +172,10 @@ function decideResult(
   if (pairing.duplicated.has(result.callId)) return keep("DUPLICATE_CALL_ID");
   if (!pairing.paired.has(result.callId)) return keep("UNPAIRED");
   if (pinned.has(ordinal)) return keep("PINNED");
-  // A failed invocation is exactly the evidence a later step needs, so it is never shortened.
-  if (result.isError) return keep("ERROR_RESULT");
+  // Outcome is three-state. Only a confirmed success may be shortened: a confirmed failure is
+  // exactly the evidence a later step needs, and an unknown outcome means the transcript carried
+  // no signal, so the conservative choice is to keep the text whole.
+  if (result.isError !== false) return keep(result.isError === true ? "ERROR_RESULT" : "UNKNOWN_OUTCOME");
   if (charsBefore <= options.maxToolResultChars) return keep("BELOW_THRESHOLD");
 
   const headChars = Math.min(Math.max(0, options.truncateHeadChars), charsBefore);

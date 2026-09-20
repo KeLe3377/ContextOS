@@ -47,8 +47,14 @@ export type CompactionToolUse = {
 export type CompactionToolResult = {
   callId: string | null;
   text: string;
-  /** The invocation failed; compaction must keep this text verbatim. */
-  isError: boolean;
+  /**
+   * Three-state outcome of the invocation:
+   * - `true`: confirmed failure — keep verbatim.
+   * - `false`: confirmed success — may be compacted.
+   * - `undefined`: unknown, because the transcript carries no signal — keep verbatim.
+   * Compaction may only shorten a result whose outcome is confirmed successful.
+   */
+  isError?: boolean;
 };
 
 /**
@@ -88,6 +94,7 @@ export type CompactionDecisionReason =
   | "PINNED"
   | "BELOW_THRESHOLD"
   | "ERROR_RESULT"
+  | "UNKNOWN_OUTCOME"
   | "UNPAIRED"
   | "DUPLICATE_CALL_ID"
   | "MISSING_CALL_ID"
