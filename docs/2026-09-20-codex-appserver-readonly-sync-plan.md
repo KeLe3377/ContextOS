@@ -606,16 +606,36 @@ ContextOS 自己的测试残留（`AppData\Local\Temp\contextos-*`）。
 > 易漏点 4：`threads.cwd` 存的是 `\\?\D:\project` 这种 **带 `\\?\` 前缀**的
 > 路径，`normalizeTranscriptPath()` 已经在剥这个前缀。
 
-### 13.3 `threads` 表里有 `originator` 列（重要）
+### 13.3 `threads` 表里有 `originator` 列 —— **但这个列基本是空壳（已订正）**
 
-不需要解析 rollout 的 `session_meta` 就能分辨 Desktop：
+> **订正**：本条最初写成「有 originator 列，不用解析 rollout 就能分辨 Desktop」，
+> **这个结论是错的**。逐条比对 402 个 rollout 的首行与 DB 后：
+>
+> ```
+> 对比 402 条 —— 一致 27，不一致 375
+> 其中「DB 是 NULL、rollout 明明写着 Codex Desktop」= 375 条
+> ```
+>
+> 即 `originator` 列**只对最近新建的 27 条线程有值**，其余 375 条全是 NULL。
+> 它是某个版本才加上的列，**没有回填历史数据**。
+> 想分辨 Desktop 只能读 rollout 的 `session_meta`，DB 列不可靠。
+> 下面保留原始统计与反例，作为「不要只看 DB」的警示。
+
+当时的统计（现在看，NULL 那 375 条不是"非 Desktop"，是"没回填"）：
 
 ```sql
 SELECT originator, COUNT(*) FROM threads GROUP BY originator;
--- NULL             375
+-- NULL             375   <- 绝大多数其实是 Desktop，只是没回填
 -- Codex Desktop     26
 -- codex_vscode       1
 ```
+
+反例（用户指出的那个归档线程，正好是典型）：
+
+| 来源 | `originator` |
+|---|---|
+| `archived_sessions/rollout-2026-04-01T16-14-01-019d481b...jsonl` 首行 | `Codex Desktop`（`cli_version 0.118.0-alpha.2`） |
+| `state_5.sqlite.threads` 同一行 | `NULL` |
 
 26 条 Desktop 线程的 `cwd` 全部是 `\\?\D:\project`，最新的 5 条按
 `updated_at` 降序：
@@ -699,3 +719,66 @@ ContextOS 事件流里的「用户消息」，污染 Resume Capsule 与 Context 
 `docs/superpowers/specs/2026-09-20-contextos-jev-tutorial-video-design.md`
 正是这个线程（01a0bc62）在 Desktop 里干的活——同一个 rollout 里有
 「录一个教学视频」「覆盖全部九个页面」「查看 jev-ultrafast-main」等原话。
+
+---
+
+## 14. ContextOS 现在究竟怎么找对话
+
+### 14.1 归档文件长什么样（样本）
+
+`archived_sessions/rollout-2026-04-01T16-14-01-019d481b-4b20-71b3-a29f-4da9dbfad749.jsonl`：
+**43 KB，只有 8 行，1 个 turn**，且**没有助手回复**（线程被放弃，所以被归档）。
+
+```
+行1  session_meta          originator=Codex Desktop, cli_version=0.118.0-alpha.2
+                           cwd=D:\nlp, source=vscode, 2026-04-01
+行2  event_msg/task_started
+行3  message [developer]   <permissions instructions> Filesystem sandboxing...
+行4  message [user]        <environment_context> <cwd>D:\nlp</cwd> ...   <- 注入
+行5  turn_context
+行6  message [user]        "11"                                          <- 真实输入，2 个字符
+行7  event_msg/item_completed
+行8  event_msg/task_complete
+```
+
+43 KB 里真实内容只有「11」两个字。归档的 27 条线程 cwd 分布：
+`D:\nlp` 8 / `D:\work` 6 / `D:\project` 4 / 其余零散 —— **有一部分是当前项目的**，
+即归档目录里确实存在 ContextOS 需要的东西。
+
+### 14.2 现有查找路径：只有一条，就是扫文件
+
+`codex-adapter.ts` 里三个入口，**全部走同一套**：
+
+```ts
+// line 196-198 —— 目录解析优先级
+if (process.env.CONTEXTOS_CODEX_SESSIONS_DIR) return process.env.CONTEXTOS_CODEX_SESSIONS_DIR;
+const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+return join(codexHome, "sessions");        // <- 注意：只拼 "sessions"
+```
+
+然后 `listJsonlFiles(dir)` 递归列出所有 `.jsonl`，对**每一个**文件调
+`readSessionMetadata()` 读**首行**，取出 `payload.id ?? payload.session_id`
+与 `payload.cwd`，再按条件过滤：
+
+| 入口 | 位置 | 怎么筛 |
+| --- | --- | --- |
+| `resolveTranscriptPath` | #136 | 按 `externalSessionId` 匹配 id，命中多个取 `mtime` 最新 |
+| `assertResumeTarget` | #124 | id 匹配 + `pathsOverlap(cwd, metadata.cwd)`，否则抛 CONFLICT |
+| `importTranscript` | #168 | 按 `isPathWithin(cwd, metadata.cwd)` 判归属；有 `correlationText` 时再匹配正文 |
+
+L0 加的 `listExternalSessions()` 是**完全独立的第二条路**：走 app-server
+`thread/list`，不碰文件系统。
+
+### 14.3 三个已知缺陷
+
+1. **不扫 `archived_sessions/`** —— `sessionsDir` 只拼了 `"sessions"`。
+   归档的 27 条（其中 4 条 cwd 就是 `D:\project`）永远找不到。
+   修法很简单：目录列表改成 `[sessions, archived_sessions]` 两个根。
+2. **每次调用全扫 + 读 375 个文件的首行** —— 三个入口都是 O(n) 且各自扫一遍，
+   `importTranscript` 里还对每个候选 `statSync`。文件数涨下去会明显变慢。
+   可加一层「id → path」的轻量索引缓存（按 mtime 失效）。
+3. **强依赖 cwd 归属** —— 项目 `rootPath` 与线程 cwd 必须 `isPathWithin` /
+   `pathsOverlap` 才认，两者语义还不一样，配错就静默找不到。
+
+这三条都属于「文件 tailer 路径」的问题；L1 把读取换成 app-server 之后，
+1 和 2 会自然消失（走 `thread/list` 不扫文件），但 3 仍然存在。
