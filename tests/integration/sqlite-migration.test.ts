@@ -1,5 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
 import { SqliteClient } from "../../packages/infrastructure/src/sqlite/client.js";
@@ -18,6 +19,13 @@ afterEach(async () => {
   }
 });
 
+function tableNames(): string[] {
+  return client!.db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all()
+    .map((row) => (row as { name: string }).name);
+}
+
 describe("SQLite migrations", () => {
   test("migrates an empty database and records schema version", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "contextos-sqlite-"));
@@ -25,15 +33,44 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(11);
-    const tables = client.db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-      .all()
-      .map((row) => (row as { name: string }).name);
+    expect(getSchemaVersion(client)).toBe(12);
+    const tables = tableNames();
 
     for (const tableName of coreTableNames) {
       expect(tables).toContain(tableName);
     }
+  });
+
+  test("upgrades a schema 0011 database to 0012 and backfills project automation settings", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "contextos-sqlite-"));
+    const migrationsDir = resolve(process.cwd(), "migrations");
+    const partialDir = join(tempDir, "migrations-through-0011");
+    await mkdir(partialDir, { recursive: true });
+    for (const name of readdirSync(migrationsDir).filter((entry) => /^\d+_.+\.sql$/.test(entry))) {
+      if (Number(name.split("_", 1)[0]) > 11) continue;
+      await copyFile(join(migrationsDir, name), join(partialDir, name));
+    }
+
+    client = SqliteClient.open({ databaseFile: join(tempDir, "contextos.sqlite") });
+    runMigrations(client, partialDir);
+    expect(getSchemaVersion(client)).toBe(11);
+    expect(tableNames()).not.toContain("automation_jobs");
+
+    client.db.prepare(
+      "INSERT INTO projects (id, name, root_path, root_path_hash, status, created_at, updated_at) VALUES ('proj_upgrade', 'Upgrade', '.', 'hash', 'ACTIVE', 1, 1)"
+    ).run();
+
+    runMigrations(client);
+
+    expect(getSchemaVersion(client)).toBe(12);
+    const tables = tableNames();
+    for (const tableName of coreTableNames) {
+      expect(tables).toContain(tableName);
+    }
+    // Existing rows survive the upgrade, and every Project starts in SUGGEST_ONLY.
+    expect(client.db.prepare("SELECT COUNT(*) AS count FROM projects").get()).toEqual({ count: 1 });
+    expect(client.db.prepare("SELECT mode, poll_interval_ms, max_concurrent_jobs, revision FROM project_automation_settings WHERE project_id = 'proj_upgrade'").get())
+      .toEqual({ mode: "SUGGEST_ONLY", poll_interval_ms: 30_000, max_concurrent_jobs: 1, revision: 1 });
   });
 
   test("enforces foreign keys after migration", async () => {
@@ -61,7 +98,3 @@ describe("SQLite migrations", () => {
       .toThrow("Evidence Snapshots are immutable");
   });
 });
-
-
-
-
