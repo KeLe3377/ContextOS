@@ -49,6 +49,7 @@ export class CodexAdapter implements AgentAdapter {
           externalSessionId: thread.id,
           transcriptPath: thread.transcriptPath,
           cwd: thread.cwd,
+          name: thread.name,
           preview: thread.preview,
           updatedAt: thread.updatedAt,
           status: thread.status,

@@ -115,6 +115,9 @@ export const desktopSyncCandidateSchema = z.object({
   externalSessionId: z.string(),
   transcriptPath: z.string().nullable(),
   cwd: z.string().nullable(),
+  /** Sidebar title from the Desktop app; null when the app never named it. */
+  name: z.string().nullable(),
+  /** Raw first user message. Fallback label when `name` is null. */
   preview: z.string().nullable(),
   updatedAt: z.string().nullable(),
   status: desktopSyncThreadStatusSchema.nullable(),

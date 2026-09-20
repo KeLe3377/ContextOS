@@ -34,6 +34,7 @@ function candidate(id: string, cwd: string): ExternalSessionCandidate {
     externalSessionId: id,
     transcriptPath: `${cwd}\\rollout-${id}.jsonl`,
     cwd,
+    name: null,
     preview: `preview for ${id}`,
     updatedAt: new Date(nowMs()).toISOString(),
     status: "notLoaded",

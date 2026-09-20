@@ -130,6 +130,32 @@ describe("CodexAppServerClient.listThreads", () => {
     expect(second.turnCount).toBeNull();
   });
 
+  it("keeps the sidebar name separate from the first-message preview", async () => {
+    const { client } = clientFor((method) => {
+      if (method === "initialize") return { userAgent: "fake" };
+      return {
+        data: [
+          // The app renamed this one: name and preview differ.
+          { id: "01a0bc9a", cwd: "D:\\project", path: "C:\\a\\1.jsonl", name: "Respond to greeting", preview: "hello" },
+          // Never named by the app: falls back to preview.
+          { id: "01a0bc62", cwd: "D:\\project", path: "C:\\a\\2.jsonl", name: null, preview: "查看归档文档" },
+          // Blank name must behave like a missing one, not an empty label.
+          { id: "01a0bc7d", cwd: "D:\\project", path: "C:\\a\\3.jsonl", name: "   ", preview: "第三条" }
+        ]
+      };
+    });
+
+    const [named, unnamed, blank] = await client.listThreads({});
+    expect(named?.name).toBe("Respond to greeting");
+    expect(named?.preview).toBe("hello");
+
+    expect(unnamed?.name).toBeNull();
+    expect(unnamed?.preview).toBe("查看归档文档");
+
+    expect(blank?.name).toBeNull();
+    expect(blank?.preview).toBe("第三条");
+  });
+
   it("reports a real turn count once a thread is loaded", async () => {
     const { client } = clientFor((method) =>
       method === "initialize"

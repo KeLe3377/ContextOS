@@ -782,3 +782,74 @@ L0 加的 `listExternalSessions()` 是**完全独立的第二条路**：走 app-
 
 这三条都属于「文件 tailer 路径」的问题；L1 把读取换成 app-server 之后，
 1 和 2 会自然消失（走 `thread/list` 不扫文件），但 3 仍然存在。
+
+---
+
+## 15. 候选列表显示侧栏标题（`name`）
+
+### 15.1 两个字段不是一回事
+
+Codex Desktop 侧栏显示的标题**不是**首条用户消息，两者是两个不同的字段：
+
+| 字段 | 含义 | 来源 |
+| --- | --- | --- |
+| `name` | 侧栏标题，应用生成或用户后来重命名 | `threads.name` / `session_index.jsonl.thread_name` |
+| `preview`（≡ `title`） | 首条用户消息原文 | `threads.preview` / rollout |
+
+实测 402 条：**`name` 非空 180 条，`name` ≠ `title` 的有 106 条**。例如：
+
+```
+01a0bc9a  name: "Respond to greeting"
+          preview: "hello"
+01a0b216  name: "对比 agent_chat_extractor 与 ContextOS"
+          preview: "查看agent\_chat\_extractor，对比ContextOS，看看有没有什么地方可以学习"
+```
+
+所以「能看标题选择对话吗」的准确答案是：
+**改造前只看得到 `preview`（首条消息原文），改造后看 `name`（侧栏标题），
+没有 `name` 时回退 `preview`。**
+
+### 15.2 关键发现：`thread/list` 本身就返回 `name`
+
+不需要去读 `state_5.sqlite`。实测 `thread/list` 的单条响应（节选）：
+
+```json
+{
+  "id": "01a0bc9a-567b-72a1-9d18-7bcb2b73928a",
+  "preview": "hello",
+  "cwd": "D:\\project",
+  "source": "vscode",
+  "name": "Respond to greeting",
+  "turns": []
+}
+```
+
+顶层键全集：`agentNickname, agentRole, canAcceptDirectInput, cliVersion,
+createdAt, cwd, ephemeral, extra, forkedFromId, gitInfo, historyMode, id,
+model, modelProvider, name, parentThreadId, path, preview, projectId,
+reasoningEffort, recencyAt, section, sectionEnteredAt, sessionId, source,
+status, threadSource, turns, updatedAt`
+
+之前的实现只取了 `preview`，漏掉 `name` —— 是「没把响应全字段打印出来就
+下结论」的又一次教训（同 §13.3）。
+
+### 15.3 改动
+
+- `codex-app-server-client.ts`：`CodexAppServerThread` 加 `name`，
+  `toThread()` 里空白串按缺失处理（`""` / `"   "` → `null`）。
+- `contracts/sessions.ts`：`desktopSyncCandidateSchema` 加 `name`。
+- `codex-adapter.ts`：`listExternalSessions()` 映射带上 `name`。
+- `App.tsx`：候选按钮文案改成 `candidate.name || candidate.preview || "(无摘要)"`。
+- 测试：新增 1 条覆盖「有 name / name 为 null / name 为空白」三种情况。
+
+### 15.4 端到端验证
+
+```
+候选数: 47，其中有 name 的: 47 / 47
+  name   : Respond to greeting                 preview: hello
+  name   : 对比 agent_chat_extractor 与 ContextOS
+  name   : 恢复 ContextOS 项目上下文
+  name   : 更新 Evidence Store 分区改动
+```
+
+与侧栏标题逐条对得上。全量 `npm test` **125/125 通过**。

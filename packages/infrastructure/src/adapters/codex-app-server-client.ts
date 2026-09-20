@@ -21,6 +21,14 @@ export type CodexAppServerThread = {
   sessionId: string | null;
   cwd: string | null;
   transcriptPath: string | null;
+  /**
+   * Sidebar title as shown by the Desktop app. Distinct from `preview`:
+   * `name` is generated or renamed by the app ("Respond to greeting"),
+   * while `preview` is the raw first user message ("hello"). Absent
+   * (`null`) for threads the app never named — callers should fall back
+   * to `preview` in that case.
+   */
+  name: string | null;
   preview: string | null;
   /** ISO 8601. Derived from the protocol's Unix *seconds* value. */
   updatedAt: string | null;
@@ -206,6 +214,7 @@ function toThread(value: unknown): CodexAppServerThread | null {
     sessionId: typeof row.sessionId === "string" ? row.sessionId : null,
     cwd: typeof row.cwd === "string" ? row.cwd : null,
     transcriptPath: normalizeTranscriptPath(typeof row.path === "string" ? row.path : null),
+    name: typeof row.name === "string" && row.name.trim() ? row.name : null,
     preview: typeof row.preview === "string" ? row.preview : null,
     updatedAt: iso,
     updatedAtEpochSeconds: epoch,
