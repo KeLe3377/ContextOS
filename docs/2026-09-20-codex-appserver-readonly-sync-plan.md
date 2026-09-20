@@ -505,6 +505,23 @@ A：协议带 `[experimental]` 标记且已在发 deprecationNotice，短期成�
 
 真实环境验证（Desktop 运行中，会话所属项目 rootPath `D:\work\gdPortMcp`）：接口返回 25 条候选，limit 生效，`turnCount` 为 `null`，`alreadyBound` 正常。
 
+#### 端到端验证：用 Desktop 线程走完 发现 → 绑定 → 同步
+
+用户在 Desktop 新建的 `hello` 线程（`01a0bc9a-567b-72a1-9d18-7bcb2b73928a`，cwd `D:\project`），拿项目 rootPath 为 `D:\project\ContextOS` 的会话实测：
+
+| 步骤 | 结果 |
+|---|---|
+| `GET .../candidates` | 48 条候选，目标线程在**第 2 位**（第 1 位是项目 root 精确匹配的线程 —— 优先级正确） |
+| `POST .../bind`（直接用语录里的 id + path） | 201 `WATCHING`，`byteOffset 0 / 106685`；`capabilities.managedCliResume` 变为 `true`（外部 id 已回写，Level B 会 resume 而不是新起线程） |
+| `POST .../sync` | `newEvents: 3`，累计 3，读取位置 `106685 / 106685`，`partialLine: false` |
+| 摄入的事件 | `# AGENTS.md instructions…`(user)、**`hello`(user)**、**`Hello! What can I help you with?`(assistant)** |
+| 二次 `sync` | `newEvents: 0`，累计仍为 3（无重复计数） |
+| `DELETE .../desktop-sync` | 200，测试绑定已清理 |
+
+另外顺带验证了一条既有保护：对已经绑定过其它 external id 的会话再 bind，返回 **409 CONFLICT**（`Session is already bound to a different external agent session`）。
+
+**结论：L0 在真实 Desktop 线程上端到端可用。** 用户不再需要手抄 UUID。
+
 **未做**
 
 - L1（读取换 app-server + cursor 记账 + 迁移 0012）。G0 已确认 `thread/read` 对 Desktop 线程可读（1 turn / `userMessage, agentMessage`），前提成立。
