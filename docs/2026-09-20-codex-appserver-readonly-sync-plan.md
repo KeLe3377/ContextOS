@@ -168,11 +168,18 @@ turn 结构：`{id, items, itemsView, status, error, startedAt, completedAt, dur
 → **P3 解决**：不用再自己解析 JSONL。
 → 同时印证上游文档 §7.2 第 4 条：`thread/read` / `thread/list` 不受写锁限制。
 
-**③ `status.type` 免费给出线程活跃状态**
+**③ `status.type`——不是全局活跃状态（已实测更正）**
 
 取值：`notLoaded / idle / active / systemError`。
 
-→ 这本来是 Level C 想换的东西，现在只读就能拿到。
+原以为它能免费提供“这条线程现在有没有人在用”。**实测推翻**：用户在 Desktop 新建了一条线程（Desktop 很可能仍开着它），从另一个 app-server 进程 `thread/read` 返回的仍是 `{"type":"notLoaded"}`。
+
+即 `status` 反映的是**当前这条连接**有没有 load 该线程，**不是全局的持有状态**。所以：
+
+- 不能用它判断“Desktop 是否正在使用这条线程”；
+- 真正要判断占用，只能尝试 `thread/resume` 看是否被写锁拒绝 —— 但那属于 Level C 的写入语义，不在只读范围内。
+
+这一点也顺带说明：Level C 的“控制”价值确实无法被只读 RPC 替代。
 
 **④ 服务端主动指定了增量读法**
 
@@ -285,6 +292,7 @@ listExternalSessions?(input: { cwd?: string; limit?: number }): Promise<DesktopS
 1. **必须显式传 `sourceKinds`**。协议的默认值是“只返回 interactive 来源”，实测漏掉了 20 条（默认 60 vs 显式 80）。`DEFAULT_SOURCE_KINDS = ["cli","vscode","exec","appServer","unknown"]`，刻意排除 `subAgent*`。
 2. **`source` 不一定是字符串**。可能是对象，例如 `{"subAgent":{"other":"guardian"}}`。客户端统一取顶层键（`subAgent`），并在 adapter 层把这类线程过滤掉——它们是内部记账线程，不是用户工作。
 3. **`turnCount` 对未加载线程不可信**。`thread/list` 对 `status=notLoaded` 的线程返回空 `turns` 数组，显示成“0 轮”会误导。客户端在这种情况下返回 `null`，真实轮数要走 `thread/read`。
+4. **Desktop 线程报 `source: "vscode"`**（rollout 的 `session_meta.originator` 才是 `"Codex Desktop"`）。所以过滤条件必须保留 `vscode`，且不能指望用 `source` 区分 Desktop 与 VS Code 扩展。详见 §8。
 
 ### 5.3 L1：读取改走 app-server（含兜底）
 
@@ -401,6 +409,8 @@ parseAppServerItems?(input: { items: unknown[]; startOrdinal: number }): AgentTr
 
 Desktop 当时确实在运行（`ChatGPT.exe` × 11、`codex` × 2、`codex-code-mode-host`）。实测结果：
 
+#### 第一轮（Desktop 运行中，但还没建线程）
+
 | 观察 | 结果 |
 |---|---|
 | `thread/list` 全量（显式传全部 `sourceKinds`） | 80 条：`vscode` 31 / `subAgent` 47 / `exec` 1 / `cli` 1 |
@@ -409,13 +419,33 @@ Desktop 当时确实在运行（`ChatGPT.exe` × 11、`codex` × 2、`codex-code
 | 那 47 条是什么 | `source` 是对象 `{"subAgent":{"other":"guardian"}}`，即 guardian 子代理，`turns=0` |
 | 默认查询（不传 `sourceKinds`） | 只返回 60 条，且**把非 interactive 的线程全过滤掉** |
 
-结论：
+当时无法归因任何线程到 Desktop，因此留了补测项。
 
-1. **无法证实**“Desktop 建的线程会出现在 `thread/list`”——当前机器上所有线程都来自 VS Code 扩展 / CLI / 子代理，没有任何一条可归因于 Desktop。
-2. 但**发现了一个更紧迫的实现陷阱**：不显式传 `sourceKinds` 会静默丢线程（60 vs 80）。已并入实现。
-3. 因此 L0 的价值从“发现 Desktop 线程”降级为“发现本机 Codex 线程”——对 VS Code / CLI 场景**已经可用**，对 Desktop 场景**待补测**。
+#### 第二轮（用户在 Desktop 新建一条 “hello” 线程后）——**门禁通过**
 
-判定：**L0 继续做**（已实现），但 Desktop 那一半仍标记为未验证。补测方法：在 Desktop 里新建/打开一个线程后，再跑一次 `thread/list` 看是否出现新条目。
+新线程 `01a0bc9a-567b-72a1-9d18-7bcb2b73928a`，`cwd=D:\project`，10:17 创建。
+
+- ✅ **出现在 `thread/list`**，而且是全表最新的一条（按 `updatedAt` 倒序第一）。
+- ⚠️ **`source` 是 `"vscode"`，不是 `desktop`**。
+- ✅ `thread/read` 可读：1 个 turn，items = `userMessage, agentMessage` —— L1 的结构化读取前提成立。
+- ❌ `status` 仍为 `notLoaded`，尽管 Desktop 刚创建并很可能仍开着它。
+
+rollout 首行 `session_meta` 给出了决定性的身份信息：
+
+```json
+{ "originator": "Codex Desktop",
+  "cli_version": "0.155.0-alpha.9.2",
+  "source": "vscode",
+  "thread_source": "user" }
+```
+
+**结论：Codex Desktop 把自己的线程标成 `source: "vscode"`**（Desktop 复用了 VS Code 扩展的 source kind）。所以：
+
+1. `DEFAULT_SOURCE_KINDS` **必须包含 `vscode`** —— 如果当初只找 `desktop`，会发现 0 条，直接误判为“不可用”。这一点现在已被实现覆盖。
+2. **单靠 `source` 无法区分 Desktop 线程和 VS Code 扩展线程**。要区分只能读 rollout 的 `session_meta.originator`（`"Codex Desktop"`），而 ContextOS 导入 transcript 时本来就会解析这一行。
+3. 顺带发现**版本错配**：Desktop 内置 `0.155.0-alpha.9.2`，而本机 CLI 是 `0.153.4`。协议按 experimental 对待是对的。
+
+判定：**G0 通过** —— Desktop 线程可被发现，L0 对 Desktop 场景有效。
 
 **L0 验收**
 
@@ -477,9 +507,10 @@ A：协议带 `[experimental]` 标记且已在发 deprecationNotice，短期成�
 
 **未做**
 
-- G0 的 Desktop 那一半（见 §8）：未观测到任何可归因于 Desktop 的线程。
-- L1（读取换 app-server + cursor 记账 + 迁移 0012）。
+- L1（读取换 app-server + cursor 记账 + 迁移 0012）。G0 已确认 `thread/read` 对 Desktop 线程可读（1 turn / `userMessage, agentMessage`），前提成立。
 - L2（通知流）。
+
+**G0 已通过**（见 §8）：Desktop 线程可被 `thread/list` 发现，`thread/read` 可读，但 `source` 报 `vscode`。
 
 ## 12. 附录：本次实测原始输出
 
