@@ -653,3 +653,49 @@ exec                                            1
 备选方案：如果将来 `thread/list` 的性能或字段不够用，可以退到这条路上，
 用一个「文件名按 glob 匹配 `state_*.sqlite` + 只读连接 + 失败即回退协议」
 的薄封装来做。
+
+### 13.5 rollout 文件里真实对话只占 1.6%
+
+打开一个 rollout 会以为「里面全是系统提示词，没有对话」——因为正文确实被
+系统内容淹没了。实测 `sessions/2026/09/20/rollout-...01a0bc62.jsonl`
+（2830 KB，901 行，15 个 turn）的字节构成：
+
+| 类别 | 占比 | 说明 |
+| --- | --- | --- |
+| `event_msg/item_completed` | 53.4% | 工具调用结果 |
+| `custom_tool_call` / `_output` | 23.7% | 工具出入参 |
+| `response_item/reasoning` | 7.4% | 模型推理 |
+| token 计数类 | 5.7% | `token_usage_record` / `token_count` |
+| **系统提示词** | **4.3%** | `session_meta` 0.6% + `turn_context` 1.7% + **developer 消息 2.0%** |
+| **对话：助手消息** | **1.3%** | 54 条 |
+| **对话：用户消息** | **0.3%** | 17 条（其中 2 条是注入，见下） |
+
+看不出对话的原因有三条，都是「单行 JSON 不换行」造成的：
+
+1. 第 1 行 `session_meta` 就是 **18 KB**。
+2. 第 3 行一条 `role: developer` 的消息 **36 KB** 起步（`<app-context>` 等）。
+3. 每个 turn 开头再注入一次 `turn_context`，15 turn × 约 3 KB。
+
+前 8 行几乎全是系统内容，**第 9 行才是用户真正的第一句话**。
+
+### 13.6 待修：两条例外会被当成「用户说的话」导入
+
+`codex-adapter.ts:316` 只按 `role` 过滤（`["user","assistant"]`），
+`developer` 消息被正确挡掉了，但有两类**注入内容挂的是 `role: user`**，会漏进来：
+
+| 位置 | 内容 | 长度 |
+| --- | --- | --- |
+| 第 6 行 | `# AGENTS.md instructions\n<INSTRUCTIONS>...` | 2239 字符 |
+| 第 473 行 | `<environment_context><current_date>...` | 398 字符 |
+
+17 条 user 消息里这 2 条是假的，真实用户输入是 15 条。导入后它们会变成
+ContextOS 事件流里的「用户消息」，污染 Resume Capsule 与 Context Pack。
+
+修法（未实施，等确认）：在 `readCodexEvent` 里对 `role === "user"` 追加
+前缀判断，跳过以 `# AGENTS.md instructions` 或 `<environment_context>` 开头的
+文本。注意别用「含 `<` 就跳过」这类宽泛规则，真实用户输入里也可能有 XML 标签。
+
+**附带确认**：那个此前来源不明的未跟踪文件
+`docs/superpowers/specs/2026-09-20-contextos-jev-tutorial-video-design.md`
+正是这个线程（01a0bc62）在 Desktop 里干的活——同一个 rollout 里有
+「录一个教学视频」「覆盖全部九个页面」「查看 jev-ultrafast-main」等原话。
