@@ -173,11 +173,24 @@ npm start          # 运行编译产物 dist/apps/daemon/src/main.js
 - 启动脚本 `scripts/start-contextos.ps1`、`scripts/start-contextos.cmd`；
 - `package.json` 与 `package-lock.json`。
 
-安装时只安装运行时依赖（`npm install --omit=dev`），因此编译产物必须先由 `npm run build:all` 生成。编译命令：
+安装时只安装运行时依赖（`npm install --omit=dev`），因此编译产物必须先由 `npm run build:all` 生成。
+
+**发版请用脚本，不要手工敲命令：**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\release-build.ps1
+```
+
+或双击 `scripts\release-build.cmd`。它会重建产物 → 重新编译安装包 → 静默安装到临时目录 → 逐项核对关键标记，任何一项不通过就非 0 退出。
+
+> **为什么必须有这一步**：`dist/` 与 `frontend/dist/` 都在 `.gitignore` 里、不进版本库，所以 `inst\contextos-installer.exe` 与当前 HEAD 是否一致**完全靠人记**。曾经出现过安装包比 HEAD 落后 3 个提交、把两个用户可见的真 bug（概览页 KPI 全空；Desktop 同步绑定后「在智能体中继续」新起线程而不是 resume 同一 UUID）一起发出去的情况。
+
+只想到这一步的话，等价的手工命令是：
 
 ```powershell
 npm run build:all
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" contextos.iss
+node scripts\verify-install.mjs --installer inst\contextos-installer.exe
 ```
 
 产物是 `inst\contextos-installer.exe`。安装目录为 `%LOCALAPPDATA%\ContextOS`，用户数据目录为 `%APPDATA%\ContextOS\.contextos`，卸载时会保留用户数据。
