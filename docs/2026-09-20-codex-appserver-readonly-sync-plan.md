@@ -853,3 +853,68 @@ status, threadSource, turns, updatedAt`
 ```
 
 与侧栏标题逐条对得上。全量 `npm test` **125/125 通过**。
+
+---
+
+## 16. 导入一个对话之后，库里存的是什么
+
+问：「选择导入之后，是保留原样，还是有概括、有结构化总结？」
+答：**原文保留 + 结构化事件，但没有概括。**
+
+### 16.1 三层产物
+
+| 层 | 落在哪 | 内容 |
+| --- | --- | --- |
+| 原文全文 | `evidence_snapshots.storage_ref` 指向的磁盘文件 | `contentText`：格式化后的**纯文本**（不是原始 JSON） |
+| 结构化事件 | 同一条 evidence 的 `metadata.events`（JSON 数组，**非独立表**） | `{ordinal, kind, role?, text, timestamp?, callId?, name?}` |
+| 恢复胶囊 | `sessions.runtime_state` | `summary` + 累积的 `evidenceSnapshotIds` |
+
+`kind` 四种：`message` / `tool_call` / `tool_result` / `summary`。
+另有一组统计：`eventCount`、`eventCounts{message,toolCall,toolResult,summary}`、
+`roleCounts{user,assistant}`、`turnCount`、`messageOrdinalStart/End`、`truncated`。
+
+### 16.2 没有「概括」
+
+全仓 grep `summarize` / `generateSummary` / `llm` 无任何命中 —— **不存在任何
+模型生成的摘要**。`summary` 是模板字符串：
+
+```ts
+summary: input.summary ?? `Imported ${imported.messageCount} ${adapter.displayName} transcript messages.`
+// 实测产出："Imported 16 Codex transcript messages."
+title:   input.title   ?? `Imported ${adapter.displayName} transcript`
+```
+
+调用方可以自己传 `title` / `summary` 覆盖，但自动导入路径不会生成。
+
+### 16.3 容量与截断
+
+- 文件 > **50 MB** → 直接 `INVALID_ARGUMENT`（`codex-adapter.ts:236`）
+- `contentText` 上限 **1,000,000 字符**，从后往前取（#265），超了置 `truncated`
+- 单条工具文本上限 20,000 字符（`truncateToolText`）
+- 接口 `/api/sessions/:id/transcript-events` 只返回**最后 200 条**事件
+
+### 16.4 去重
+
+按 `contentHash = sha256(contentText)` 在同一会话内查
+`stream='imported-transcript'` 的已有 evidence，命中则**复用、不重复写盘**，
+只做一次 `bindExternalSession`。
+
+### 16.5 实测一次
+
+```
+POST /api/sessions/{id}/import-transcript/auto  -> 201
+sizeBytes 183313 · parserVersion codex-jsonl.v5 · transcriptTruncated false
+eventCount 61 = message 16 + toolCall 15 + toolResult 15 + summary 15
+roleCounts { user: 5, assistant: 11 } · turnCount 5
+resumeCapsule.summary = "Imported 16 Codex transcript messages."
+```
+
+**顺带坐实 §13.6 的污染问题**：事件 #1 就是
+`# AGENTS.md instructions <INSTRUCTIONS> ...` —— 注入确实进了事件流，
+不是理论推测。
+
+### 16.6 代码位置
+
+`codex-adapter.ts:234` parseCodexTranscript / `:308` readCodexEvent ·
+`runtime-services.ts:249` importAdapterTranscriptInternal / `:312` persistTranscript /
+`:138` getTranscriptEvents · `runtime-repository.ts:481` importSessionTranscript。
