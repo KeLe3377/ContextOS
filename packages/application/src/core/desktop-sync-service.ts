@@ -5,7 +5,7 @@ import type { DesktopSyncCandidate, SessionSyncBindInput, SessionSyncResultDto, 
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
 import type { CodexTranscriptTailer } from "../../../infrastructure/src/adapters/codex-transcript-tailer.js";
 import type { SqliteSessionRepository } from "../../../infrastructure/src/sqlite/core-repositories.js";
-import type { SessionSyncStateRow, SqliteSessionSyncRepository } from "../../../infrastructure/src/sqlite/session-sync-repository.js";
+import type { SessionSyncStateRow, SessionSyncStateUpsert, SqliteSessionSyncRepository } from "../../../infrastructure/src/sqlite/session-sync-repository.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 
@@ -47,6 +47,22 @@ export type DesktopSyncBatch = {
   partialLine: boolean;
   resetReason: "offset_beyond_eof" | null;
   events: AgentTranscriptEvent[];
+};
+
+/**
+ * Result of reading a transcript without committing anything. The caller persists `nextState`
+ * as part of whatever wider unit of work it owns.
+ */
+export type DesktopSyncRead = {
+  state: SessionSyncStateRow;
+  events: AgentTranscriptEvent[];
+  /** Set when the transcript could not be read; `nextState` then carries the ERROR row. */
+  readError: string | null;
+  nextState: SessionSyncStateUpsert;
+  partialLine: boolean;
+  resetReason: "offset_beyond_eof" | null;
+  /** Non-null only when the read produced events worth capturing as Evidence. */
+  batch: DesktopSyncBatch | null;
 };
 
 /**
@@ -169,18 +185,20 @@ export class DesktopSyncService {
   }
 
   sync(sessionId: string): SessionSyncResultDto {
-    return this.syncForIngestion(sessionId).result;
+    const read = this.read(sessionId);
+    this.options.sync.upsert(read.nextState);
+    return this.toSyncResult(sessionId, read);
   }
 
   /**
-   * Same parser/offset path as `sync()`, plus the descriptor the automation pipeline needs
-   * to persist the newly ingested batch as immutable Evidence.
+   * Reads and parses new transcript rows without writing anything.
    *
-   * The offset is already committed by the time this returns, so a later Evidence write can
-   * never roll the reader back over events that have been accounted for. `batch` is null when
-   * the read produced no new events.
+   * The caller owns the commit. Automatic ingestion has to persist the Evidence Snapshot, the
+   * advanced offset and the derived job as one unit, so advancing the offset here would be
+   * lossy — a crash in between would leave the reader past events that were never captured.
+   * `nextState` is exactly what has to be persisted once the batch is durably captured.
    */
-  syncForIngestion(sessionId: string): { result: SessionSyncResultDto; batch: DesktopSyncBatch | null } {
+  read(sessionId: string): DesktopSyncRead {
     const state = this.options.sync.get(sessionId);
     if (!state) {
       throw new ContextOsError("NOT_FOUND", "Session is not bound to a transcript", { sessionId });
@@ -190,55 +208,44 @@ export class DesktopSyncService {
       throw new ContextOsError("INVALID_ARGUMENT", "Agent adapter cannot parse transcript rows", { adapterId: state.adapter_id });
     }
 
-    let result;
+    let tailed;
     try {
-      result = this.options.tailer.read({ path: state.transcript_path, offset: state.byte_offset });
+      tailed = this.options.tailer.read({ path: state.transcript_path, offset: state.byte_offset });
     } catch (error) {
       // A temporarily unreadable rollout keeps the last successful offset, so the next poll
       // retries from the same place instead of dropping or replaying events.
       const message = error instanceof Error ? error.message : "Failed to read transcript";
-      this.options.sync.upsert({ ...rowToUpsert(state), status: "ERROR", lastError: message, updatedAt: isoNow() });
       return {
-        result: { ...this.status(sessionId), newEvents: 0, newEventTimestamps: 0, partialLine: false, resetReason: null, events: [] },
+        state,
+        events: [],
+        readError: message,
+        nextState: { ...rowToUpsert(state), status: "ERROR", lastError: message, updatedAt: isoNow() },
+        partialLine: false,
+        resetReason: null,
         batch: null
       };
     }
 
-    const lines = result.rows.map((row) => row.line);
-    const events = adapter.parseTranscriptRows({ rows: lines, startOrdinal: state.events_ingested });
-    const timestamped = events.filter((event) => Boolean(event.timestamp));
-    const lastEventAt = timestamped.at(-1)?.timestamp ?? state.last_event_at;
-
-    this.options.sync.upsert({
+    const events = adapter.parseTranscriptRows({ rows: tailed.rows.map((row) => row.line), startOrdinal: state.events_ingested });
+    const firstRow = tailed.rows[0];
+    const nextState: SessionSyncStateUpsert = {
       ...rowToUpsert(state),
-      byteOffset: result.nextOffset,
+      byteOffset: tailed.nextOffset,
       eventsIngested: state.events_ingested + events.length,
-      lastEventAt,
+      lastEventAt: events.filter((event) => Boolean(event.timestamp)).at(-1)?.timestamp ?? state.last_event_at,
       lastSyncedAt: isoNow(),
       status: "WATCHING",
-      lastError: result.resetReason ? `Transcript offset reset: ${result.resetReason}` : null,
+      lastError: tailed.resetReason ? `Transcript offset reset: ${tailed.resetReason}` : null,
       updatedAt: isoNow()
-    });
+    };
 
-    const firstRow = result.rows[0];
     return {
-      result: {
-        ...this.status(sessionId),
-        newEvents: events.length,
-        newEventTimestamps: timestamped.length,
-        partialLine: result.partialLine,
-        resetReason: result.resetReason,
-        events: events.map((event) => ({
-          ordinal: event.ordinal,
-          timestamp: event.timestamp,
-          kind: event.kind,
-          role: event.role,
-          text: event.text,
-          name: event.name,
-          callId: event.callId,
-          truncated: event.truncated
-        }))
-      },
+      state,
+      events,
+      readError: null,
+      nextState,
+      partialLine: tailed.partialLine,
+      resetReason: tailed.resetReason,
       batch: events.length > 0 && firstRow
         ? {
             sessionId,
@@ -249,12 +256,33 @@ export class DesktopSyncService {
             startOrdinal: state.events_ingested,
             endOrdinal: state.events_ingested + events.length,
             startByteOffset: firstRow.byteStart,
-            endByteOffset: result.nextOffset,
-            partialLine: result.partialLine,
-            resetReason: result.resetReason,
+            endByteOffset: tailed.nextOffset,
+            partialLine: tailed.partialLine,
+            resetReason: tailed.resetReason,
             events
           }
         : null
+    };
+  }
+
+  /** Builds the public sync result for a read whose `nextState` has already been persisted. */
+  private toSyncResult(sessionId: string, read: DesktopSyncRead): SessionSyncResultDto {
+    return {
+      ...this.status(sessionId),
+      newEvents: read.events.length,
+      newEventTimestamps: read.events.filter((event) => Boolean(event.timestamp)).length,
+      partialLine: read.partialLine,
+      resetReason: read.resetReason,
+      events: read.events.map((event) => ({
+        ordinal: event.ordinal,
+        timestamp: event.timestamp,
+        kind: event.kind,
+        role: event.role,
+        text: event.text,
+        name: event.name,
+        callId: event.callId,
+        truncated: event.truncated
+      }))
     };
   }
 

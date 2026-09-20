@@ -226,7 +226,7 @@ describe("desktop sync ingestion batches", () => {
     await rm(batchDir, { recursive: true, force: true });
   });
 
-  it("returns the ordinal and byte range of the ingested batch", () => {
+  it("returns the ordinal and byte range of the ingested batch without committing it", () => {
     const service = new DesktopSyncService({
       sessions: batchSessions,
       sync: new SqliteSessionSyncRepository(batchClient!.db),
@@ -236,9 +236,10 @@ describe("desktop sync ingestion batches", () => {
 
     service.bind(batchSessionId, { externalSessionId: batchExternalSessionId, fromBeginning: true });
 
-    const first = service.syncForIngestion(batchSessionId);
-    expect(first.result.newEvents).toBe(2);
-    expect(first.batch).toMatchObject({
+    const read = service.read(batchSessionId);
+    expect(read.events).toHaveLength(2);
+    expect(read.readError).toBeNull();
+    expect(read.batch).toMatchObject({
       sessionId: batchSessionId,
       adapterId: "codex",
       externalSessionId: batchExternalSessionId,
@@ -249,13 +250,21 @@ describe("desktop sync ingestion batches", () => {
       partialLine: false,
       resetReason: null
     });
-    expect(first.batch!.startByteOffset).toBe(0);
-    expect(first.batch!.endByteOffset).toBe(first.result.byteOffset);
-    expect(first.batch!.events.map((event) => event.text)).toEqual(["one", "two"]);
+    expect(read.batch!.startByteOffset).toBe(0);
+    expect(read.batch!.endByteOffset).toBe(read.nextState.byteOffset);
+    expect(read.batch!.events.map((event) => event.text)).toEqual(["one", "two"]);
+
+    // Reading alone must not move the reader: the caller owns the commit, which is what lets
+    // ingestion persist the Evidence Snapshot and the offset as one unit.
+    expect(service.status(batchSessionId).byteOffset).toBe(0);
+    expect(service.status(batchSessionId).eventsIngested).toBe(0);
+
+    service.sync(batchSessionId);
+    expect(service.status(batchSessionId).byteOffset).toBe(read.nextState.byteOffset);
 
     // Nothing new to read means nothing to persist.
-    const second = service.syncForIngestion(batchSessionId);
-    expect(second.result.newEvents).toBe(0);
+    const second = service.read(batchSessionId);
+    expect(second.events).toHaveLength(0);
     expect(second.batch).toBeNull();
   });
 });

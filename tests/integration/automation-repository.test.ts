@@ -177,6 +177,18 @@ describe("automation job storage", () => {
     expect(attemptsByJob[later.job.id]).toEqual({ attempt_number: 1, status: "STARTED" });
   });
 
+  test("claims only the job kinds the caller can run", () => {
+    const sync = enqueueSyncJob({ idempotencyKey: "sync" });
+    repository.enqueue(
+      { kind: "DISCOVER_CODEX_THREADS", projectId, resourceType: "PROJECT", resourceId: "all", idempotencyKey: "discover", availableAt: now },
+      now
+    );
+
+    expect(repository.claimNext(now, ["DISCOVER_CODEX_THREADS"])?.kind).toBe("DISCOVER_CODEX_THREADS");
+    expect(repository.claimNext(now, [])).toBeNull();
+    expect(repository.claimNext(now, ["SYNC_SESSION_TRANSCRIPT"])?.id).toBe(sync.job.id);
+  });
+
   test("a RUNNING job can succeed", () => {
     const { job } = enqueueSyncJob();
     repository.claimNext(now);

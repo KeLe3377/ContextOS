@@ -10,6 +10,7 @@ import {
   type AutomationSetTimer
 } from "../../packages/application/src/core/automation-scheduler.js";
 import type { AutomationJobStatus } from "../../packages/contracts/src/automation.js";
+import { automationJobKindSchema, type AutomationJobKind } from "../../packages/contracts/src/automation.js";
 import type { AutomationJobFailure, AutomationJobRecord } from "../../packages/infrastructure/src/sqlite/automation-repository.js";
 
 const baseTime = 1_760_000_000_000;
@@ -65,10 +66,11 @@ class FakeAutomationRepository implements AutomationSchedulerRepository {
     return this.recoveredJobs;
   }
 
-  claimNext(now: number): AutomationJobRecord | null {
+  claimNext(now: number, kinds: readonly AutomationJobKind[]): AutomationJobRecord | null {
     if (this.failClaimWith) throw this.failClaimWith;
+    const claimable = new Set(kinds);
     const due = [...this.jobs.values()]
-      .filter((entry) => entry.record.status === "QUEUED" && entry.dueAt <= now)
+      .filter((entry) => entry.record.status === "QUEUED" && entry.dueAt <= now && claimable.has(entry.record.kind))
       .sort((left, right) => left.dueAt - right.dueAt);
     const next = due[0];
     if (!next) return null;
@@ -114,8 +116,13 @@ class FakeDispatcher implements AutomationJobDispatcher {
   readonly dispatched: string[] = [];
   mode: "resolve" | "reject" | "manual" = "resolve";
   error: unknown = new Error("dispatch failed");
+  kinds: AutomationJobKind[] = [...automationJobKindSchema.options];
 
   private readonly gates = new Map<string, () => void>();
+
+  registeredKinds(): readonly AutomationJobKind[] {
+    return this.kinds;
+  }
 
   dispatch(job: AutomationJobRecord): Promise<void> {
     this.dispatched.push(job.id);
@@ -316,6 +323,39 @@ describe("AutomationScheduler dispatch and retry", () => {
     clock.advance(5_000);
     await scheduler.tick();
     expect(dispatcher.dispatched).toEqual(["job_early", "job_late"]);
+  });
+
+  test("never claims a job kind that has no registered handler", async () => {
+    const { scheduler, repository, dispatcher } = createScheduler();
+    dispatcher.kinds = ["DISCOVER_CODEX_THREADS"];
+    repository.addJob(createJob("job_sync"));
+
+    scheduler.start();
+    await scheduler.tick();
+    await flushAsyncWork();
+
+    // An unregistered kind keeps its retry budget and stays QUEUED instead of failing out.
+    expect(dispatcher.dispatched).toEqual([]);
+    expect(repository.job("job_sync")).toMatchObject({ status: "QUEUED", attempts: 0 });
+    expect(repository.calls).not.toContain("claimNext:job_sync");
+
+    dispatcher.kinds = ["SYNC_SESSION_TRANSCRIPT"];
+    await scheduler.tick();
+    await flushAsyncWork();
+    expect(dispatcher.dispatched).toEqual(["job_sync"]);
+  });
+
+  test("claims nothing when no handler is registered at all", async () => {
+    const { scheduler, repository, dispatcher } = createScheduler();
+    dispatcher.kinds = [];
+    repository.addJob(createJob("job_a"));
+
+    scheduler.start();
+    await scheduler.tick();
+    await flushAsyncWork();
+
+    expect(dispatcher.dispatched).toEqual([]);
+    expect(repository.job("job_a").status).toBe("QUEUED");
   });
 
   test("marks a successful dispatch SUCCEEDED", async () => {

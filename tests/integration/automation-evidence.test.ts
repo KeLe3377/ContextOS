@@ -185,29 +185,6 @@ describe("automatic transcript evidence", () => {
     expect(JSON.parse(jobs[0]!.payload_json)).toMatchObject({ evidenceId: summary.evidenceId, sessionId });
   });
 
-  test("commits Evidence before enqueueing extraction, and keeps it when the enqueue fails", async () => {
-    await bindAtEnd();
-    await appendMessage("survives a failed enqueue");
-
-    const originalEnqueue = automation.enqueue.bind(automation);
-    let extractEnqueueAttempts = 0;
-    (automation as unknown as { enqueue: typeof automation.enqueue }).enqueue = (input, now) => {
-      if (input.kind === "EXTRACT_EVIDENCE_CONTEXT") {
-        extractEnqueueAttempts += 1;
-        throw new Error("automation queue unavailable");
-      }
-      return originalEnqueue(input, now);
-    };
-
-    await expect(syncOnce()).rejects.toThrow("automation queue unavailable");
-    (automation as unknown as { enqueue: typeof automation.enqueue }).enqueue = originalEnqueue;
-
-    expect(extractEnqueueAttempts).toBe(1);
-    // The Evidence was already committed, so nothing is lost and a repair pass can find it.
-    expect(evidenceRows()).toHaveLength(1);
-    expect(extractJobs()).toHaveLength(0);
-  });
-
   test("records provenance without copying the transcript body into metadata", async () => {
     await bindAtEnd();
     await appendMessage("SECRET-TRANSCRIPT-BODY");

@@ -32,6 +32,21 @@ export type SessionSyncStateUpsert = {
 export class SqliteSessionSyncRepository {
   constructor(private readonly db: Database) {}
 
+  /**
+   * The commit boundary for automatic transcript ingestion.
+   *
+   * The Evidence Snapshot row, the reader offset and the derived follow-up job must become
+   * visible together. Advancing the offset on its own would be lossy: a crash right after would
+   * leave the reader past events that were never captured as Evidence, and nothing could ever
+   * recover them because the transcript is only read forward from the stored offset.
+   *
+   * Nested repository calls join this transaction, so the whole unit either commits or rolls
+   * back as one.
+   */
+  runIngestionTransaction<T>(work: () => T): T {
+    return this.db.transaction(work)();
+  }
+
   get(sessionId: string): SessionSyncStateRow | null {
     return (this.db.prepare("SELECT * FROM session_sync_state WHERE session_id = ?").get(sessionId) as SessionSyncStateRow | undefined) ?? null;
   }

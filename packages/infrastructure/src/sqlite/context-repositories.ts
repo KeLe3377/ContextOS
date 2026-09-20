@@ -183,6 +183,25 @@ export class SqliteEvidenceSnapshotRepository {
     return row ? mapEvidenceSnapshot(row) : null;
   }
 
+  /**
+   * Finds an automatically captured agent-output Snapshot by its full identity.
+   *
+   * The identity is Project + Session + stream + content hash: identical bytes legitimately
+   * occur under a different Session or stream, and those must stay separate snapshots rather
+   * than being folded into one another.
+   */
+  findAgentOutput(input: { projectId: string; sessionId: string; stream: string; contentHash: string }): EvidenceSnapshotDto | null {
+    const row = this.db.prepare(
+      `SELECT * FROM evidence_snapshots
+        WHERE project_id = ? AND content_hash = ?
+          AND json_extract(metadata_json, '$.sessionId') = ?
+          AND json_extract(metadata_json, '$.stream') = ?
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1`
+    ).get(input.projectId, input.contentHash, input.sessionId, input.stream) as EvidenceSnapshotRow | undefined;
+    return row ? mapEvidenceSnapshot(row) : null;
+  }
+
   listStoredForRecovery(): EvidenceSnapshotDto[] {
     return (this.db.prepare("SELECT * FROM evidence_snapshots WHERE storage_ref IS NOT NULL ORDER BY created_at, id")
       .all() as EvidenceSnapshotRow[]).map(mapEvidenceSnapshot);

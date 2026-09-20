@@ -269,15 +269,25 @@ export class SqliteAutomationRepository {
   }
 
   /**
-   * Claims the oldest due QUEUED job. The read and the status transition share one
-   * transaction, and the UPDATE re-asserts `status = 'QUEUED'`, so two concurrent
-   * claimers cannot both win the same job.
+   * Claims the oldest due QUEUED job whose kind this daemon can actually run.
+   *
+   * The read and the status transition share one transaction, and the UPDATE re-asserts
+   * `status = 'QUEUED'`, so two concurrent claimers cannot both win the same job. Kinds without
+   * a registered handler are never claimed, so they keep their retry budget until one ships
+   * instead of being claimed and failing their way to FAILED.
    */
-  claimNext(now: number): AutomationJobRecord | null {
+  claimNext(now: number, kinds: readonly AutomationJobKind[] = automationJobKindSchema.options): AutomationJobRecord | null {
+    const claimable = [...new Set(kinds)];
+    if (claimable.length === 0) return null;
+    const placeholders = claimable.map(() => "?").join(", ");
+
     return this.db.transaction(() => {
       const row = this.db.prepare(
-        "SELECT id FROM automation_jobs WHERE status = 'QUEUED' AND available_at <= ? ORDER BY available_at ASC, created_at ASC, id ASC LIMIT 1"
-      ).get(now) as { id: string } | undefined;
+        `SELECT id FROM automation_jobs
+          WHERE status = 'QUEUED' AND available_at <= ? AND kind IN (${placeholders})
+          ORDER BY available_at ASC, created_at ASC, id ASC
+          LIMIT 1`
+      ).get(now, ...claimable) as { id: string } | undefined;
       if (!row) return null;
 
       const updated = this.db.prepare(

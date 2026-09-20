@@ -33,6 +33,28 @@ import { nowMs } from "../../../shared/src/clock.js";
 import { newId } from "../../../shared/src/id.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 
+/**
+ * An agent-output Evidence blob that has been written to disk but whose Snapshot row has not
+ * been inserted yet, so a wider transaction can own the row.
+ */
+export type PreparedAgentOutput = {
+  projectId: string;
+  sessionId: string;
+  stream: string;
+  title: string;
+  contentText: string;
+  metadata: Record<string, unknown>;
+  contentHash: string;
+  /** Blob written for this snapshot, or null when there was nothing new to write. */
+  stored: StoredEvidence | null;
+  /** Set when identical content is already captured for this Project, Session and stream. */
+  existing: EvidenceSnapshotDto | null;
+};
+
+function hashText(contentText: string): string {
+  return `sha256:${createHash("sha256").update(Buffer.from(contentText, "utf8")).digest("hex")}`;
+}
+
 export class ContextSourceService {
   constructor(
     private readonly sources: SqliteContextSourceRepository,
@@ -176,34 +198,69 @@ export class EvidenceSnapshotService {
   }
 
   /**
-   * Idempotent Evidence creation for automatically ingested agent output.
+   * Writes the Evidence blob and computes its identity WITHOUT touching the database, so the
+   * caller can include the Snapshot row in a wider transaction (see AutomationService).
    *
-   * A snapshot's identity is its canonical content hash inside its Project, so a batch that is
-   * re-read (for example after a transcript offset reset) reuses the existing immutable
-   * snapshot instead of storing the same bytes twice.
+   * Returns `existing` when the same content is already captured for this Project, Session and
+   * stream; in that case nothing is written and the caller only advances its own state.
    */
-  createAgentOutput(input: {
+  prepareAgentOutput(input: {
     projectId: string;
+    sessionId: string;
+    stream: string;
     title: string;
     contentText: string;
-    stream: string;
     metadata: Record<string, unknown>;
-  }): { evidence: EvidenceSnapshotDto; reused: boolean } {
-    const contentHash = `sha256:${createHash("sha256").update(Buffer.from(input.contentText, "utf8")).digest("hex")}`;
-    const existing = this.snapshots.findByProjectAndContentHash(input.projectId, contentHash);
-    if (existing) return { evidence: existing, reused: true };
+  }): PreparedAgentOutput {
+    const contentHash = hashText(input.contentText);
+    const existing = this.snapshots.findAgentOutput({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      stream: input.stream,
+      contentHash
+    });
+    if (existing) return { ...input, contentHash, stored: null, existing };
 
-    return {
-      evidence: this.create({
-        projectId: input.projectId,
+    const stored = this.evidenceStore
+      ? this.evidenceStore.writeText({ snapshotId: newId("evblob"), projectId: input.projectId, contentText: input.contentText, contentHash })
+      : null;
+    return { ...input, contentHash, stored, existing: null };
+  }
+
+  /**
+   * Inserts the Snapshot row for a prepared output.
+   *
+   * Safe to call inside an outer transaction: the row only becomes visible when that
+   * transaction commits, which is what keeps the Snapshot and the reader offset in step.
+   */
+  commitPreparedAgentOutput(prepared: PreparedAgentOutput): EvidenceSnapshotDto {
+    if (prepared.existing) return prepared.existing;
+    // Goes straight to the repository with the already-written blob. `create()` would write a
+    // second file and leave the prepared one orphaned — and that second write happens inside the
+    // caller's transaction, so a rollback could not clean it up either.
+    return this.snapshots.create(
+      {
+        projectId: prepared.projectId,
         evidenceType: "AGENT_OUTPUT",
-        title: input.title,
-        contentText: input.contentText,
-        contentHash,
-        metadata: { ...input.metadata, stream: input.stream }
-      }),
-      reused: false
-    };
+        title: prepared.title,
+        contentText: prepared.contentText,
+        contentHash: prepared.contentHash,
+        // sessionId and stream are written from the identity fields, so the stored metadata can
+        // never disagree with the values the deduplication lookup filters on.
+        metadata: { ...prepared.metadata, sessionId: prepared.sessionId, stream: prepared.stream }
+      },
+      nowMs(),
+      prepared.stored ?? undefined
+    );
+  }
+
+  /**
+   * Removes the blob written by `prepareAgentOutput` after the surrounding transaction failed,
+   * so a rolled-back ingestion never leaves an unreferenced file behind.
+   */
+  discardPreparedAgentOutput(prepared: PreparedAgentOutput): void {
+    if (!prepared.stored || !this.evidenceStore) return;
+    this.evidenceStore.remove(prepared.stored.storageRef);
   }
 
   list(input: { projectId?: string; sourceId?: string; q?: string; limit: number }): EvidenceSnapshotDto[] {

@@ -10,7 +10,7 @@ import type { ProjectDto } from "../../../contracts/src/projects.js";
 import type { AgentAdapter, ExternalSessionCandidate } from "../ports/agent-adapter.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import type { EvidenceSnapshotService } from "./context-services.js";
-import type { DesktopSyncBatch, DesktopSyncService } from "./desktop-sync-service.js";
+import type { DesktopSyncBatch, DesktopSyncRead, DesktopSyncService } from "./desktop-sync-service.js";
 import { AutomationDispatchError } from "./automation-scheduler.js";
 import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./project-thread-matcher.js";
 
@@ -54,6 +54,9 @@ const discoveryThreadLimit = 100;
 
 /** Adapter id used for discovery when the Project does not name one explicitly. */
 const defaultDiscoveryAdapterId = "codex";
+
+/** Evidence stream for batches captured by the daemon-owned transcript poller. */
+const desktopSyncEvidenceStream = "desktop-sync";
 
 export type AutomationSyncSummary = {
   sessionId: string;
@@ -202,8 +205,7 @@ export class AutomationService {
       // OFF stops automatic syncing outright: no read, and no follow-up job.
       return {
         ...emptySyncSummary(session.id),
-        status: this.options.desktopSync.status(session.id).status,
-        nextPollScheduled: false
+        status: this.options.desktopSync.status(session.id).status
       };
     }
 
@@ -212,26 +214,23 @@ export class AutomationService {
       this.options.desktopSync.bind(session.id);
     }
 
-    const { result, batch } = this.options.desktopSync.syncForIngestion(session.id);
+    // Read first, commit second: nothing is persisted until the batch is captured as Evidence.
+    const read = this.options.desktopSync.read(session.id);
+    const persisted = this.commitRead({ projectId: session.projectId, read, now });
+
     this.options.automation.markProjectActivity(session.projectId, "SYNC", now);
-
-    // The transcript offset is already committed at this point, so Evidence can never be
-    // written for events the reader has not accounted for — and a failure below can never
-    // roll the reader back over them either.
-    const persisted = batch ? this.persistTranscriptBatch(session.projectId, batch, now) : null;
-
     const nextPollScheduled = this.scheduleNextSync(session.id, now, now + settings.pollIntervalMs);
 
     return {
       sessionId: session.id,
-      status: result.status,
-      newEvents: result.newEvents,
-      startOrdinal: batch?.startOrdinal ?? null,
-      endOrdinal: batch?.endOrdinal ?? null,
-      startByteOffset: batch?.startByteOffset ?? null,
-      endByteOffset: batch?.endByteOffset ?? null,
-      partialLine: result.partialLine,
-      resetReason: result.resetReason,
+      status: this.options.desktopSync.status(session.id).status,
+      newEvents: read.events.length,
+      startOrdinal: read.batch?.startOrdinal ?? null,
+      endOrdinal: read.batch?.endOrdinal ?? null,
+      startByteOffset: read.batch?.startByteOffset ?? null,
+      endByteOffset: read.batch?.endByteOffset ?? null,
+      partialLine: read.partialLine,
+      resetReason: read.resetReason,
       evidenceId: persisted?.evidenceId ?? null,
       evidenceReused: persisted?.reused ?? false,
       nextPollScheduled
@@ -239,21 +238,33 @@ export class AutomationService {
   }
 
   /**
-   * Stores one synced batch as immutable Evidence and only then queues extraction.
+   * Persists one read as a single unit of work.
    *
-   * The enqueue happens strictly after the Evidence commit, so a failed enqueue leaves the
-   * Evidence intact and visible for a later repair pass rather than losing it.
+   * The Evidence Snapshot row, the advanced reader offset and the derived extraction job commit
+   * together, so the reader can never end up past events that were never captured. A read that
+   * produced no events only moves the offset, which is already a single atomic statement.
+   *
+   * The Evidence blob is written to disk before the transaction opens — it is the one step that
+   * cannot take part in a SQLite transaction — and is deleted again if the transaction fails.
    */
-  private persistTranscriptBatch(
-    projectId: string,
-    batch: DesktopSyncBatch,
-    now: number
-  ): { evidenceId: string; reused: boolean } {
-    const { evidence, reused } = this.options.evidence.createAgentOutput({
+  private commitRead(input: {
+    projectId: string;
+    read: DesktopSyncRead;
+    now: number;
+  }): { evidenceId: string; reused: boolean } | null {
+    const { projectId, read, now } = input;
+    if (!read.batch) {
+      this.options.sync.upsert(read.nextState);
+      return null;
+    }
+
+    const batch = read.batch;
+    const prepared = this.options.evidence.prepareAgentOutput({
       projectId,
+      sessionId: batch.sessionId,
+      stream: desktopSyncEvidenceStream,
       title: `Transcript events ${batch.startOrdinal}-${batch.endOrdinal}`,
-      contentText: canonicalBatchText(batch),
-      stream: "desktop-sync",
+      contentText: canonicalBatchText(projectId, batch),
       // Identifiers, counters and byte ranges only: never the transcript body itself.
       metadata: {
         sessionId: batch.sessionId,
@@ -269,22 +280,37 @@ export class AutomationService {
       }
     });
 
-    if (reused) return { evidenceId: evidence.id, reused: true };
+    let evidenceId: string | null = prepared.existing?.id ?? null;
+    try {
+      this.options.sync.runIngestionTransaction(() => {
+        evidenceId = this.options.evidence.commitPreparedAgentOutput(prepared).id;
+        this.options.sync.upsert(read.nextState);
+        // Only a newly captured batch needs extraction; a reused one was queued already.
+        if (!prepared.existing) this.enqueueExtraction({ projectId, batch, evidenceId: evidenceId!, now });
+      });
+    } catch (error) {
+      this.options.evidence.discardPreparedAgentOutput(prepared);
+      throw error;
+    }
 
+    return { evidenceId: evidenceId!, reused: Boolean(prepared.existing) };
+  }
+
+  /** Queues structured extraction for an Evidence Snapshot that was just committed. */
+  private enqueueExtraction(input: { projectId: string; batch: DesktopSyncBatch; evidenceId: string; now: number }): void {
     const extractor = this.options.extractor ?? defaultAutomationExtractor;
     this.options.automation.enqueue(
       {
         kind: "EXTRACT_EVIDENCE_CONTEXT",
-        projectId,
-        sessionId: batch.sessionId,
+        projectId: input.projectId,
+        sessionId: input.batch.sessionId,
         resourceType: "EVIDENCE_SNAPSHOT",
-        resourceId: evidence.id,
-        payload: { evidenceId: evidence.id, sessionId: batch.sessionId, extractorId: extractor.id },
-        idempotencyKey: `EXTRACT_EVIDENCE_CONTEXT:${evidence.id}:${extractor.version}`
+        resourceId: input.evidenceId,
+        payload: { evidenceId: input.evidenceId, sessionId: input.batch.sessionId, extractorId: extractor.id },
+        idempotencyKey: `EXTRACT_EVIDENCE_CONTEXT:${input.evidenceId}:${extractor.version}`
       },
-      now
+      input.now
     );
-    return { evidenceId: evidence.id, reused: false };
   }
 
   /**
@@ -427,14 +453,18 @@ function emptySyncSummary(sessionId: string): AutomationSyncSummary {
 }
 
 /**
- * Canonical, content-addressed serialisation of a synced batch.
+ * Canonical, content-addressed identity of a synced batch.
  *
- * Ordinals are deliberately excluded from the hash input: an offset reset re-reads the same
- * rows with different ordinal numbers, and including them would give identical content a
- * different hash and defeat Evidence deduplication. The Session id is included so two
- * Sessions with identical text stay distinguishable.
+ * The header pins everything that makes two batches different batches — stream, Project,
+ * Session, external thread and parser version — so an upgrade of the parser, or the same text
+ * arriving under a different Session, produces its own Evidence instead of silently reusing an
+ * unrelated snapshot.
+ *
+ * Ordinals and byte offsets are deliberately excluded: an offset reset re-reads the same rows
+ * at different positions, and including them would give identical content a different hash and
+ * defeat Evidence deduplication.
  */
-function canonicalBatchText(batch: DesktopSyncBatch): string {
+function canonicalBatchText(projectId: string, batch: DesktopSyncBatch): string {
   const events = batch.events.map((event) => JSON.stringify({
     timestamp: event.timestamp ?? null,
     kind: event.kind,
@@ -444,5 +474,12 @@ function canonicalBatchText(batch: DesktopSyncBatch): string {
     truncated: event.truncated ?? false,
     text: event.text ?? null
   }));
-  return [`session:${batch.sessionId}`, ...events].join("\n");
+  return [
+    `stream:${desktopSyncEvidenceStream}`,
+    `project:${projectId}`,
+    `session:${batch.sessionId}`,
+    `external:${batch.externalSessionId ?? ""}`,
+    `parser:${batch.parserVersion ?? ""}`,
+    ...events
+  ].join("\n");
 }

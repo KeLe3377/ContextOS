@@ -35,6 +35,12 @@ export class AutomationDispatchError extends Error {
 
 export interface AutomationJobDispatcher {
   dispatch(job: AutomationJobRecord): Promise<void>;
+  /**
+   * Job kinds this dispatcher can actually run. The scheduler only ever claims these, so a
+   * kind whose handler has not been registered yet is left QUEUED instead of being claimed
+   * and burning through its retry budget.
+   */
+  registeredKinds(): readonly AutomationJobKind[];
 }
 
 /**
@@ -43,7 +49,7 @@ export interface AutomationJobDispatcher {
  */
 export interface AutomationSchedulerRepository {
   recoverRunning(now: number): number;
-  claimNext(now: number): AutomationJobRecord | null;
+  claimNext(now: number, kinds: readonly AutomationJobKind[]): AutomationJobRecord | null;
   markSucceeded(jobId: string, now: number): unknown;
   markRetryable(jobId: string, failure: AutomationJobFailure, availableAt: number, now: number): unknown;
   markFailed(jobId: string, failure: AutomationJobFailure, now: number): unknown;
@@ -147,10 +153,16 @@ export class AutomationScheduler {
   async tick(): Promise<void> {
     if (!this.running) return;
     this.lastTickAt = this.clock();
+
+    // Only claim work this daemon can actually run. An unregistered kind stays QUEUED rather
+    // than being claimed and failing its way through the retry budget.
+    const claimableKinds = this.dispatcher.registeredKinds();
+    if (claimableKinds.length === 0) return;
+
     // Re-checking `running` inside the loop means a stop() that lands mid-tick still
     // cannot produce a new claim.
     while (this.running && this.active.size < this.maxConcurrentJobs) {
-      const job = this.repository.claimNext(this.clock());
+      const job = this.repository.claimNext(this.clock(), claimableKinds);
       if (!job) return;
       this.startDispatch(job);
     }
