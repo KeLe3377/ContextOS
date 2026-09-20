@@ -179,7 +179,7 @@ export async function createDaemonServer(
       desktopSync
     });
     const compactionService = new CompactionService({
-      evidence: evidenceSnapshotRepository,
+      evidence: evidenceSnapshotService,
       artifacts: new SqliteCompactionArtifactRepository(sqlite.db),
       automation: automationRepository,
       sanitizer: new PrefixTranscriptSanitizer(),

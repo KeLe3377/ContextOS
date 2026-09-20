@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -202,11 +202,12 @@ describe("automatic transcript evidence", () => {
     expect(snapshot.metadata.startByteOffset).toBe(0);
     expect(snapshot.metadata.endByteOffset).toBeGreaterThan(0);
 
-    // The body lives in the immutable Evidence itself, never in metadata or the title.
-    expect(snapshot.contentText).toContain("SECRET-TRANSCRIPT-BODY");
+    // The body lives exactly once, in the immutable blob; the row keeps only hash and reference.
+    expect(snapshot.contentText).toBeNull();
+    expect(snapshot.storageRef).toMatch(new RegExp(`^evidence/${projectId}/`));
+    expect(await readFile(join(tempDir, snapshot.storageRef!), "utf8")).toContain("SECRET-TRANSCRIPT-BODY");
     expect(JSON.stringify(snapshot.metadata)).not.toContain("SECRET-TRANSCRIPT-BODY");
     expect(snapshot.title).not.toContain("SECRET-TRANSCRIPT-BODY");
-    expect(snapshot.storageRef).toMatch(new RegExp(`^evidence/${projectId}/`));
   });
 
   test("creates nothing when a sync reads no new events", async () => {

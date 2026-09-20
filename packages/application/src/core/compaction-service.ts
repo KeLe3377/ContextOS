@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import type { EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AutomationJobRecord, SqliteAutomationRepository } from "../../../infrastructure/src/sqlite/automation-repository.js";
 import type { SqliteCompactionArtifactRepository } from "../../../infrastructure/src/sqlite/compaction-artifact-repository.js";
-import type { SqliteEvidenceSnapshotRepository } from "../../../infrastructure/src/sqlite/context-repositories.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import type { ContextOsCompactionAdapter } from "./compaction-adapter.js";
+import type { EvidenceSnapshotService } from "./context-services.js";
 import { describeAutomationFailure } from "./automation-scheduler.js";
 import {
   decodeTranscriptEvents,
@@ -39,7 +39,11 @@ export type AutomationExtractorIdentity = { id: string; version: string };
 export const defaultAutomationExtractor: AutomationExtractorIdentity = { id: "codex-cli", version: "codex-cli.v1" };
 
 export type CompactionServiceOptions = {
-  evidence: SqliteEvidenceSnapshotRepository;
+  /**
+   * Reads Evidence through the application service, never the repository, so the payload always
+   * comes from the integrity-verified Evidence Store instead of an unverified database copy.
+   */
+  evidence: EvidenceSnapshotService;
   artifacts: SqliteCompactionArtifactRepository;
   automation: SqliteAutomationRepository;
   sanitizer: TranscriptSanitizer;
@@ -69,10 +73,12 @@ export class CompactionService {
 
   async compactEvidence(input: { evidenceId: string }): Promise<CompactionRunSummary> {
     const now = this.now();
-    const evidence = this.options.evidence.getByIdOrThrow(input.evidenceId);
+    // The full payload comes from verified storage: a tampered or missing blob must fail the job
+    // rather than let compaction run on an unverified or empty copy of the transcript.
+    const { snapshot: evidence, contentText } = this.options.evidence.readFullText(input.evidenceId);
 
     // An undecodable blob is a hard failure: the job retries rather than inventing an artifact.
-    const decoded = decodeTranscriptEvents(evidence.contentText ?? "", expectedIdentity(evidence));
+    const decoded = decodeTranscriptEvents(contentText, expectedIdentity(evidence));
     const sanitized = this.options.sanitizer.sanitize(decoded.events);
     const messages = this.options.adapter.toMessages(sanitized.events);
 

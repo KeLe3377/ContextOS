@@ -230,20 +230,21 @@ export class EvidenceSnapshotService {
   /**
    * Inserts the Snapshot row for a prepared output.
    *
+   * Blob-backed Evidence keeps its payload exactly once, in the Evidence Store: the row holds the
+   * content hash and the storage reference, and `content_text` stays NULL. Without a store the
+   * text stays inline, because a row with neither a blob nor inline text could never be read back.
+   *
    * Safe to call inside an outer transaction: the row only becomes visible when that
    * transaction commits, which is what keeps the Snapshot and the reader offset in step.
    */
   commitPreparedAgentOutput(prepared: PreparedAgentOutput): EvidenceSnapshotDto {
     if (prepared.existing) return prepared.existing;
-    // Goes straight to the repository with the already-written blob. `create()` would write a
-    // second file and leave the prepared one orphaned — and that second write happens inside the
-    // caller's transaction, so a rollback could not clean it up either.
     return this.snapshots.create(
       {
         projectId: prepared.projectId,
         evidenceType: "AGENT_OUTPUT",
         title: prepared.title,
-        contentText: prepared.contentText,
+        contentText: prepared.stored ? undefined : prepared.contentText,
         contentHash: prepared.contentHash,
         // sessionId and stream are written from the identity fields, so the stored metadata can
         // never disagree with the values the deduplication lookup filters on.
@@ -269,6 +270,19 @@ export class EvidenceSnapshotService {
 
   get(id: string): EvidenceSnapshotDto {
     return this.snapshots.getByIdOrThrow(id);
+  }
+
+  /**
+   * The complete, integrity-verified text of a Snapshot, for internal consumers that must read
+   * the whole payload — the transcript event codec cannot work on a truncated prefix.
+   *
+   * Storage-backed Evidence goes through the Evidence Store with its hash and size verified;
+   * inline Evidence stays supported; a mismatch or a missing file fails loudly rather than
+   * returning partial or unverified content.
+   */
+  readFullText(id: string): { snapshot: EvidenceSnapshotDto; contentText: string } {
+    const snapshot = this.snapshots.getByIdOrThrow(id);
+    return { snapshot, contentText: this.readSnapshotContent(snapshot) };
   }
 
   content(id: string, maxChars: number): EvidenceSnapshotContentDto {

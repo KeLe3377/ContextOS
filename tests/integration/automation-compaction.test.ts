@@ -1,4 +1,5 @@
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -10,6 +11,7 @@ import { ContextOsCompactionAdapter } from "../../packages/application/src/core/
 import { EvidenceSnapshotService } from "../../packages/application/src/core/context-services.js";
 import { DesktopSyncService } from "../../packages/application/src/core/desktop-sync-service.js";
 import { PrefixTranscriptSanitizer } from "../../packages/application/src/core/transcript-sanitizer.js";
+import { encodeTranscriptEvents } from "../../packages/application/src/core/transcript-event-codec.js";
 import type { AgentAdapter, AgentTranscriptEvent } from "../../packages/application/src/ports/agent-adapter.js";
 import type { CompactionOptions, TranscriptCompactionProvider } from "../../packages/application/src/ports/transcript-compaction.js";
 import { AgentAdapterRegistry } from "../../packages/infrastructure/src/adapters/registry.js";
@@ -37,7 +39,7 @@ let projects: SqliteProjectRepository;
 let sessions: SqliteSessionRepository;
 let sync: SqliteSessionSyncRepository;
 let automation: SqliteAutomationRepository;
-let evidenceRepository: SqliteEvidenceSnapshotRepository;
+let evidenceService: EvidenceSnapshotService;
 let artifacts: SqliteCompactionArtifactRepository;
 let automationService: AutomationService;
 let projectId: string;
@@ -117,7 +119,7 @@ function compactionService(options: {
   compactionOptions?: CompactionOptions;
 } = {}): CompactionService {
   return new CompactionService({
-    evidence: evidenceRepository,
+    evidence: evidenceService,
     artifacts,
     automation,
     sanitizer: new PrefixTranscriptSanitizer(),
@@ -150,6 +152,22 @@ function extractJobs() {
 
 function artifactCount(): number {
   return (client.db.prepare("SELECT COUNT(*) AS count FROM compaction_artifacts").get() as { count: number }).count;
+}
+
+/** Files actually present under the Evidence root, used to prove the payload is stored once. */
+async function evidenceFileCount(): Promise<number> {
+  try {
+    const entries = await readdir(join(tempDir, "evidence"), { recursive: true, withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).length;
+  } catch {
+    return 0;
+  }
+}
+
+function blobPath(evidenceId: string): string {
+  const row = evidenceRow(evidenceId);
+  if (!row.storage_ref) throw new Error(`Evidence ${evidenceId} has no storage reference`);
+  return join(tempDir, row.storage_ref);
 }
 
 /**
@@ -191,10 +209,9 @@ beforeEach(async () => {
   sessions = new SqliteSessionRepository(client.db);
   sync = new SqliteSessionSyncRepository(client.db);
   automation = new SqliteAutomationRepository(client.db);
-  evidenceRepository = new SqliteEvidenceSnapshotRepository(client.db);
   artifacts = new SqliteCompactionArtifactRepository(client.db);
   const reviewItems = new SqliteReviewItemRepository(client.db);
-  const evidenceService = new EvidenceSnapshotService(evidenceRepository, new FileEvidenceStore(tempDir), reviewItems);
+  evidenceService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(client.db), new FileEvidenceStore(tempDir), reviewItems);
 
   const adapters = new AgentAdapterRegistry([createTranscriptAdapter()]);
   const desktopSync = new DesktopSyncService({
@@ -361,9 +378,21 @@ describe("compaction of a committed Evidence batch", () => {
 
   test("fails the job without forging an artifact when the blob cannot be decoded", async () => {
     const malformedId = "ev_malformed";
+    const malformedText = "this is not a transcript blob";
+    const malformedHash = `sha256:${createHash("sha256").update(Buffer.from(malformedText, "utf8")).digest("hex")}`;
+    // The hash matches, so the content passes integrity verification and the codec is what rejects it.
     client.db.prepare(
-      "INSERT INTO evidence_snapshots (id, project_id, evidence_type, title, content_text, content_hash, metadata_json, captured_at, created_at) VALUES (?, ?, 'AGENT_OUTPUT', 'Malformed', ?, 'sha256:malformed', ?, ?, ?)"
-    ).run(malformedId, projectId, "this is not a transcript blob", JSON.stringify({ sessionId, stream: "desktop-sync" }), clockNow, clockNow);
+      "INSERT INTO evidence_snapshots (id, project_id, evidence_type, title, content_text, content_hash, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, 'AGENT_OUTPUT', 'Malformed', ?, ?, ?, ?, ?, ?)"
+    ).run(
+      malformedId,
+      projectId,
+      malformedText,
+      malformedHash,
+      Buffer.byteLength(malformedText),
+      JSON.stringify({ sessionId, stream: "desktop-sync" }),
+      clockNow,
+      clockNow
+    );
 
     await expect(compactionService().compactEvidence({ evidenceId: malformedId }))
       .rejects.toMatchObject({ code: "TRANSCRIPT_CODEC_INVALID_HEADER" });
@@ -413,5 +442,94 @@ describe("compaction of a committed Evidence batch", () => {
     await scheduler.stop();
 
     expect(extractJobs()).toEqual([expect.objectContaining({ status: "QUEUED", attempts: 0 })]);
+  });
+});
+
+describe("evidence storage boundary", () => {
+  test("stores an automatically ingested batch once, in the blob", async () => {
+    const evidenceId = await ingestBatch();
+    const row = evidenceRow(evidenceId);
+
+    // The database keeps the hash and the storage reference; the payload lives only in the store.
+    expect(row.content_text).toBeNull();
+    expect(row.storage_ref).toBeTruthy();
+    expect(await evidenceFileCount()).toBe(1);
+  });
+
+  test("decodes compaction input from the verified blob", async () => {
+    const evidenceId = await ingestBatch();
+    const blob = await readFile(blobPath(evidenceId), "utf8");
+
+    expect(blob.startsWith("contextos-transcript-events.v2")).toBe(true);
+    expect(evidenceRow(evidenceId).content_text).toBeNull();
+
+    const summary = await compactionService().compactEvidence({ evidenceId });
+
+    expect(summary.status).toBe("SUCCEEDED");
+    expect(artifacts.getByIdOrThrow(summary.artifactId).events.length).toBeGreaterThan(0);
+  });
+
+  test("fails without creating an artifact when the blob was tampered with", async () => {
+    const evidenceId = await ingestBatch();
+    await appendFile(blobPath(evidenceId), '\n{"ordinal":99,"kind":"message","text":"injected"}\n', "utf8");
+
+    await expect(compactionService().compactEvidence({ evidenceId }))
+      .rejects.toMatchObject({ code: "CONFLICT", details: { failureCode: "CONTENT_MISMATCH" } });
+
+    expect(artifactCount()).toBe(0);
+    expect(extractJobs()).toHaveLength(0);
+  });
+
+  test("fails without creating an artifact when the blob is gone", async () => {
+    const evidenceId = await ingestBatch();
+    await rm(blobPath(evidenceId), { force: true });
+
+    await expect(compactionService().compactEvidence({ evidenceId }))
+      .rejects.toMatchObject({ code: "CONFLICT", details: { failureCode: "FILE_MISSING" } });
+
+    expect(artifactCount()).toBe(0);
+    expect(extractJobs()).toHaveLength(0);
+  });
+
+  test("still reads inline Evidence that has no blob", async () => {
+    const inlineEvents: AgentTranscriptEvent[] = [
+      { ordinal: 1, kind: "message", role: "user", text: "inline question" },
+      { ordinal: 2, kind: "message", role: "assistant", text: "inline answer" }
+    ];
+    const identity = { projectId, sessionId, externalSessionId, parserVersion, stream: "desktop-sync" };
+    const contentText = encodeTranscriptEvents(inlineEvents, identity);
+    const contentHash = `sha256:${createHash("sha256").update(Buffer.from(contentText, "utf8")).digest("hex")}`;
+
+    const inlineId = "ev_inline";
+    client.db.prepare(
+      "INSERT INTO evidence_snapshots (id, project_id, evidence_type, title, content_text, content_hash, size_bytes, metadata_json, captured_at, created_at) VALUES (?, ?, 'AGENT_OUTPUT', 'Inline', ?, ?, ?, ?, ?, ?)"
+    ).run(
+      inlineId,
+      projectId,
+      contentText,
+      contentHash,
+      Buffer.byteLength(contentText),
+      JSON.stringify({ sessionId, externalSessionId, parserVersion, stream: "desktop-sync" }),
+      clockNow,
+      clockNow
+    );
+
+    const summary = await compactionService().compactEvidence({ evidenceId: inlineId });
+
+    expect(summary.status).toBe("SUCCEEDED");
+    expect(artifacts.getByIdOrThrow(summary.artifactId).events).toEqual(inlineEvents);
+  });
+
+  test("leaves the blob byte for byte unchanged after compaction", async () => {
+    const evidenceId = await ingestBatch();
+    const path = blobPath(evidenceId);
+    const before = await readFile(path, "utf8");
+    const hashBefore = evidenceRow(evidenceId).content_hash;
+
+    await compactionService().compactEvidence({ evidenceId });
+
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect(evidenceRow(evidenceId).content_hash).toBe(hashBefore);
+    expect(await evidenceFileCount()).toBe(1);
   });
 });
