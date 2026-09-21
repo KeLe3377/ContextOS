@@ -258,9 +258,9 @@ commit prepared Evidence
 
 **文件：** automation-workflow.spec.ts、start-e2e-server.ts，必要时修改 Playwright automation config。
 
-- [ ] desktop/mobile 不得共享 Project、rollout、external Session ID、idempotency key 或 mutable fixture state。
-- [ ] fixture 只 stub 外部 Codex 协议和受控事件 append，不读写内部业务表。
-- [ ] 使用固定顺序：
+- [x] desktop/mobile 不得共享 Project、rollout、external Session ID、idempotency key 或 mutable fixture state。
+- [x] fixture 只 stub 外部 Codex 协议和受控事件 append，不读写内部业务表。
+- [x] 使用固定顺序：
 
 ~~~text
 prepare fixture
@@ -276,11 +276,11 @@ prepare fixture
 -> 受控 adapter 断言 resume、相同 externalSessionId、包含预期上下文
 ~~~
 
-- [ ] 每个边界使用独立 expect.poll() 和明确失败信息。
-- [ ] 不查询 SQLite、job kind、Artifact 或 Candidate。
-- [ ] desktop 以 workers=1 连续运行两次，预期通过。
-- [ ] mobile 单独运行；locator 必须定位可见工作区，不得使用可能命中隐藏侧栏的 first()。
-- [ ] 提交：test: verify automatic codex session continuity。
+- [x] 每个边界使用独立 expect.poll() 和明确失败信息。
+- [x] 不查询 SQLite、job kind、Artifact 或 Candidate。
+- [x] desktop 以 workers=1 连续运行两次，预期通过。
+- [x] mobile 单独运行；locator 必须定位可见工作区，不得使用可能命中隐藏侧栏的 first()。
+- [x] 提交：test: verify automatic codex session continuity。
 
 ### Task 7：真实 Codex smoke
 

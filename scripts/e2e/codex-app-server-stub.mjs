@@ -4,39 +4,58 @@
  *
  * 只替代“外部 Codex 进程”这一个边界：通过 stdin/stdout 使用逐行 JSON-RPC 2.0，
  * 与真实 `codex app-server` 协议一致。ContextOS 内部链路（适配器、发现作业、
- * 会话绑定、tail、Evidence、压缩、提取、候选、审核、应用）全部走真实实现。
+ * 会话绑定、tail、Evidence、Resume Capsule 连续性、Continue）全部走真实实现。
  *
  * 配置来自环境变量（由 e2e server 设置）：
- *   CODEX_STUB_THREAD_ID   线程 id，也是 rollout 里的 session id
- *   CODEX_STUB_CWD         线程工作目录（等于 fixture Project root）
- *   CODEX_STUB_PATH        rollout JSONL 绝对路径
- *   CODEX_STUB_UPDATED_AT  Unix 秒
+ *   CODEX_STUB_THREADS  JSON 数组，每项 { id, cwd, path }。每个 fixture scope 一项，
+ *                       使 desktop 与 mobile 各自拥有独立的 thread / rollout。
+ *
+ * 兼容旧配置：未提供 CODEX_STUB_THREADS 时回退到单个
+ * CODEX_STUB_THREAD_ID / CODEX_STUB_CWD / CODEX_STUB_PATH。
  *
  * 约定：
  * - stdout 只输出 JSON-RPC；调试信息一律写 stderr；
+ * - `thread/list` 按请求里的 cwd 精确过滤，避免一个 scope 的线程被另一个 scope 的
+ *   Project 发现（查询父目录时返回空，而不是串味）；
  * - 未识别的 request 返回明确 JSON-RPC error，不静默成功。
  */
 
-const config = {
-  id: process.env.CODEX_STUB_THREAD_ID || "e2e-thread",
-  cwd: process.env.CODEX_STUB_CWD || process.cwd(),
-  path: process.env.CODEX_STUB_PATH || "",
-  updatedAt: Number(process.env.CODEX_STUB_UPDATED_AT || Math.floor(Date.now() / 1000))
-};
+const threads = parseThreads();
+
+function parseThreads() {
+  const raw = process.env.CODEX_STUB_THREADS;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((entry) => entry && typeof entry.id === "string" && typeof entry.cwd === "string")
+          .map((entry) => ({ id: entry.id, cwd: entry.cwd, path: typeof entry.path === "string" ? entry.path : "" }));
+      }
+    } catch (error) {
+      process.stderr.write(`stub: CODEX_STUB_THREADS is not valid JSON: ${error}\n`);
+    }
+  }
+  return [{
+    id: process.env.CODEX_STUB_THREAD_ID || "e2e-thread",
+    cwd: process.env.CODEX_STUB_CWD || process.cwd(),
+    path: process.env.CODEX_STUB_PATH || ""
+  }];
+}
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function thread() {
+function thread(entry) {
   return {
-    id: config.id,
-    sessionId: config.id,
-    cwd: config.cwd,
-    path: config.path,
+    id: entry.id,
+    sessionId: entry.id,
+    cwd: entry.cwd,
+    path: entry.path,
     name: "端到端受控线程",
     preview: "请说明当前工作进展。",
-    updatedAt: config.updatedAt,
+    updatedAt: Math.floor(Date.now() / 1000),
     status: "idle",
     source: "cli",
     turns: 2
@@ -74,9 +93,12 @@ process.stdin.on("data", (chunk) => {
       case "initialize":
         send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "contextos-e2e-stub/0.1.0" } });
         break;
-      case "thread/list":
-        send({ jsonrpc: "2.0", id: message.id, result: { data: [thread()] } });
+      case "thread/list": {
+        const cwd = message.params && typeof message.params.cwd === "string" ? message.params.cwd : null;
+        const matched = cwd ? threads.filter((entry) => entry.cwd === cwd) : threads;
+        send({ jsonrpc: "2.0", id: message.id, result: { data: matched.map(thread) } });
         break;
+      }
       default:
         send({
           jsonrpc: "2.0",

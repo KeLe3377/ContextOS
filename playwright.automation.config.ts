@@ -1,13 +1,11 @@
 import baseConfig from "./playwright.config";
 
 /**
- * Task 10 专用配置：完全复用正式配置，只覆盖 webServer 命令。
+ * 自动化验收专用配置：完全复用正式配置，只覆盖 webServer 命令。
  *
- * 原因：正式配置的 webServer 会先执行 `npm run build:all`，而根 `tsc` 目前被用户未提交的
- * `tests/e2e/tutorial-video.spec.ts`（缺 DOM 全局）阻断。按要求不修改该文件或根 tsconfig，
- * 因此这里改用“只构建前端 + 直接启动 e2e server”的命令；其余设置全部继承正式配置。
- *
- * 不新增 Playwright 基础设施，仅覆盖一行命令。
+ * 正式配置的 webServer 会先跑 `npm run build:all`（含后端 tsc）。后端类型检查已在门禁里
+ * 单独跑过，这里只需构建前端并直接启动 e2e server，避免每次 E2E 重复整仓构建；
+ * 其余设置（projects、重试、trace）全部继承正式配置。不新增 Playwright 基础设施。
  */
 export default {
   ...baseConfig,
