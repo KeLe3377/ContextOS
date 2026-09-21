@@ -110,7 +110,7 @@ describe("前端响应解析", () => {
       scheduler: { running: true, startedAt: null, lastTickAt: null, activeJobs: 0 },
       jobs: { total: 2, byStatus: { QUEUED: 1, RUNNING: 0, SUCCEEDED: 1, FAILED: 0, CANCELED: 0 } },
       candidates: { pending: 3 },
-      recentFailures: [{ id: "job_1", projectId: null, kind: "EXTRACT_EVIDENCE_CONTEXT", attempts: 1, failureCode: "EXTRACTOR_TIMEOUT", failureMessage: "超时", status: "FAILED", availableAt: 0, startedAt: null, endedAt: null, payload: { secret: "不得外泄" }, createdAt: "2026-09-21T00:00:00.000Z", updatedAt: "2026-09-21T00:00:00.000Z" }],
+      recentFailures: [{ id: "job_1", kind: "EXTRACT_EVIDENCE_CONTEXT", failureCode: "EXTRACTOR_TIMEOUT", failureMessage: "超时" }],
       projects: [{ projectId: "proj_1", mode: "SUGGEST_ONLY", lastDiscoveryAt: null, lastSyncAt: null, lastExtractionAt: null, pendingCandidates: 3 }]
     });
     expect(status.projects).toHaveLength(1);

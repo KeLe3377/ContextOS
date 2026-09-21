@@ -1,19 +1,26 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { Badge, EmptyNote, Panel, Rows, fmtDate, toneForStatus } from "./ui";
+import { AutomationOverview } from "./components/automation/AutomationOverview";
+import type { AutomationSettingsValues } from "./components/automation/ProjectAutomationSettings";
+import { ProjectAutomationSettings } from "./components/automation/ProjectAutomationSettings";
+import { CandidateDetail } from "./components/automation/CandidateDetail";
+import { AutomationReviewDetail } from "./components/automation/AutomationReviewDetail";
 import {
   automationModeText,
+  parseAutomationSettings,
+  parseCandidate,
+  type ExtractionCandidateDto,
   candidateActions,
   candidateKindText,
   candidateStatusText,
   failureCodeText,
   jobStatusText,
   parseAutomationStatus,
-  parseCandidate,
   parseDiscovery,
   reviewTriggerText,
   safeProvenance,
   type AutomationMode,
-  type AutomationOverviewDto,
-  type ExtractionCandidateDto
+  type AutomationOverviewDto
 } from "./automation";
 
 const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:4721";
@@ -238,9 +245,6 @@ function isArchived(item: AnyRecord) {
   return item.status === "ARCHIVED" || Boolean(item.archivedAt);
 }
 
-function fmtDate(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : "-";
-}
 
 function transcriptStructure(metadata: AnyRecord | null | undefined) {
   if (!metadata) return "无对话记录元数据";
@@ -270,13 +274,6 @@ function transcriptEventPreview(event: AnyRecord) {
   return value.length > 220 ? `${value.slice(0, 220)}...` : value;
 }
 
-function toneForStatus(status: string | null | undefined) {
-  if (["ACTIVE", "RUNNING", "READY", "SUCCEEDED", "DONE", "ACCEPTED", "RESOLVED", "VALID"].includes(String(status))) return "green";
-  if (["OPEN", "DRAFT", "PROPOSED", "CREATED", "IN_PROGRESS", "IN_REVIEW"].includes(String(status))) return "blue";
-  if (["BLOCKED", "PAUSED", "DISABLED", "STALE"].includes(String(status))) return "amber";
-  if (["FAILED", "CANCELED", "ARCHIVED", "INVALID", "DISMISSED"].includes(String(status))) return "red";
-  return "";
-}
 
 function desktopSyncStatusLabel(status: unknown) {
   if (status === "WATCHING") return "监听中";
@@ -285,25 +282,8 @@ function desktopSyncStatusLabel(status: unknown) {
   return "未绑定";
 }
 
-function Badge({ text, tone = "" }: { text: ReactNode; tone?: string }) {
-  return <span className={`badge ${tone}`}>{text}</span>;
-}
 
-function EmptyNote({ children }: { children: ReactNode }) {
-  return <div className="empty-note">{children}</div>;
-}
 
-function Panel({ title, iconName, children, meta = "" }: { title: string; iconName: string; children: ReactNode; meta?: ReactNode }) {
-  return (
-    <section className="panel">
-      <div className="panel-head">
-        <div className="panel-title">{icon(iconName)}{title}</div>
-        <div className="panel-meta mono">{meta}</div>
-      </div>
-      {children}
-    </section>
-  );
-}
 
 function Table({ headers, rows, empty = "暂无记录。" }: { headers: string[]; rows: ReactNode[][]; empty?: string }) {
   if (!rows.length) return <EmptyNote>{empty}</EmptyNote>;
@@ -317,22 +297,6 @@ function Table({ headers, rows, empty = "暂无记录。" }: { headers: string[]
   );
 }
 
-function Rows({ rows, empty = "暂无条目。" }: { rows: Array<[ReactNode, ReactNode, string, ReactNode?]>; empty?: string }) {
-  if (!rows.length) return <EmptyNote>{empty}</EmptyNote>;
-  return (
-    <div>
-      {rows.map(([title, status, tone, sub], index) => (
-        <div className="list-row" key={index}>
-          <div>
-            <div className="title-sm">{title}</div>
-            {sub ? <div className="muted">{sub}</div> : null}
-          </div>
-          <Badge text={status} tone={tone} />
-        </div>
-      ))}
-    </div>
-  );
-}
 
 export function App() {
   const initialPage = (location.hash.replace("#", "") || "overview") as PageId;
@@ -1070,7 +1034,7 @@ function OverviewPage({ data, header, onRefresh }: { data: WorkspaceData; header
         <div className="span-4 stack">
           <Panel title="治理队列" iconName="inbox"><Rows rows={pendingReviews.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="暂无待审查项。" /></Panel>
           <Panel title="上下文健康度" iconName="link"><div className="metric-row"><span>活动数据源</span><strong>{contextHealth.activeSources}</strong></div><div className="metric-row"><span>暂停数据源</span><strong>{contextHealth.pausedSources}</strong></div><div className="metric-row"><span>证据快照</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>过期上下文</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
-          <AutomationOverviewPanel data={data} onChanged={onRefresh} />
+          <AutomationOverview status={data.automation} error={data.automationError} onRefresh={onRefresh} sendJson={sendJson} />
         </div>
       </div>
     </>
@@ -1078,75 +1042,38 @@ function OverviewPage({ data, header, onRefresh }: { data: WorkspaceData; header
 }
 
 
-function AutomationOverviewPanel({ data, onChanged }: { data: WorkspaceData; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
-  const status = data.automation;
-
-  const runDiscovery = async () => {
-    const projectId = status?.projects[0]?.projectId;
-    if (!projectId || busy) return;
-    setBusy(true);
-    setMessage(null);
-    try {
-      const response = parseDiscovery(await sendJson(`/api/projects/${projectId}/automation/discovery`, "POST", {}));
-      setMessage({ text: response.created ? "发现任务已入队，等待调度执行。" : "已有发现任务在排队中。", error: false });
-      onChanged();
-    } catch (error) {
-      setMessage({ text: error instanceof Error ? error.message : "运行发现失败", error: true });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (data.automationError) {
-    return <Panel title="自动化" iconName="bolt"><EmptyNote>自动化状态加载失败：{data.automationError}</EmptyNote></Panel>;
-  }
-  if (!status) return <Panel title="自动化" iconName="bolt"><EmptyNote>正在加载自动化状态…</EmptyNote></Panel>;
-
-  const byStatus = status.jobs.byStatus as AnyRecord;
-  const latestSync = status.projects.map((item) => item.lastSyncAt).filter(Boolean).sort().pop() || null;
-  const latestExtraction = status.projects.map((item) => item.lastExtractionAt).filter(Boolean).sort().pop() || null;
-  return (
-    <Panel title="自动化" iconName="bolt" meta={<Badge text={status.scheduler.running ? "调度运行中" : "调度已停止"} tone={status.scheduler.running ? "green" : ""} />}>
-      <div className="metric-row"><span>排队中 / 运行中 / 失败</span><strong>{byStatus.QUEUED || 0} / {byStatus.RUNNING || 0} / {byStatus.FAILED || 0}</strong></div>
-      <div className="metric-row"><span>待审核提取建议</span><strong>{status.candidates.pending}</strong></div>
-      <div className="metric-row"><span>最近同步</span><strong>{fmtDate(latestSync)}</strong></div>
-      <div className="metric-row"><span>最近提取</span><strong>{fmtDate(latestExtraction)}</strong></div>
-      {status.projects.length === 0 ? <EmptyNote>还没有项目启用自动化。</EmptyNote> : (
-        <Rows
-          rows={status.projects.map((item) => [
-            <span className="mono">{item.projectId}</span>,
-            automationModeText(item.mode),
-            item.mode === "OFF" ? "" : "blue",
-            <span>待审核 {item.pendingCandidates}</span>
-          ])}
-          empty="暂无自动化项目。"
-        />
-      )}
-      {status.projects.length > 0 ? (
-        <div className="row-actions">
-          <button className="btn" disabled={busy} onClick={() => void runDiscovery()}>{busy ? "正在入队…" : "运行发现"}</button>
-          {message ? <span className={message.error ? "error-text" : "muted"}>{message.text}</span> : null}
-        </div>
-      ) : null}
-      {status.recentFailures.length > 0 ? (
-        <div className="stack compact">
-          <div className="muted">最近失败</div>
-          {status.recentFailures.slice(0, 3).map((failure) => (
-            <div className="metric-row" key={failure.id}>
-              <span>{failureCodeText(failure.failureCode)}</span>
-              <span className="mono muted">{failure.failureCode || "无失败码"}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </Panel>
-  );
-}
-
 function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
   const { data, header, actionLoading, runAction, archiveProject, transitionProject, selectedProjectId, selectProject } = props;
+  const [automationSettings, setAutomationSettings] = useState<AutomationSettingsValues | null>(null);
+  const [automationHint, setAutomationHint] = useState<string | null>(null);
+
+  const loadAutomationSettings = useCallback(async (projectId: string) => {
+    setAutomationSettings(null);
+    setAutomationHint(null);
+    try {
+      setAutomationSettings(parseAutomationSettings(await fetchJson(`/api/projects/${projectId}/automation/settings`)) as AutomationSettingsValues);
+    } catch (error) {
+      setAutomationHint(error instanceof Error ? error.message : "自动化设置加载失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedProjectId) void loadAutomationSettings(selectedProjectId);
+  }, [selectedProjectId, loadAutomationSettings]);
+
+  const saveAutomationSettings = async (patch: Record<string, unknown>) => {
+    if (!selectedProjectId) return "尚未选择项目";
+    try {
+      setAutomationSettings(parseAutomationSettings(await sendJson(`/api/projects/${selectedProjectId}/automation/settings`, "PATCH", patch)) as AutomationSettingsValues);
+      return null;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("409")) {
+        await loadAutomationSettings(selectedProjectId);
+        return "设置已被其他操作更新";
+      }
+      throw error;
+    }
+  };
   const selectedProject = data.projects.find((project: AnyRecord) => project.id === selectedProjectId) || data.projects[0];
   const projectSessions = selectedProject ? data.sessions.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
   const projectWork = selectedProject ? data.workItems.filter((item: AnyRecord) => item.projectId === selectedProject.id) : [];
@@ -1169,6 +1096,7 @@ function ProjectsPage(props: AnyRecord & { header: ReactNode }) {
         <button className="icon-btn table-action" title="归档项目" disabled={actionLoading} onClick={() => runAction(() => archiveProject(project.id), "项目已归档")}>{icon("archive")}</button>
       </div>
     ])} empty="暂无项目。" /></Panel>
+    <ProjectAutomationSettings values={automationSettings} onSave={saveAutomationSettings} />
   </div><div className="span-4 stack">
     <Panel title="所选项目" iconName="folder_open" meta={selectedProject?.id || "未选择项目"}>
       {selectedProject ? <div className="session-detail">
@@ -1331,10 +1259,27 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
 }
 
 function ReviewPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, actionLoading, runAction, setModal, selectedReviewId, selectReview, reviewActionLog, startReview } = props;
+  const { data, header, actionLoading, runAction, setModal, selectedReviewId, selectReview, reviewActionLog, startReview, selectSession } = props;
   const selectedReview = data.reviews.find((item: AnyRecord) => item.id === selectedReviewId) || data.reviews.find((item: AnyRecord) => ["OPEN", "IN_PROGRESS"].includes(item.status)) || data.reviews[0];
   const sourceObject = selectedReview ? [...data.rules, ...data.sessions, ...data.contextItems, ...data.evidenceSnapshots, ...data.decisions, ...data.workItems].find((item: AnyRecord) => item.id === selectedReview.sourceId) : null;
   const logItems = selectedReview && reviewActionLog?.reviewId === selectedReview.id ? reviewActionLog.items : [];
+  const [automationCandidate, setAutomationCandidate] = useState<ExtractionCandidateDto | null>(null);
+  const isAutomationReview = selectedReview?.sourceType === "EXTRACTION_CANDIDATE";
+
+  useEffect(() => {
+    if (!isAutomationReview) {
+      setAutomationCandidate(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchJson(`/api/automation/candidates/${selectedReview!.sourceId}`)
+      .then((value) => { if (!cancelled) setAutomationCandidate(parseCandidate(value)); })
+      .catch(() => { if (!cancelled) setAutomationCandidate(null); });
+    return () => { cancelled = true; };
+  }, [isAutomationReview, selectedReview?.sourceId]);
+
+  const resolveAutomationReview = (resolutionType: string, reason: string, expectedRevision: number) =>
+    sendJson(`/api/automation/review-items/${selectedReview!.id}/resolve`, "POST", { resolutionType, resolutionReason: reason, expectedRevision });
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
     <Panel title="审查队列" iconName="inbox"><Table headers={["审查项", "来源", "优先级", "状态", "操作"]} rows={data.reviews.map((item: AnyRecord) => [
       <div className={`session-cell ${item.id === selectedReview?.id ? "selected" : ""}`}><strong>{item.summary}</strong><div className="muted">{item.proposedResolution || item.triggerType}</div></div>,
@@ -1350,6 +1295,22 @@ function ReviewPage(props: AnyRecord & { header: ReactNode }) {
       </div>
     ])} empty="暂无审查项。" /></Panel>
   </div><div className="span-4 stack">
+    {isAutomationReview && selectedReview ? <AutomationReviewDetail review={selectedReview} candidate={automationCandidate} onResolve={resolveAutomationReview} onOpenCandidate={(candidateId) => void fetchJson(`/api/automation/candidates/${candidateId}`).then((value) => setAutomationCandidate(parseCandidate(value))).catch(() => undefined)} /> : null}
+    {isAutomationReview && automationCandidate ? (
+      <CandidateDetail
+        candidate={automationCandidate}
+        onAccept={(expectedRevision) => sendJson(`/api/automation/candidates/${automationCandidate.id}/accept`, "POST", { expectedRevision })}
+        onReject={(expectedRevision) => sendJson(`/api/automation/candidates/${automationCandidate.id}/reject`, "POST", { expectedRevision })}
+        onRetry={(expectedRevision) => sendJson(`/api/automation/candidates/${automationCandidate.id}/retry`, "POST", { expectedRevision })}
+        onOpenTarget={(resourceType, resourceId) => {
+          if (resourceType === "SESSION") {
+            void selectSession?.(resourceId);
+            return;
+          }
+          void fetchJson(`/api/automation/candidates/${automationCandidate.id}`).then((value) => setAutomationCandidate(parseCandidate(value))).catch(() => undefined);
+        }}
+      />
+    ) : null}
     <Panel title="所选审查" iconName="rate_review" meta={selectedReview?.id || "No review"}>
       {selectedReview ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">

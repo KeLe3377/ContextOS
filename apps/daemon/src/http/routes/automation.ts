@@ -85,7 +85,12 @@ export async function registerAutomationRoutes(
       },
       candidates: { pending: services.automation.countPendingCandidates() },
       // Only the stable failure code and a short message; job payloads never leave the daemon.
-      recentFailures: services.automation.listLatestFailures(5).map((job) => ({ code: job.failureCode, message: job.failureMessage })),
+      recentFailures: services.automation.listLatestFailures(5).map((job) => ({
+        id: job.id,
+        kind: job.kind,
+        failureCode: job.failureCode,
+        failureMessage: job.failureMessage
+      })),
       projects: services.automation.listProjectStatuses()
     };
   });

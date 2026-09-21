@@ -218,6 +218,14 @@ export const automationProjectStatusSchema = z.object({
  * 只暴露可以真实回答的字段：调度器状态、任务计数、待审核建议数量、最近失败码和每个项目的汇总。
  * 不返回 transcript、提示词、模型输出、内部 job payload 或本地路径。
  */
+/** 概览里展示的最近失败：只有稳定失败码与简短信息，不含 job payload。 */
+export const automationOverviewFailureSchema = z.object({
+  id: z.string(),
+  kind: automationJobKindSchema,
+  failureCode: z.string().nullable(),
+  failureMessage: z.string().nullable()
+});
+
 export const automationOverviewSchema = z.object({
   generatedAt: z.string(),
   scheduler: automationSchedulerStatusSchema,
@@ -228,7 +236,7 @@ export const automationOverviewSchema = z.object({
   candidates: z.object({
     pending: z.number().int().nonnegative()
   }),
-  recentFailures: z.array(automationJobFailureSchema),
+  recentFailures: z.array(automationOverviewFailureSchema),
   projects: z.array(automationProjectStatusSchema)
 });
 
