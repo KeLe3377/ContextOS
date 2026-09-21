@@ -61,6 +61,8 @@ import { registerIdempotencyHooks } from "./http/idempotency.js";
 import { registerProjectRoutes } from "./http/routes/projects.js";
 import { registerRuleRoutes } from "./http/routes/rules.js";
 import { registerRuntimeRoutes } from "./http/routes/runtime.js";
+import { registerAutomationRoutes } from "./http/routes/automation.js";
+import { CandidateApplicationService } from "../../../packages/application/src/core/candidate-application-service.js";
 import { registerWorkspaceRoutes } from "./http/routes/workspace.js";
 
 export type DaemonConfig = {
@@ -196,6 +198,13 @@ export async function createDaemonServer(
     // The extractor runs in its own workspace under the data directory, and candidates are
     // persisted in one transaction with their Evidence links and Review Items, so a job can only
     // report success once everything is on disk.
+    const candidateApplicationService = new CandidateApplicationService({
+      automation: automationRepository,
+      sessions: sessionService,
+      contextItems: contextItemService,
+      reviewItems: reviewItemRepository
+    });
+
     const contextExtractor = new CodexContextExtractor({ dataDir: config.dataDir });
     const extractionService = new ExtractionService({
       automation: automationRepository,
@@ -203,7 +212,8 @@ export async function createDaemonServer(
       evidence: evidenceSnapshotService,
       sessions: new SqliteSessionRepository(sqlite.db),
       reviewItems: reviewItemRepository,
-      extractor: contextExtractor
+      extractor: contextExtractor,
+      application: candidateApplicationService
     });
 
     const automationJobRouter = new AutomationJobRouter()
@@ -282,6 +292,12 @@ export async function createDaemonServer(
     await registerRuntimeRoutes(server, {
     settings: settingsService,
     agentAdapters: agentAdapterService
+  });
+    await registerAutomationRoutes(server, {
+    automation: automationRepository,
+    automationService,
+    application: candidateApplicationService,
+    extraction: extractionService
   });
     registerFrontendRoutes(server);
 

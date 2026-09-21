@@ -22,6 +22,7 @@ import {
   type CandidateDraft
 } from "./extraction-candidate-mapping.js";
 import type { ContextExtractor, ExtractionInput, ExtractionResult } from "../ports/context-extractor.js";
+import { CandidateApplicationError, type CandidateApplicationService } from "./candidate-application-service.js";
 import type { EvidenceSnapshotService } from "./context-services.js";
 
 /**
@@ -73,6 +74,12 @@ export type ExtractionServiceOptions = {
   sessions: SqliteSessionRepository;
   reviewItems: SqliteReviewItemRepository;
   extractor: ContextExtractor;
+  /**
+   * Used to materialise candidates the policy marked eligible. Without it — or when an
+   * application cannot be performed — the candidate falls back to PENDING plus a Review Item,
+   * which keeps a missing application step from failing the whole extraction.
+   */
+  application?: CandidateApplicationService;
   clock?: () => number;
 };
 
@@ -307,7 +314,13 @@ export class ExtractionService {
         draft,
         threshold: input.autoAcceptThreshold
       });
-      if (disposition.disposition === "AUTO_ACCEPT") autoAcceptEligible += 1;
+      if (disposition.disposition === "AUTO_ACCEPT") {
+        autoAcceptEligible += 1;
+        if (this.tryApply(input, candidate)) {
+          autoAccepted += 1;
+          continue;
+        }
+      }
 
       // Acceptance is deferred on purpose. Marking a candidate ACCEPTED without a materialised
       // target would record an acceptance with nothing behind it, and the automation design
@@ -334,6 +347,24 @@ export class ExtractionService {
     return { candidatesCreated, candidatesReused, autoAcceptEligible, autoAccepted, reviewItemsCreated };
   }
 
+  /**
+   * Materialises an eligible candidate inside the surrounding transaction.
+   *
+   * Returns false when the application cannot be performed for a deterministic reason, so the
+   * caller can fall back to review instead of failing the whole extraction and retrying forever.
+   */
+  private tryApply(input: { projectId: string; drafts: DraftWithEvidence[]; now: number }, candidate: ReturnType<SqliteAutomationRepository["getCandidateOrThrow"]>): boolean {
+    if (!this.options.application) return false;
+    try {
+      // Only a first application counts; an already applied candidate is simply reused, so a
+      // retry reports zero new acceptances instead of re-counting the same one.
+      return this.options.application.apply({ candidateId: candidate.id, expectedRevision: candidate.revision, actorType: "SYSTEM" }).outcome === "APPLIED";
+    } catch (error) {
+      if (error instanceof CandidateApplicationError && deferrableApplicationCodes.has(error.code)) return false;
+      throw error;
+    }
+  }
+
   private openReviewItemCount(projectId: string, candidateId: string): number {
     return this.options.reviewItems.list({ projectId, limit: 200 }).filter((item) =>
       item.sourceType === reviewSourceTypeExtractionCandidate &&
@@ -353,6 +384,13 @@ export class ExtractionService {
  * separate stages, and only the second one may move a candidate to ACCEPTED.
  */
 export const acceptanceDeferralReason = "APPLICATION_PENDING";
+
+/** Application failures that mean "leave it to a human", not "retry the extraction". */
+const deferrableApplicationCodes = new Set([
+  "CANDIDATE_TARGET_SESSION_MISSING",
+  "CANDIDATE_KIND_NOT_APPLICABLE",
+  "CANDIDATE_NOT_APPLICABLE"
+]);
 
 export type CandidateDisposition = "REVIEW" | "AUTO_ACCEPT";
 

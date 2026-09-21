@@ -193,6 +193,47 @@ export class SqliteAutomationRepository {
     return this.db.transaction(work)();
   }
 
+  /**
+   * The commit boundary for applying or rejecting one candidate.
+   *
+   * A candidate may only become ACCEPTED together with the governed object it produces, so the
+   * domain write and the candidate's status change have to share one transaction. Nested
+   * repository and service calls join it, which is what makes "accepted but nothing materialised"
+   * unrepresentable.
+   */
+  runApplicationTransaction<T>(work: () => T): T {
+    return this.db.transaction(work)();
+  }
+
+  /** Activity and audit for a candidate's life cycle. `before`/`after` are the DTOs. */
+  recordCandidateAudit(input: {
+    projectId: string;
+    candidateId: string;
+    action: "APPLY" | "REJECT";
+    eventType: string;
+    summary: string;
+    before: ExtractionCandidateDto;
+    after: ExtractionCandidateDto;
+    actorType: "USER" | "SYSTEM";
+    now: number;
+  }): void {
+    this.db.prepare(
+      "INSERT INTO activity_events (id, project_id, resource_type, resource_id, event_type, summary, metadata_json, created_at) VALUES (?, ?, 'EXTRACTION_CANDIDATE', ?, ?, ?, ?, ?)"
+    ).run(newId("act"), input.projectId, input.candidateId, input.eventType, input.summary, JSON.stringify({}), input.now);
+    this.db.prepare(
+      "INSERT INTO audit_events (id, project_id, actor_type, resource_type, resource_id, action, before_json, after_json, created_at) VALUES (?, ?, ?, 'EXTRACTION_CANDIDATE', ?, ?, ?, ?, ?)"
+    ).run(
+      newId("audit"),
+      input.projectId,
+      input.actorType,
+      input.candidateId,
+      input.action,
+      JSON.stringify(input.before),
+      JSON.stringify(input.after),
+      input.now
+    );
+  }
+
   getSettings(projectId: string, now: number = Date.now()): AutomationSettingsDto {
     this.ensureSettingsRow(projectId, now);
     const row = this.db.prepare("SELECT * FROM project_automation_settings WHERE project_id = ?")

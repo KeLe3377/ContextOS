@@ -24,9 +24,16 @@ import { EvidenceSnapshotService } from "../../packages/application/src/core/con
 import { SqliteAutomationRepository } from "../../packages/infrastructure/src/sqlite/automation-repository.js";
 import { SqliteClient } from "../../packages/infrastructure/src/sqlite/client.js";
 import { SqliteCompactionArtifactRepository } from "../../packages/infrastructure/src/sqlite/compaction-artifact-repository.js";
-import { SqliteEvidenceSnapshotRepository } from "../../packages/infrastructure/src/sqlite/context-repositories.js";
+import { SqliteContextItemRepository, SqliteEvidenceSnapshotRepository } from "../../packages/infrastructure/src/sqlite/context-repositories.js";
 import { SqliteReviewItemRepository, SqliteSessionRepository } from "../../packages/infrastructure/src/sqlite/core-repositories.js";
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
+import { CandidateApplicationService } from "../../packages/application/src/core/candidate-application-service.js";
+import { ContextItemService } from "../../packages/application/src/core/context-services.js";
+import { SessionService } from "../../packages/application/src/core/core-services.js";
+import { ContinueSessionService } from "../../packages/application/src/core/runtime-services.js";
+import { ProcessSupervisor } from "../../packages/infrastructure/src/process-supervisor.js";
+import { AgentAdapterRegistry } from "../../packages/infrastructure/src/adapters/registry.js";
+import { SqliteRuntimeRepository } from "../../packages/infrastructure/src/sqlite/runtime-repository.js";
 import { SqliteProjectRepository } from "../../packages/infrastructure/src/sqlite/project-repository.js";
 
 const now = 1_770_000_000_000;
@@ -60,6 +67,7 @@ class FakeExtractor implements ContextExtractor {
 }
 
 let extractor: FakeExtractor;
+let application: CandidateApplicationService;
 
 function artifact(events: CompactionEvent[], overrides: Partial<CompactionArtifactDto> = {}): CompactionArtifactDto {
   return artifacts.findOrCreate(
@@ -125,6 +133,7 @@ function service(options: { reviewItems?: SqliteReviewItemRepository; automation
     sessions,
     reviewItems: options.reviewItems ?? reviewItems,
     extractor,
+    application,
     clock: () => now
   });
 }
@@ -168,6 +177,16 @@ beforeEach(async () => {
     "INSERT INTO evidence_snapshots (id, project_id, evidence_type, title, content_text, content_hash, metadata_json, captured_at, created_at) VALUES (?, ?, 'AGENT_OUTPUT', 'Batch', 'body', 'sha256:source', '{}', ?, ?)"
   ).run(sourceEvidenceId, projectId, now, now);
 
+  application = new CandidateApplicationService({
+    automation,
+    sessions: new SessionService(
+      sessions,
+      new ContinueSessionService(new SqliteRuntimeRepository(client.db), new AgentAdapterRegistry([]), new ProcessSupervisor())
+    ),
+    contextItems: new ContextItemService(new SqliteContextItemRepository(client.db)),
+    reviewItems,
+    clock: () => now
+  });
   extractor = new FakeExtractor();
 });
 
@@ -459,33 +478,33 @@ describe("automation policy", () => {
     expect(reviewItems.list({ projectId, limit: 100 })).toHaveLength(0);
   });
 
-  test("defers acceptance: an eligible resume capsule stays PENDING with a review item", async () => {
+  test("never marks a candidate accepted without a target resource", async () => {
     setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.9);
     extractor.result = extractionResult();
     const artifactRow = artifact(events);
 
-    const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
-
-    // Eligibility is granted, but nothing is accepted: acceptance has to happen together with the
-    // domain object it produces, and that application step does not exist yet.
-    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, reviewItemsCreated: 2 });
+    await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
     const stored = candidates();
-    expect(stored).toHaveLength(2);
-    expect(stored.every((candidate) => candidate.status === "PENDING")).toBe(true);
-    // An empty target resource can never accompany an acceptance.
+    // Every acceptance carries the object it produced; anything unapplied stays PENDING and empty.
     for (const candidate of stored) {
-      expect(candidate.targetResourceType).toBeNull();
-      expect(candidate.targetResourceId).toBeNull();
-      expect(candidate.status).not.toBe("ACCEPTED");
+      if (candidate.status === "ACCEPTED") {
+        expect(candidate.targetResourceType).toBeTruthy();
+        expect(candidate.targetResourceId).toBeTruthy();
+      } else {
+        expect(candidate.targetResourceType).toBeNull();
+        expect(candidate.targetResourceId).toBeNull();
+      }
     }
-    expect(stored.find((candidate) => candidate.kind === "RESUME_CAPSULE")!.status).toBe("PENDING");
+    // The applied capsule points at the Session; the context item still needs its own object.
+    expect(stored.find((candidate) => candidate.kind === "RESUME_CAPSULE"))
+      .toMatchObject({ status: "ACCEPTED", targetResourceType: "SESSION", targetResourceId: sessionId });
+    expect(stored.find((candidate) => candidate.kind === "CONTEXT_ITEM"))
+      .toMatchObject({ status: "PENDING", targetResourceType: null, targetResourceId: null });
 
-    const capsuleReviews = openReviews().filter((item) =>
-      candidates().some((candidate) => candidate.kind === "RESUME_CAPSULE" && candidate.id === item.sourceId)
-    );
-    expect(capsuleReviews).toHaveLength(1);
-    expect(capsuleReviews[0]!.triggerType).toBe(reviewTriggerAutomationSuggestion);
+    const reviews = openReviews();
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.triggerType).toBe(reviewTriggerAutomationSuggestion);
   });
 
   test("does not duplicate a capsule or its review when an eligible run is retried", async () => {
@@ -496,10 +515,13 @@ describe("automation policy", () => {
     await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
     const retry = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
+    // The capsule was applied on the first pass, so the retry reuses it and creates nothing new.
     expect(retry).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, candidatesCreated: 0, candidatesReused: 2, reviewItemsCreated: 0 });
     expect(candidates()).toHaveLength(2);
-    expect(openReviews()).toHaveLength(2);
-    expect(candidates().every((candidate) => candidate.status === "PENDING")).toBe(true);
+    expect(candidates().find((candidate) => candidate.kind === "RESUME_CAPSULE"))
+      .toMatchObject({ status: "ACCEPTED", targetResourceType: "SESSION", targetResourceId: sessionId });
+    // One review item is open: the context item the policy could not apply.
+    expect(openReviews()).toHaveLength(1);
   });
 
   test("keeps non-whitelisted types in review however confident they are", async () => {
@@ -513,10 +535,10 @@ describe("automation policy", () => {
 
     const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
-    // Only the capsule is eligible; the constraint goes to review at any confidence.
-    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, reviewItemsCreated: 2 });
-    expect(candidates().every((candidate) => candidate.status === "PENDING")).toBe(true);
-    expect(openReviews()).toHaveLength(2);
+    // Only the capsule is eligible and applied; the constraint goes to review at any confidence.
+    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 1, reviewItemsCreated: 1 });
+    expect(candidates().find((candidate) => candidate.kind === "CONTEXT_ITEM")!.status).toBe("PENDING");
+    expect(openReviews()).toHaveLength(1);
   });
 
   test("the pure policy function still grants eligibility independently of persistence", () => {
@@ -557,10 +579,10 @@ describe("automation policy", () => {
 
     const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
-    // Below the threshold the whitelisted item is not even eligible; the capsule alone is.
-    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, reviewItemsCreated: 2 });
+    // Below the threshold the whitelisted item is not eligible; only the capsule is applied.
+    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 1, reviewItemsCreated: 1 });
     expect(candidates().find((candidate) => candidate.kind === "CONTEXT_ITEM")!.status).toBe("PENDING");
-    expect(openReviews()).toHaveLength(2);
+    expect(openReviews()).toHaveLength(1);
   });
 });
 
@@ -669,5 +691,25 @@ describe("scheduler integration", () => {
     expect(candidates()).toHaveLength(2);
     expect(openReviews()).toHaveLength(2);
     expect(client.db.prepare("SELECT COUNT(*) AS count FROM extraction_candidate_evidence").get()).toEqual({ count: 2 });
+  });
+
+  test("auto applies an eligible resume capsule through the application service", async () => {
+    setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.9);
+    extractor.result = extractionResult();
+    const artifactRow = artifact(events);
+
+    const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 1, reviewItemsCreated: 1 });
+
+    const stored = candidates();
+    expect(stored.find((candidate) => candidate.kind === "RESUME_CAPSULE")).toMatchObject({
+      status: "ACCEPTED",
+      targetResourceType: "SESSION",
+      targetResourceId: sessionId
+    });
+    // The context item still needs its governed object, so it stays in review.
+    expect(stored.find((candidate) => candidate.kind === "CONTEXT_ITEM")).toMatchObject({ status: "PENDING", targetResourceId: null });
+    expect(openReviews()).toHaveLength(1);
   });
 });
