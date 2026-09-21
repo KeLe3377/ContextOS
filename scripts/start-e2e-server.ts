@@ -1,7 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createDaemonServer } from "../apps/daemon/src/bootstrap.js";
+import { CodexAdapter } from "../packages/infrastructure/src/adapters/codex-adapter.js";
+import { CodexAppServerClient } from "../packages/infrastructure/src/adapters/codex-app-server-client.js";
 import type { ContextExtractor } from "../packages/application/src/ports/context-extractor.js";
 
 const dataDir = await mkdtemp(join(tmpdir(), "contextos-e2e-"));
@@ -12,16 +14,34 @@ process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["-e", "process.exit(2)"]);
  * 受控自动化 fixture。
  *
  * 只有在显式设置了 CONTEXTOS_E2E_AUTOMATION_FIXTURE=1 时才会安装；未设置时生产行为完全不变。
- * 它只替换“提取器”这一个环节，候选仍要经过真实的 ExtractionService、CandidateApplicationService、
- * SQLite 与 API，不会绕过任何持久化或审核逻辑。
+ * 它只替换两个外部边界：
  *
- * 输出固定，便于界面断言：
- * - 一条恢复摘要；
- * - 一条高置信度摘要类上下文条目（可自动接受）；
- * - 一条事实类条目（必须送审）；
- * - 一条风险类条目（用于拒绝与重新提取）。
+ * 1. Codex 外部进程 → 协议级 stub（stdin/stdout 逐行 JSON-RPC，实现 initialize / initialized /
+ *    thread/list），返回真实形状的 thread（id、cwd、path、updatedAt 为 Unix 秒）。
+ * 2. ContextExtractor → 受控 fake extractor。
+ *
+ * 其余全部走真实实现：CodexAdapter、发现作业、会话创建与绑定、transcript tail/offset、
+ * Evidence Store 与数据库记录、COMPACT_EVIDENCE、Sanitizer、deterministic provider、
+ * Compaction Artifact、EXTRACT_EVIDENCE_CONTEXT、Candidate repository、Review Item、
+ * CandidateApplicationService、Context Item / Resume Capsule、Context Package。
+ * 不直接向 SQLite 插入任何 Session / Evidence / Artifact / Candidate / Review Item。
  */
 const automationFixtureEnabled = process.env.CONTEXTOS_E2E_AUTOMATION_FIXTURE === "1";
+
+const fixtureProjectRoot = join(dataDir, "fixture-project");
+const fixtureSessionsDir = join(dataDir, "codex-sessions");
+const fixtureThreadId = "e2e-thread-automation";
+const fixtureRolloutPath = (() => {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return join(
+    fixtureSessionsDir,
+    String(now.getUTCFullYear()),
+    pad(now.getUTCMonth() + 1),
+    pad(now.getUTCDate()),
+    `rollout-e2e-${fixtureThreadId}.jsonl`
+  );
+})();
 
 const fixtureExtractor: ContextExtractor | undefined = automationFixtureEnabled
   ? {
@@ -71,8 +91,58 @@ const fixtureExtractor: ContextExtractor | undefined = automationFixtureEnabled
     }
   : undefined;
 
+/** 写入最小、真实格式的 rollout，并准备 Project root。一切都在临时 dataDir 内。 */
+async function prepareAutomationFixture(): Promise<void> {
+  await mkdir(fixtureProjectRoot, { recursive: true });
+  await mkdir(dirname(fixtureRolloutPath), { recursive: true });
+
+  const now = Date.now();
+  const lines = [
+    JSON.stringify({
+      timestamp: new Date(now).toISOString(),
+      type: "session_meta",
+      payload: { id: fixtureThreadId, cwd: fixtureProjectRoot, source: "cli" }
+    }),
+    JSON.stringify({
+      timestamp: new Date(now + 1000).toISOString(),
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "请说明当前工作进展。" }] }
+    }),
+    JSON.stringify({
+      timestamp: new Date(now + 2000).toISOString(),
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "input_text", text: "已完成同步与压缩，等待生成提取建议。" }]
+      }
+    })
+  ];
+  await writeFile(fixtureRolloutPath, `${lines.join("\n")}\n`, "utf8");
+}
+
+let fixtureAdapter: CodexAdapter | null = null;
+if (automationFixtureEnabled) {
+  // 只在显式 fixture 模式下把 Codex 外部进程换成协议 stub；未开启时上面的
+  // CONTEXTOS_CODEX_COMMAND / CONTEXTOS_CODEX_ARGS 保持不变，既有 workspace-smoke 行为不受影响。
+  const stubScript = join(process.cwd(), "scripts", "e2e", "codex-app-server-stub.mjs");
+  process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
+  process.env.CONTEXTOS_CODEX_SESSIONS_DIR = fixtureSessionsDir;
+  process.env.CODEX_STUB_THREAD_ID = fixtureThreadId;
+  process.env.CODEX_STUB_CWD = fixtureProjectRoot;
+  process.env.CODEX_STUB_PATH = fixtureRolloutPath;
+  process.env.CODEX_STUB_UPDATED_AT = String(Math.floor(Date.now() / 1000));
+  fixtureAdapter = new CodexAdapter(
+    process.execPath,
+    ["-e", ""],
+    process.platform,
+    fixtureSessionsDir,
+    new CodexAppServerClient({ command: process.execPath, args: [stubScript] })
+  );
+}
+
 const server = await createDaemonServer({
-  ...(fixtureExtractor ? { contextExtractor: fixtureExtractor } : {}),
+  ...(fixtureAdapter ? { contextExtractor: fixtureExtractor!, agentAdapters: [fixtureAdapter] } : {}),
   config: {
     host: "127.0.0.1",
     port: 4722,
@@ -82,7 +152,12 @@ const server = await createDaemonServer({
 });
 
 if (automationFixtureEnabled) {
-  console.log("automation e2e fixture enabled: deterministic extractor installed");
+  // fixture 路由只注册在这里：不进入正式路由、bootstrap、生产契约或前端 API client。
+  server.post("/__e2e/automation-fixture/prepare", async () => {
+    await prepareAutomationFixture();
+    return { projectRoot: fixtureProjectRoot, externalSessionId: fixtureThreadId, ready: true };
+  });
+  console.log("automation e2e fixture enabled: deterministic extractor + codex protocol stub installed");
 }
 
 let closing = false;
