@@ -18,6 +18,7 @@ import { AutomationJobRouter } from "../../../packages/application/src/core/auto
 import { AutomationService } from "../../../packages/application/src/core/automation-service.js";
 import { CompactionService } from "../../../packages/application/src/core/compaction-service.js";
 import { ExtractionService } from "../../../packages/application/src/core/extraction-service.js";
+import type { ContextExtractor } from "../../../packages/application/src/ports/context-extractor.js";
 import { ContextOsCompactionAdapter } from "../../../packages/application/src/core/compaction-adapter.js";
 import { PrefixTranscriptSanitizer } from "../../../packages/application/src/core/transcript-sanitizer.js";
 import type { CompactionOptions, TranscriptCompactionProvider } from "../../../packages/application/src/ports/transcript-compaction.js";
@@ -82,6 +83,8 @@ export type CreateDaemonServerOptions = {
   automationTickIntervalMs?: number;
   /** Test seams for the compaction stage. */
   compactionProvider?: TranscriptCompactionProvider;
+  /** 测试缝：注入受控的提取器，避免端到端测试依赖真实 Codex CLI。 */
+  contextExtractor?: ContextExtractor;
   compactionOptions?: CompactionOptions;
 };
 
@@ -212,7 +215,7 @@ export async function createDaemonServer(
       evidence: evidenceSnapshotService,
       sessions: new SqliteSessionRepository(sqlite.db),
       reviewItems: reviewItemRepository,
-      extractor: contextExtractor,
+      extractor: options.contextExtractor ?? contextExtractor,
       application: candidateApplicationService
     });
 
