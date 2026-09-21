@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  activeAutomationJobKinds,
   automationJobKindSchema,
   automationJobSchema,
   automationJobStatusSchema,
@@ -124,6 +125,17 @@ describe("automation job contract", () => {
       "SYNC_CONTEXT_SOURCE",
       "SYNC_SESSION_TRANSCRIPT"
     ]);
+  });
+
+  test("keeps every historical kind parseable while narrowing the active runtime to two", () => {
+    // Active kinds are exactly discovery and sync, and every one of them is a stored kind.
+    expect([...activeAutomationJobKinds].sort()).toEqual(["DISCOVER_CODEX_THREADS", "SYNC_SESSION_TRANSCRIPT"]);
+    for (const kind of activeAutomationJobKinds) {
+      expect(automationJobKindSchema.parse(kind)).toBe(kind);
+    }
+    // The retired kinds stay parseable so old rows can still be read back.
+    expect(automationJobKindSchema.parse("COMPACT_EVIDENCE")).toBe("COMPACT_EVIDENCE");
+    expect(automationJobKindSchema.parse("EXTRACT_EVIDENCE_CONTEXT")).toBe("EXTRACT_EVIDENCE_CONTEXT");
   });
 
   test("distinguishes the documented lifecycle states", () => {

@@ -10,7 +10,7 @@ import {
   type AutomationSetTimer
 } from "../../packages/application/src/core/automation-scheduler.js";
 import type { AutomationJobStatus } from "../../packages/contracts/src/automation.js";
-import { automationJobKindSchema, type AutomationJobKind } from "../../packages/contracts/src/automation.js";
+import { activeAutomationJobKinds, automationJobKindSchema, type AutomationJobKind } from "../../packages/contracts/src/automation.js";
 import type { AutomationJobFailure, AutomationJobRecord } from "../../packages/infrastructure/src/sqlite/automation-repository.js";
 
 const baseTime = 1_760_000_000_000;
@@ -343,6 +343,24 @@ describe("AutomationScheduler dispatch and retry", () => {
     await scheduler.tick();
     await flushAsyncWork();
     expect(dispatcher.dispatched).toEqual(["job_sync"]);
+  });
+
+  test("leaves queued compaction and extraction jobs untouched when only the active kinds run", async () => {
+    const { scheduler, repository, dispatcher } = createScheduler();
+    dispatcher.kinds = [...activeAutomationJobKinds];
+    repository.addJob(createJob("job_queued_before_pruning", { kind: "COMPACT_EVIDENCE", resourceType: "EVIDENCE_SNAPSHOT", resourceId: "ev_1" }));
+    repository.addJob(createJob("job_queued_extraction", { kind: "EXTRACT_EVIDENCE_CONTEXT", resourceType: "COMPACTION_ARTIFACT", resourceId: "cmp_1" }));
+    repository.addJob(createJob("job_sync", { kind: "SYNC_SESSION_TRANSCRIPT" }));
+
+    scheduler.start();
+    await scheduler.tick();
+    await flushAsyncWork();
+
+    // Historical rows stay QUEUED with their retry budget intact: they are never claimed and
+    // therefore can never be marked SUCCEEDED to hide the fact that nothing ran.
+    expect(dispatcher.dispatched).toEqual(["job_sync"]);
+    expect(repository.job("job_queued_before_pruning")).toMatchObject({ status: "QUEUED", attempts: 0 });
+    expect(repository.job("job_queued_extraction")).toMatchObject({ status: "QUEUED", attempts: 0 });
   });
 
   test("claims nothing when no handler is registered at all", async () => {

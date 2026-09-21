@@ -3,6 +3,8 @@ export type ContextOsErrorCode =
   | "INVALID_ARGUMENT"
   | "NOT_FOUND"
   | "CONFLICT"
+  | /** A capability that existed and has been deliberately retired. */
+  "GONE"
   | "INTERNAL";
 
 export class ContextOsError extends Error {

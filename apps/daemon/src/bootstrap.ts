@@ -16,15 +16,7 @@ import {
 } from "../../../packages/application/src/core/automation-scheduler.js";
 import { AutomationJobRouter } from "../../../packages/application/src/core/automation-job-router.js";
 import { AutomationService } from "../../../packages/application/src/core/automation-service.js";
-import { CompactionService } from "../../../packages/application/src/core/compaction-service.js";
-import { ExtractionService } from "../../../packages/application/src/core/extraction-service.js";
-import type { ContextExtractor } from "../../../packages/application/src/ports/context-extractor.js";
-import { ContextOsCompactionAdapter } from "../../../packages/application/src/core/compaction-adapter.js";
-import { PrefixTranscriptSanitizer } from "../../../packages/application/src/core/transcript-sanitizer.js";
-import type { CompactionOptions, TranscriptCompactionProvider } from "../../../packages/application/src/ports/transcript-compaction.js";
-import { DeterministicCompactionProvider, defaultCompactionOptions } from "../../../packages/infrastructure/src/compaction/deterministic-compaction-provider.js";
-import { CodexContextExtractor, extractionRunsRoot } from "../../../packages/infrastructure/src/extraction/codex-context-extractor.js";
-import { SqliteCompactionArtifactRepository } from "../../../packages/infrastructure/src/sqlite/compaction-artifact-repository.js";
+import { extractionRunsRoot } from "../../../packages/infrastructure/src/extraction/codex-context-extractor.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
@@ -63,7 +55,6 @@ import { registerProjectRoutes } from "./http/routes/projects.js";
 import { registerRuleRoutes } from "./http/routes/rules.js";
 import { registerRuntimeRoutes } from "./http/routes/runtime.js";
 import { registerAutomationRoutes } from "./http/routes/automation.js";
-import { CandidateApplicationService } from "../../../packages/application/src/core/candidate-application-service.js";
 import { registerWorkspaceRoutes } from "./http/routes/workspace.js";
 
 export type DaemonConfig = {
@@ -81,11 +72,6 @@ export type CreateDaemonServerOptions = {
   /** Test seam: replaces the scheduler's real setTimeout with a controllable timer. */
   automationSetTimer?: AutomationSetTimer;
   automationTickIntervalMs?: number;
-  /** Test seams for the compaction stage. */
-  compactionProvider?: TranscriptCompactionProvider;
-  /** 测试缝：注入受控的提取器，避免端到端测试依赖真实 Codex CLI。 */
-  contextExtractor?: ContextExtractor;
-  compactionOptions?: CompactionOptions;
 };
 
 const packageVersion = "0.1.3";
@@ -205,41 +191,12 @@ export async function createDaemonServer(
       // work, which would otherwise let the pipeline feed itself.
       ignoredWorkspaceRoots: [extractionRunsRoot(config.dataDir)]
     });
-    const compactionService = new CompactionService({
-      evidence: evidenceSnapshotService,
-      artifacts: new SqliteCompactionArtifactRepository(sqlite.db),
-      automation: automationRepository,
-      sanitizer: new PrefixTranscriptSanitizer(),
-      adapter: new ContextOsCompactionAdapter(),
-      provider: options.compactionProvider ?? new DeterministicCompactionProvider(),
-      options: options.compactionOptions ?? defaultCompactionOptions
-    });
-    // The extractor runs in its own workspace under the data directory, and candidates are
-    // persisted in one transaction with their Evidence links and Review Items, so a job can only
-    // report success once everything is on disk.
-    const candidateApplicationService = new CandidateApplicationService({
-      automation: automationRepository,
-      sessions: sessionService,
-      contextItems: contextItemService,
-      reviewItems: reviewItemRepository
-    });
-
-    const contextExtractor = new CodexContextExtractor({ dataDir: config.dataDir });
-    const extractionService = new ExtractionService({
-      automation: automationRepository,
-      artifacts: new SqliteCompactionArtifactRepository(sqlite.db),
-      evidence: evidenceSnapshotService,
-      sessions: new SqliteSessionRepository(sqlite.db),
-      reviewItems: reviewItemRepository,
-      extractor: options.contextExtractor ?? contextExtractor,
-      application: candidateApplicationService
-    });
-
+    // Only discovery and transcript sync are live. COMPACT_EVIDENCE and EXTRACT_EVIDENCE_CONTEXT
+    // remain parseable historical rows, but nothing is registered for them, so the scheduler
+    // never claims one and a stale job can never be reported as done.
     const automationJobRouter = new AutomationJobRouter()
       .register("DISCOVER_CODEX_THREADS", (job) => automationService.handleDiscoveryJob(job))
-      .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job))
-      .register("COMPACT_EVIDENCE", (job) => compactionService.handleCompactionJob(job))
-      .register("EXTRACT_EVIDENCE_CONTEXT", (job) => extractionService.handleExtractionJob(job));
+      .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job));
     const automationScheduler = new AutomationScheduler({
       repository: automationRepository,
       dispatcher: automationJobRouter,
@@ -313,16 +270,18 @@ export async function createDaemonServer(
     agentAdapters: agentAdapterService
   });
     await registerAutomationRoutes(server, {
-    automation: automationRepository,
-    schedulerStatus: () => automationScheduler.getStatus(),
-    application: candidateApplicationService,
-    extraction: extractionService
-  });
+      automation: automationRepository,
+      schedulerStatus: () => automationScheduler.getStatus(),
+      activeKinds: () => automationJobRouter.registeredKinds()
+    });
     registerFrontendRoutes(server);
 
     server.setErrorHandler((error, request, reply) => {
     if (error instanceof ContextOsError) {
-      const statusCode = error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;
+      const statusCode = error.code === "NOT_FOUND" ? 404
+        : error.code === "CONFLICT" ? 409
+          : error.code === "GONE" ? 410
+            : 400;
       reply.status(statusCode).send({
         error: {
           code: error.code,

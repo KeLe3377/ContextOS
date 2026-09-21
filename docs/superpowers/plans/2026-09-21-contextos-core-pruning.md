@@ -223,12 +223,12 @@ commit prepared Evidence
 
 **文件：** bootstrap.ts、automation contracts/repository、scheduler/status tests。
 
-- [ ] 先断言 Scheduler 只能 claim DISCOVER_CODEX_THREADS 和 SYNC_SESSION_TRANSCRIPT。
-- [ ] 旧的 queued compaction/extraction job 不得被 claim，也不得标记成功。
-- [ ] 删除 daemon 中 Compaction、Extraction、Candidate Application 的构造和 handler 注册。
-- [ ] 区分“历史可解析 job kind”和“当前可执行 job kind”，不改 migration CHECK。
-- [ ] 运行 scheduler/status tests 和 npm run build，预期通过。
-- [ ] 提交：refactor: reduce automation runtime to discovery and sync。
+- [x] 先断言 Scheduler 只能 claim DISCOVER_CODEX_THREADS 和 SYNC_SESSION_TRANSCRIPT。
+- [x] 旧的 queued compaction/extraction job 不得被 claim，也不得标记成功。
+- [x] 删除 daemon 中 Compaction、Extraction、Candidate Application 的构造和 handler 注册。
+- [x] 区分“历史可解析 job kind”和“当前可执行 job kind”，不改 migration CHECK。
+- [x] 运行 scheduler/status tests 和 npm run build，预期通过。
+- [x] 提交：refactor: reduce automation runtime to discovery and sync。
 
 ### Task 4：Continue 使用自动捕获的连续性
 

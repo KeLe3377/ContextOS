@@ -16,6 +16,12 @@ import { contextConfidenceSchema, contextItemTypeSchema } from "./context.js";
 
 export const automationModeSchema = z.enum(["OFF", "SUGGEST_ONLY", "AUTO_ACCEPT_HIGH_CONFIDENCE"]);
 
+/**
+ * Every kind a stored job row may carry, including kinds that are no longer produced.
+ *
+ * The list is historical on purpose: rows written before the core pruning must stay readable,
+ * and the stored CHECK constraint is not rewritten, so this enum must never shrink.
+ */
 export const automationJobKindSchema = z.enum([
   "DISCOVER_CODEX_THREADS",
   "SYNC_SESSION_TRANSCRIPT",
@@ -25,6 +31,15 @@ export const automationJobKindSchema = z.enum([
   "EXTRACT_EVIDENCE_CONTEXT",
   "RECONCILE_EXTRACTION_CANDIDATES"
 ]);
+
+/**
+ * The only kinds the daemon registers a handler for, and therefore the only kinds the scheduler
+ * may claim. A queued job of any other kind stays QUEUED forever instead of being claimed and
+ * quietly reported as done.
+ */
+export const activeAutomationJobKinds = ["DISCOVER_CODEX_THREADS", "SYNC_SESSION_TRANSCRIPT"] as const satisfies readonly AutomationJobKind[];
+
+export type ActiveAutomationJobKind = (typeof activeAutomationJobKinds)[number];
 
 /** Job lifecycle states. Terminal states are SUCCEEDED, FAILED and CANCELED. */
 export const automationJobStatusSchema = z.enum(["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"]);
@@ -229,6 +244,8 @@ export const automationOverviewFailureSchema = z.object({
 export const automationOverviewSchema = z.object({
   generatedAt: z.string(),
   scheduler: automationSchedulerStatusSchema,
+  /** Kinds the running daemon can actually execute; everything else is inert history. */
+  activeKinds: z.array(automationJobKindSchema),
   jobs: z.object({
     total: z.number().int().nonnegative(),
     byStatus: z.record(automationJobStatusSchema, z.number().int().nonnegative())

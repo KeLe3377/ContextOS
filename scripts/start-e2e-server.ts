@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { createDaemonServer } from "../apps/daemon/src/bootstrap.js";
 import { CodexAdapter } from "../packages/infrastructure/src/adapters/codex-adapter.js";
 import { CodexAppServerClient } from "../packages/infrastructure/src/adapters/codex-app-server-client.js";
-import type { ContextExtractor } from "../packages/application/src/ports/context-extractor.js";
 
 const dataDir = await mkdtemp(join(tmpdir(), "contextos-e2e-"));
 process.env.CONTEXTOS_CODEX_COMMAND = process.execPath;
@@ -15,16 +14,13 @@ process.env.CONTEXTOS_CODEX_ARGS = JSON.stringify(["-e", "process.exit(2)"]);
  * 受控自动化 fixture。
  *
  * 只有在显式设置了 CONTEXTOS_E2E_AUTOMATION_FIXTURE=1 时才会安装；未设置时生产行为完全不变。
- * 它只替换两个外部边界：
+ * 它只替换一个外部边界：
  *
  * 1. Codex 外部进程 → 协议级 stub（stdin/stdout 逐行 JSON-RPC，实现 initialize / initialized /
  *    thread/list），返回真实形状的 thread（id、cwd、path、updatedAt 为 Unix 秒）。
- * 2. ContextExtractor → 受控 fake extractor。
  *
  * 其余全部走真实实现：CodexAdapter、发现作业、会话创建与绑定、transcript tail/offset、
- * Evidence Store 与数据库记录、COMPACT_EVIDENCE、Sanitizer、deterministic provider、
- * Compaction Artifact、EXTRACT_EVIDENCE_CONTEXT、Candidate repository、Review Item、
- * CandidateApplicationService、Context Item / Resume Capsule、Context Package。
+ * Evidence Store 与数据库记录、Resume Capsule 连续性摘录、Context Package。
  * 不直接向 SQLite 插入任何 Session / Evidence / Artifact / Candidate / Review Item。
  */
 const automationFixtureEnabled = process.env.CONTEXTOS_E2E_AUTOMATION_FIXTURE === "1";
@@ -45,54 +41,6 @@ const fixtureRolloutPath = (() => {
     `rollout-e2e-${fixtureThreadId}.jsonl`
   );
 })();
-
-const fixtureExtractor: ContextExtractor | undefined = automationFixtureEnabled
-  ? {
-      id: "e2e-fixture-extractor",
-      version: "e2e.v1",
-      async extract(input) {
-        const evidenceId = input.identity.sourceEvidenceId;
-        return {
-          extractorId: "e2e-fixture-extractor",
-          extractorVersion: "e2e.v1",
-          resumeCapsule: { summary: "受控恢复摘要：已完成同步与压缩。", nextAction: "批准下一条提取建议。" },
-          candidates: [
-            {
-              itemType: "SUMMARY",
-              title: "受控高置信度摘要条目",
-              summary: "由端到端 fixture 生成的摘要条目。",
-              body: "摘要正文。",
-              confidence: 0.96,
-              evidenceIds: [evidenceId],
-              explanation: "端到端 fixture 说明。",
-              fingerprint: "sha256:fixture-summary"
-            },
-            {
-              itemType: "FACT",
-              title: "受控事实条目",
-              summary: "由端到端 fixture 生成的事实条目。",
-              body: "事实正文。",
-              confidence: 0.5,
-              evidenceIds: [evidenceId],
-              explanation: "用于验证仍需人工审核。",
-              fingerprint: "sha256:fixture-fact"
-            },
-            {
-              itemType: "RISK",
-              title: "受控风险条目",
-              summary: "由端到端 fixture 生成的风险条目。",
-              body: "风险正文。",
-              confidence: 0.4,
-              evidenceIds: [evidenceId],
-              explanation: "用于验证拒绝与重新提取。",
-              fingerprint: "sha256:fixture-risk"
-            }
-          ],
-          stats: { inputItems: input.transcript.length, inputChars: 0, candidateCount: 3, durationMs: 1 }
-        };
-      }
-    }
-  : undefined;
 
 /**
  * 写入最小、真实格式的 rollout，并准备 Project root。一切都在临时 dataDir 内。
@@ -176,7 +124,7 @@ if (automationFixtureEnabled) {
 }
 
 const server = await createDaemonServer({
-  ...(fixtureAdapter ? { contextExtractor: fixtureExtractor!, agentAdapters: [fixtureAdapter] } : {}),
+  ...(fixtureAdapter ? { agentAdapters: [fixtureAdapter] } : {}),
   config: {
     host: "127.0.0.1",
     port: e2ePort,

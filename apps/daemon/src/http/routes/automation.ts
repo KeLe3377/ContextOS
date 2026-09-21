@@ -2,23 +2,17 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   automationSettingsPatchSchema,
-  extractionCandidateAcceptSchema,
-  extractionCandidateListQuerySchema,
-  extractionCandidateRejectSchema,
-  extractionCandidateRetrySchema
+  type AutomationJobKind
 } from "../../../../../packages/contracts/src/automation.js";
-import { reviewResolveSchema } from "../../../../../packages/contracts/src/review-items.js";
-import { CandidateApplicationError, type CandidateApplicationService } from "../../../../../packages/application/src/core/candidate-application-service.js";
-import type { ExtractionService } from "../../../../../packages/application/src/core/extraction-service.js";
 import type { SqliteAutomationRepository } from "../../../../../packages/infrastructure/src/sqlite/automation-repository.js";
 import { ContextOsError } from "../../../../../packages/shared/src/errors.js";
 
 /**
- * Automation surface: project status, settings, discovery and the candidate queue.
+ * Automation surface: project status, settings and discovery.
  *
- * Everything mutating goes through a service rather than a repository write, and candidate
- * acceptance is served by CandidateApplicationService so a candidate can never be marked accepted
- * without the governed object it produces.
+ * The active pipeline is discovery + transcript sync. The candidate/extraction surface that used
+ * to sit here is deferred: its endpoints answer 410 with the stable `FEATURE_DEFERRED` code so a
+ * caller can never mistake a retired capability for one that succeeded or did nothing.
  */
 
 const projectIdParamsSchema = z.object({ projectId: z.string().min(1) });
@@ -26,43 +20,11 @@ const candidateIdParamsSchema = z.object({ id: z.string().min(1) });
 const reviewIdParamsSchema = z.object({ id: z.string().min(1) });
 
 /**
- * Maps pipeline and application failures onto the daemon's HTTP codes: a revision conflict answers
- * 409, a missing artifact 404, and every other domain failure 400, instead of leaking as a 500.
- * The stable `failureCode` travels in the error details so the UI can act on it.
+ * The retired extraction surface. 410 (not 404) is deliberate: the endpoint existed, the caller
+ * may still hold a bookmark, and "gone" is the only honest answer that cannot be read as success.
  */
-function toHttpError(error: unknown): unknown {
-  const code = typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code : null;
-  if (!code) return error;
-
-  const contextCode =
-    code === "CANDIDATE_REVISION_CONFLICT" || code === "COMPACTION_ARTIFACT_INVALID" ? "CONFLICT"
-      : code === "CANDIDATE_NOT_FOUND" || code === "COMPACTION_ARTIFACT_NOT_FOUND" ? "NOT_FOUND"
-        : code.startsWith("CANDIDATE_") || code.startsWith("EXTRACTION_") || code.startsWith("COMPACTION_") ? "INVALID_ARGUMENT"
-          : null;
-  if (!contextCode) return error;
-
-  return new ContextOsError(contextCode, error instanceof Error ? error.message : "Automation request failed", { failureCode: code });
-}
-
-function guard<T>(work: () => T): T {
-  try {
-    return work();
-  } catch (error) {
-    throw toHttpError(error);
-  }
-}
-
-/** Async counterpart of `guard`: the extraction call returns a promise, so its rejection has to be awaited to be mapped. */
-async function guardAsync<T>(work: () => Promise<T>): Promise<T> {
-  try {
-    return await work();
-  } catch (error) {
-    throw toHttpError(error);
-  }
-}
-
-function withDbStatus(services: { automation: SqliteAutomationRepository }): Record<string, number> {
-  return services.automation.countJobsByStatus();
+function deferred(): never {
+  throw new ContextOsError("GONE", "Context extraction candidates are deferred", { failureCode: "FEATURE_DEFERRED" });
 }
 
 export async function registerAutomationRoutes(
@@ -70,19 +32,21 @@ export async function registerAutomationRoutes(
   services: {
     automation: SqliteAutomationRepository;
     schedulerStatus: () => { running: boolean; startedAt: string | null; lastTickAt: string | null; activeJobs: number };
-    application: CandidateApplicationService;
-    extraction: ExtractionService;
+    /** Job kinds the running daemon has a handler for; the scheduler claims nothing else. */
+    activeKinds: () => readonly AutomationJobKind[];
   }
 ): Promise<void> {
   server.get("/api/automation/status", async () => {
-    const byStatus = withDbStatus(services);
+    const byStatus = services.automation.countJobsByStatus();
     return {
       generatedAt: new Date().toISOString(),
       scheduler: services.schedulerStatus(),
+      activeKinds: [...services.activeKinds()],
       jobs: {
         total: Object.values(byStatus).reduce((total, count) => total + count, 0),
         byStatus
       },
+      // Still counted until the UI stops surfacing it: rows written before the pruning exist.
       candidates: { pending: services.automation.countPendingCandidates() },
       // Only the stable failure code and a short message; job payloads never leave the daemon.
       recentFailures: services.automation.listLatestFailures(5).map((job) => ({
@@ -126,49 +90,32 @@ export async function registerAutomationRoutes(
   });
 
   server.get("/api/projects/:projectId/automation/candidates", async (request) => {
-    const { projectId } = projectIdParamsSchema.parse(request.params);
-    const query = extractionCandidateListQuerySchema.parse(request.query);
-    return { candidates: services.automation.listCandidates({ ...query, projectId }) };
+    projectIdParamsSchema.parse(request.params);
+    deferred();
   });
 
   server.get("/api/automation/candidates/:id", async (request) => {
-    const { id } = candidateIdParamsSchema.parse(request.params);
-    const candidate = services.automation.getCandidate(id);
-    if (!candidate) throw new ContextOsError("NOT_FOUND", "Extraction candidate not found", { id });
-    return candidate;
+    candidateIdParamsSchema.parse(request.params);
+    deferred();
   });
 
   server.post("/api/automation/candidates/:id/accept", async (request) => {
-    const { id } = candidateIdParamsSchema.parse(request.params);
-    const body = extractionCandidateAcceptSchema.parse(request.body);
-    return guard(() => services.application.apply({ candidateId: id, expectedRevision: body.expectedRevision }));
+    candidateIdParamsSchema.parse(request.params);
+    deferred();
   });
 
   server.post("/api/automation/candidates/:id/reject", async (request) => {
-    const { id } = candidateIdParamsSchema.parse(request.params);
-    const body = extractionCandidateRejectSchema.parse(request.body);
-    return guard(() => services.application.reject({ candidateId: id, expectedRevision: body.expectedRevision }));
+    candidateIdParamsSchema.parse(request.params);
+    deferred();
   });
 
   server.post("/api/automation/candidates/:id/retry", async (request) => {
-    const { id } = candidateIdParamsSchema.parse(request.params);
-    const body = extractionCandidateRetrySchema.parse(request.body);
-    const candidate = services.automation.getCandidate(id);
-    if (!candidate) throw new ContextOsError("NOT_FOUND", "Extraction candidate not found", { id });
-
-    const artifactId = candidate.provenance.sourceArtifactId;
-    if (!artifactId) throw new ContextOsError("CONFLICT", "Candidate has no source artifact to replay", { id });
-
-    return guardAsync(() => services.extraction.extractArtifact({
-      projectId: candidate.projectId,
-      artifactId,
-      sourceEvidenceId: candidate.sourceEvidenceId ?? ""
-    }));
+    candidateIdParamsSchema.parse(request.params);
+    deferred();
   });
 
   server.post("/api/automation/review-items/:id/resolve", async (request) => {
-    const { id } = reviewIdParamsSchema.parse(request.params);
-    const input = reviewResolveSchema.parse(request.body);
-    return guard(() => services.application.resolveReviewItem({ reviewItemId: id, ...input }));
+    reviewIdParamsSchema.parse(request.params);
+    deferred();
   });
 }

@@ -59,6 +59,13 @@ describe("自动化状态接口", () => {
     expect(status.projects.map((entry) => entry.projectId)).toContain(projectId);
   });
 
+  test("只声明发现与同步两类可执行任务", async () => {
+    const status = await getStatus();
+
+    // 历史的压缩与提取任务仍可解析，但守护进程不再注册处理器，因此不会出现在活跃类型里。
+    expect([...status.activeKinds].sort()).toEqual(["DISCOVER_CODEX_THREADS", "SYNC_SESSION_TRANSCRIPT"]);
+  });
+
   test("统计各状态任务数量与待审核建议数", async () => {
     withDb((repository) => {
       repository.enqueue(
