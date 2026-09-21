@@ -16,7 +16,6 @@ export default {
     url: "http://127.0.0.1:4722/api/health",
     reuseExistingServer: false,
     timeout: 180_000,
-    env: { ...process.env, CONTEXTOS_E2E_AUTOMATION_FIXTURE: "1" },
     env: { ...process.env, CONTEXTOS_E2E_AUTOMATION_FIXTURE: "1" }
   }
 };
