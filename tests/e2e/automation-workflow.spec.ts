@@ -83,3 +83,77 @@ test("自动化设置与运行发现在界面上可用", async ({ page, request 
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("automation-mobile.png"), fullPage: true });
 });
+
+test("发现通过协议 stub 驱动真实的自动化上游链路", async ({ page, request }, testInfo) => {
+  await page.addInitScript((base) => localStorage.setItem("contextos.apiBase", base), API_BASE);
+
+  // 1. fixture 准备：临时 Project root + rollout + 协议 stub（都在临时 dataDir 内）。
+  const fixture = (await (
+    await request.post(`${API_BASE}/__e2e/automation-fixture/prepare`)
+  ).json()) as { projectRoot: string; externalSessionId: string; ready: boolean };
+  expect(fixture.ready).toBe(true);
+  expect(fixture.externalSessionId).toBeTruthy();
+
+  // 2. 用这个 root 创建 Project，并切到“仅生成建议”。
+  const projectName = `链路 E2E ${testInfo.project.name}-${Date.now()}`;
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "项目", exact: true }).click();
+  await page.getByRole("button", { name: "添加项目" }).click();
+  await page.getByLabel("项目名称").fill(projectName);
+  await page.getByLabel("根路径").fill(fixture.projectRoot);
+  await page.getByRole("button", { name: "创建项目" }).click();
+  await expect(page.getByText(projectName).first()).toBeVisible();
+  await page.locator("select").filter({ hasText: "关闭" }).first().selectOption("SUGGEST_ONLY");
+  await page.getByRole("button", { name: "保存设置" }).click();
+  await expect(page.getByText("自动化设置已保存。")).toBeVisible();
+
+  // 3. 运行发现，等待会话被自动创建并绑定（每一步都指出停在哪一层）。
+  await page.getByRole("button", { name: "概览", exact: true }).click();
+  const panel = page.locator("section.panel").filter({ hasText: "待审核提取建议" }).first();
+  await expect.poll(async () => (await panel.innerText()).includes("待审核提取建议")).toBe(true);
+  await panel.getByRole("button", { name: "运行发现" }).click();
+
+  await expect
+    .poll(
+      async () => {
+        const body = (await (await request.get(`${API_BASE}/api/sessions`)).json()) as
+          | Array<{ externalSessionId?: string | null }>
+          | { items?: Array<{ externalSessionId?: string | null }> };
+        const sessions = Array.isArray(body) ? body : body.items || [];
+        return sessions.some((item) => item.externalSessionId === fixture.externalSessionId);
+      },
+      { message: "发现作业未创建会话：检查 DISCOVER_CODEX_THREADS handler 或 Codex 协议 stub", timeout: 30_000 }
+    )
+    .toBe(true);
+
+  // 4. 等待 Evidence 自动出现（tail/offset 与 Evidence Store 走真实实现）。
+  await expect
+    .poll(
+      async () => {
+        const body = (await (await request.get(`${API_BASE}/api/evidence-snapshots`)).json()) as unknown[] | { items?: unknown[] };
+        const snapshots = Array.isArray(body) ? body : body.items || [];
+        return snapshots.length;
+      },
+      { message: "同步未生成证据：检查 SYNC_SESSION_TRANSCRIPT 与 transcript tail", timeout: 30_000 }
+    )
+    .toBeGreaterThan(0);
+
+  // 5. 等待提取建议出现（COMPACT → EXTRACT → Candidate 全部走真实实现，只有提取器是 fixture）。
+  const projectId = await request.get(`${API_BASE}/api/projects`).then(async (response) => {
+    const body = (await response.json()) as Array<{ id: string; name: string }> | { items?: Array<{ id: string; name: string }> };
+    const projects = Array.isArray(body) ? body : body.items || [];
+    return projects.find((item) => item.name === projectName)!.id;
+  });
+
+  await expect
+    .poll(
+      async () => {
+        const body = (await (await request.get(`${API_BASE}/api/projects/${projectId}/automation/candidates`)).json()) as {
+          candidates?: unknown[];
+        };
+        return body.candidates?.length || 0;
+      },
+      { message: "未生成提取建议：检查 COMPACT_EVIDENCE / EXTRACT_EVIDENCE_CONTEXT 与候选持久化", timeout: 40_000 }
+    )
+    .toBeGreaterThan(0);
+});

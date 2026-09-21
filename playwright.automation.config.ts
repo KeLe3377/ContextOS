@@ -15,6 +15,8 @@ export default {
     command: "npm run frontend:build && npm run e2e:server",
     url: "http://127.0.0.1:4722/api/health",
     reuseExistingServer: false,
-    timeout: 180_000
+    timeout: 180_000,
+    env: { ...process.env, CONTEXTOS_E2E_AUTOMATION_FIXTURE: "1" },
+    env: { ...process.env, CONTEXTOS_E2E_AUTOMATION_FIXTURE: "1" }
   }
 };
