@@ -1,8 +1,11 @@
 import type { Database } from "better-sqlite3";
+import type { z } from "zod";
 import {
   automationJobKindSchema,
   automationJobStatusSchema,
   automationSettingsDefaults,
+  extractionCandidatePayloadSchema,
+  extractionCandidateProvenanceSchema,
   type AutomationJobDto,
   type AutomationJobKind,
   type AutomationJobStatus,
@@ -13,7 +16,8 @@ import {
   type CandidateKind,
   type CandidateStatus,
   type ExtractionCandidateDto,
-  type ExtractionCandidatePayload
+  type ExtractionCandidatePayload,
+  type ExtractionCandidateProvenance
 } from "../../../contracts/src/automation.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
@@ -73,6 +77,8 @@ export type UpsertExtractionCandidateInput = {
   confidence: number;
   extractorId: string;
   extractorVersion: string;
+  /** Audit and replay facts only; never the candidate's source of truth. */
+  provenance?: ExtractionCandidateProvenance;
 };
 
 export type UpsertExtractionCandidateResult = {
@@ -151,6 +157,7 @@ type CandidateRow = {
   target_resource_id: string | null;
   reviewed_at: number | null;
   superseded_by_id: string | null;
+  provenance_json: string;
   created_at: number;
   updated_at: number;
   revision: number;
@@ -171,6 +178,20 @@ function iso(value: number | null): string | null {
 
 export class SqliteAutomationRepository {
   constructor(private readonly db: Database) {}
+
+  /**
+   * The commit boundary for one extraction result.
+   *
+   * Candidates, their Evidence links and the Review Items that surface them must become visible
+   * together: a partially persisted extraction would either lose a candidate or leave one in the
+   * Review Inbox with nothing to review. Nested repository calls join this transaction, so the
+   * whole unit either commits or rolls back as one.
+   *
+   * The extractor itself is a subprocess and is always called *before* this runs — never inside.
+   */
+  runExtractionTransaction<T>(work: () => T): T {
+    return this.db.transaction(work)();
+  }
 
   getSettings(projectId: string, now: number = Date.now()): AutomationSettingsDto {
     this.ensureSettingsRow(projectId, now);
@@ -491,8 +512,8 @@ export class SqliteAutomationRepository {
       this.db.prepare(
         `INSERT INTO extraction_candidates
            (id, project_id, session_id, source_evidence_id, kind, fingerprint, payload_json, confidence,
-            status, extractor_id, extractor_version, created_at, updated_at, revision)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, 1)`
+            status, extractor_id, extractor_version, provenance_json, created_at, updated_at, revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, 1)`
       ).run(
         id,
         input.projectId,
@@ -504,6 +525,7 @@ export class SqliteAutomationRepository {
         input.confidence,
         input.extractorId,
         input.extractorVersion,
+        JSON.stringify(input.provenance ?? {}),
         now,
         now
       );
@@ -715,7 +737,9 @@ function mapCandidate(row: CandidateRow, evidenceIds: string[]): ExtractionCandi
     evidenceIds,
     kind: row.kind,
     fingerprint: row.fingerprint,
-    payload: JSON.parse(row.payload_json) as ExtractionCandidatePayload,
+    // Validated rather than cast: a malformed payload must fail loudly instead of reaching the
+    // API or a review decision as an untyped object.
+    payload: parseCandidateJson("payload_json", row.payload_json, extractionCandidatePayloadSchema),
     confidence: row.confidence,
     status: row.status,
     extractorId: row.extractor_id,
@@ -724,10 +748,33 @@ function mapCandidate(row: CandidateRow, evidenceIds: string[]): ExtractionCandi
     targetResourceId: row.target_resource_id,
     reviewedAt: iso(row.reviewed_at),
     supersededById: row.superseded_by_id,
+    provenance: parseCandidateJson("provenance_json", row.provenance_json, extractionCandidateProvenanceSchema),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
     revision: row.revision
   };
+}
+
+/**
+ * A stable failure the scheduler can retry on. `column` is fixed vocabulary, and the raw JSON
+ * never travels with the error because it holds extracted transcript content.
+ */
+function parseCandidateJson<S extends z.ZodTypeAny>(column: string, raw: string, schema: S): z.infer<S> {
+  const fail = (reason: string): ContextOsError => new ContextOsError("CONFLICT", "Extraction candidate content failed validation", {
+    failureCode: "EXTRACTION_PERSISTENCE_FAILED",
+    column,
+    reason
+  });
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw fail("JSON_PARSE");
+  }
+  const result = schema.safeParse(parsed);
+  if (!result.success) throw fail("SCHEMA_MISMATCH");
+  return result.data;
 }
 
 export { activeCandidateStatuses };

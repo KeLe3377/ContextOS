@@ -108,6 +108,18 @@ export const extractionCandidatePayloadSchema = z.discriminatedUnion("kind", [
   workItemCandidatePayloadSchema
 ]);
 
+/**
+ * Audit-only provenance for a candidate. It exists for replay and diagnosis, never as the
+ * candidate's source of truth — that stays the linked Evidence rows.
+ */
+export const extractionCandidateProvenanceSchema = z.object({
+  sourceArtifactId: z.string().min(1).optional(),
+  sourceEvidenceId: z.string().min(1).optional(),
+  extractorId: z.string().min(1).optional(),
+  extractorVersion: z.string().min(1).optional(),
+  extractionInputHash: z.string().min(1).optional()
+}).strict();
+
 export const extractionCandidateSchema = resourceMetaSchema
   .extend({
     projectId: z.string(),
@@ -125,7 +137,8 @@ export const extractionCandidateSchema = resourceMetaSchema
     targetResourceType: z.string().nullable(),
     targetResourceId: z.string().nullable(),
     reviewedAt: z.string().nullable(),
-    supersededById: z.string().nullable()
+    supersededById: z.string().nullable(),
+    provenance: extractionCandidateProvenanceSchema
   })
   .refine((candidate) => candidate.payload.kind === candidate.kind, {
     message: "payload.kind must match candidate.kind",
@@ -243,6 +256,7 @@ export type AutomationSettingsPatch = z.infer<typeof automationSettingsPatchSche
 export type AutomationSettingsDto = z.infer<typeof automationSettingsDtoSchema>;
 export type CandidateKind = z.infer<typeof candidateKindSchema>;
 export type CandidateStatus = z.infer<typeof candidateStatusSchema>;
+export type ExtractionCandidateProvenance = z.infer<typeof extractionCandidateProvenanceSchema>;
 export type ExtractionCandidatePayload = z.infer<typeof extractionCandidatePayloadSchema>;
 export type ResumeCapsuleCandidatePayload = z.infer<typeof resumeCapsuleCandidatePayloadSchema>;
 export type ContextItemCandidatePayload = z.infer<typeof contextItemCandidatePayloadSchema>;

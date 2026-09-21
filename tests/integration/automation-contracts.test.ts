@@ -43,6 +43,7 @@ const validCandidate = {
   extractorVersion: "1.0.0",
   targetResourceType: null,
   targetResourceId: null,
+  provenance: { sourceArtifactId: "cmp_1", extractorId: "codex-cli" },
   reviewedAt: null,
   supersededById: null,
   createdAt: "2026-09-20T00:00:00.000Z",

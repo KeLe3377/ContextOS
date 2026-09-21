@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { SqliteClient } from "../../packages/infrastructure/src/sqlite/client.js";
 import { getSchemaVersion, runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { coreTableNames } from "../../packages/infrastructure/src/sqlite/schema.js";
+import { SqliteAutomationRepository } from "../../packages/infrastructure/src/sqlite/automation-repository.js";
 
 let tempDir: string | undefined;
 let client: SqliteClient | undefined;
@@ -33,7 +34,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(13);
+    expect(getSchemaVersion(client)).toBe(14);
     const tables = tableNames();
 
     for (const tableName of coreTableNames) {
@@ -62,7 +63,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(13);
+    expect(getSchemaVersion(client)).toBe(14);
     const tables = tableNames();
     for (const tableName of coreTableNames) {
       expect(tables).toContain(tableName);
@@ -96,5 +97,38 @@ describe("SQLite migrations", () => {
       .toThrow("Evidence Snapshots are immutable");
     expect(() => client!.db.prepare("DELETE FROM evidence_snapshots WHERE id = 'ev_immutable'").run())
       .toThrow("Evidence Snapshots are immutable");
+  });
+
+  test("upgrades a schema 0013 database and reads historical candidates without provenance", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "contextos-sqlite-"));
+    const migrationsDir = resolve(process.cwd(), "migrations");
+    const partialDir = join(tempDir, "migrations-through-0013");
+    await mkdir(partialDir, { recursive: true });
+    for (const name of readdirSync(migrationsDir).filter((entry) => /^\d+_.+\.sql$/.test(entry))) {
+      if (Number(name.split("_", 1)[0]) > 13) continue;
+      await copyFile(join(migrationsDir, name), join(partialDir, name));
+    }
+
+    client = SqliteClient.open({ databaseFile: join(tempDir, "contextos.sqlite") });
+    runMigrations(client, partialDir);
+    expect(getSchemaVersion(client)).toBe(13);
+
+    // A candidate written before provenance existed.
+    client.db.prepare("INSERT INTO projects (id, name, root_path, root_path_hash, status, created_at, updated_at) VALUES ('proj_old', 'Old', '.', 'hash', 'ACTIVE', 1, 1)").run();
+    client.db.prepare(
+      `INSERT INTO extraction_candidates
+         (id, project_id, kind, fingerprint, payload_json, confidence, status, extractor_id, extractor_version, created_at, updated_at, revision)
+       VALUES ('cand_old', 'proj_old', 'RESUME_CAPSULE', 'sha256:old', '{"kind":"RESUME_CAPSULE","summary":"s","nextAction":null}', 0.5, 'PENDING', 'codex-cli', '1.0.0', 1, 1, 1)`
+    ).run();
+    expect(client.db.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('extraction_candidates') WHERE name = 'provenance_json'").get())
+      .toEqual({ count: 0 });
+
+    runMigrations(client);
+
+    expect(getSchemaVersion(client)).toBe(14);
+    const repository = new SqliteAutomationRepository(client.db);
+    const candidate = repository.getCandidate("cand_old")!;
+    expect(candidate.kind).toBe("RESUME_CAPSULE");
+    expect(candidate.provenance).toEqual({});
   });
 });

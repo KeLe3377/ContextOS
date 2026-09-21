@@ -187,7 +187,7 @@ function mapArtifact(row: CompactionArtifactRow): CompactionArtifactDto {
   };
 }
 
-function parseColumn<T>(column: string, raw: string, schema: z.ZodType<T>): T {
+function parseColumn<S extends z.ZodTypeAny>(column: string, raw: string, schema: S): z.infer<S> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;

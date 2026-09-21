@@ -17,6 +17,7 @@ import {
 import { AutomationJobRouter } from "../../../packages/application/src/core/automation-job-router.js";
 import { AutomationService } from "../../../packages/application/src/core/automation-service.js";
 import { CompactionService } from "../../../packages/application/src/core/compaction-service.js";
+import { ExtractionService } from "../../../packages/application/src/core/extraction-service.js";
 import { ContextOsCompactionAdapter } from "../../../packages/application/src/core/compaction-adapter.js";
 import { PrefixTranscriptSanitizer } from "../../../packages/application/src/core/transcript-sanitizer.js";
 import type { CompactionOptions, TranscriptCompactionProvider } from "../../../packages/application/src/ports/transcript-compaction.js";
@@ -192,17 +193,24 @@ export async function createDaemonServer(
       provider: options.compactionProvider ?? new DeterministicCompactionProvider(),
       options: options.compactionOptions ?? defaultCompactionOptions
     });
+    // The extractor runs in its own workspace under the data directory, and candidates are
+    // persisted in one transaction with their Evidence links and Review Items, so a job can only
+    // report success once everything is on disk.
+    const contextExtractor = new CodexContextExtractor({ dataDir: config.dataDir });
+    const extractionService = new ExtractionService({
+      automation: automationRepository,
+      artifacts: new SqliteCompactionArtifactRepository(sqlite.db),
+      evidence: evidenceSnapshotService,
+      sessions: new SqliteSessionRepository(sqlite.db),
+      reviewItems: reviewItemRepository,
+      extractor: contextExtractor
+    });
+
     const automationJobRouter = new AutomationJobRouter()
       .register("DISCOVER_CODEX_THREADS", (job) => automationService.handleDiscoveryJob(job))
       .register("SYNC_SESSION_TRANSCRIPT", (job) => automationService.handleSyncJob(job))
-      .register("COMPACT_EVIDENCE", (job) => compactionService.handleCompactionJob(job));
-
-    // The extractor is wired here, but EXTRACT_EVIDENCE_CONTEXT stays deliberately unregistered:
-    // candidates cannot be persisted until the next stage lands, and a job that reported success
-    // without storing anything would lose the extraction silently. Because the scheduler only
-    // claims kinds that have a handler, those jobs stay QUEUED with their retry budget intact
-    // until the handler that persists candidates is registered.
-    const contextExtractor = new CodexContextExtractor({ dataDir: config.dataDir });
+      .register("COMPACT_EVIDENCE", (job) => compactionService.handleCompactionJob(job))
+      .register("EXTRACT_EVIDENCE_CONTEXT", (job) => extractionService.handleExtractionJob(job));
     const automationScheduler = new AutomationScheduler({
       repository: automationRepository,
       dispatcher: automationJobRouter,
