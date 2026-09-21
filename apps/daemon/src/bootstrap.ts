@@ -295,6 +295,7 @@ export async function createDaemonServer(
   });
     await registerAutomationRoutes(server, {
     automation: automationRepository,
+    schedulerStatus: () => automationScheduler.getStatus(),
     application: candidateApplicationService,
     extraction: extractionService
   });

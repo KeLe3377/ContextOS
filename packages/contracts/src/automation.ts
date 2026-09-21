@@ -212,6 +212,26 @@ export const automationProjectStatusSchema = z.object({
   pendingCandidates: z.number().int().nonnegative()
 });
 
+/**
+ * 概览页需要的自动化状态。
+ *
+ * 只暴露可以真实回答的字段：调度器状态、任务计数、待审核建议数量、最近失败码和每个项目的汇总。
+ * 不返回 transcript、提示词、模型输出、内部 job payload 或本地路径。
+ */
+export const automationOverviewSchema = z.object({
+  generatedAt: z.string(),
+  scheduler: automationSchedulerStatusSchema,
+  jobs: z.object({
+    total: z.number().int().nonnegative(),
+    byStatus: z.record(automationJobStatusSchema, z.number().int().nonnegative())
+  }),
+  candidates: z.object({
+    pending: z.number().int().nonnegative()
+  }),
+  recentFailures: z.array(automationJobFailureSchema),
+  projects: z.array(automationProjectStatusSchema)
+});
+
 export const automationStatusSchema = z.object({
   generatedAt: z.string(),
   scheduler: automationSchedulerStatusSchema,
@@ -271,6 +291,7 @@ export type AutomationJobFailureDto = z.infer<typeof automationJobFailureSchema>
 export type AutomationSchedulerStatus = z.infer<typeof automationSchedulerStatusSchema>;
 export type AutomationProjectStatus = z.infer<typeof automationProjectStatusSchema>;
 export type AutomationStatusDto = z.infer<typeof automationStatusSchema>;
+export type AutomationOverviewDto = z.infer<typeof automationOverviewSchema>;
 export type AutomationRunDiscoveryInput = z.infer<typeof automationRunDiscoveryInputSchema>;
 export type AutomationRunDiscoveryResult = z.infer<typeof automationRunDiscoveryResultSchema>;
 export type ExtractionCandidateTransitionResult = z.infer<typeof extractionCandidateTransitionResultSchema>;

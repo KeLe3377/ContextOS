@@ -61,15 +61,34 @@ async function guardAsync<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
+function withDbStatus(services: { automation: SqliteAutomationRepository }): Record<string, number> {
+  return services.automation.countJobsByStatus();
+}
+
 export async function registerAutomationRoutes(
   server: FastifyInstance,
   services: {
     automation: SqliteAutomationRepository;
+    schedulerStatus: () => { running: boolean; startedAt: string | null; lastTickAt: string | null; activeJobs: number };
     application: CandidateApplicationService;
     extraction: ExtractionService;
   }
 ): Promise<void> {
-  server.get("/api/automation/status", async () => ({ projects: services.automation.listProjectStatuses() }));
+  server.get("/api/automation/status", async () => {
+    const byStatus = withDbStatus(services);
+    return {
+      generatedAt: new Date().toISOString(),
+      scheduler: services.schedulerStatus(),
+      jobs: {
+        total: Object.values(byStatus).reduce((total, count) => total + count, 0),
+        byStatus
+      },
+      candidates: { pending: services.automation.countPendingCandidates() },
+      // Only the stable failure code and a short message; job payloads never leave the daemon.
+      recentFailures: services.automation.listLatestFailures(5).map((job) => ({ code: job.failureCode, message: job.failureMessage })),
+      projects: services.automation.listProjectStatuses()
+    };
+  });
 
   server.get("/api/projects/:projectId/automation/settings", async (request) => {
     const { projectId } = projectIdParamsSchema.parse(request.params);

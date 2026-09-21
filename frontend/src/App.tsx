@@ -1,4 +1,20 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  automationModeText,
+  candidateActions,
+  candidateKindText,
+  candidateStatusText,
+  failureCodeText,
+  jobStatusText,
+  parseAutomationStatus,
+  parseCandidate,
+  parseDiscovery,
+  reviewTriggerText,
+  safeProvenance,
+  type AutomationMode,
+  type AutomationOverviewDto,
+  type ExtractionCandidateDto
+} from "./automation";
 
 const API_BASE = localStorage.getItem("contextos.apiBase") || "http://127.0.0.1:4721";
 
@@ -28,6 +44,8 @@ type WorkspaceData = {
   settings: AnyRecord | null;
   runtimeHealth: AnyRecord | null;
   adapters: AnyRecord[];
+  automation: AutomationOverviewDto | null;
+  automationError: string | null;
 };
 
 class ActionCanceled extends Error {
@@ -83,7 +101,9 @@ function emptyData(): WorkspaceData {
     rules: [],
     settings: null,
     runtimeHealth: null,
-    adapters: []
+    adapters: [],
+    automation: null,
+    automationError: null
   };
 }
 
@@ -445,12 +465,25 @@ export function App() {
       rules: fetchJson("/api/rules"),
       settings: fetchJson("/api/settings"),
       runtimeHealth: fetchJson("/api/runtime/health"),
-      adapters: fetchJson("/api/agent-adapters")
+      adapters: fetchJson("/api/agent-adapters"),
+      automation: fetchJson("/api/automation/status")
     };
     const entries = await Promise.all(Object.entries(requests).map(async ([key, promise]) => [key, await settle(promise)] as const));
     const next = emptyData();
     const failures: string[] = [];
     for (const [key, result] of entries) {
+      if (key === "automation") {
+        if (result.ok) {
+          try {
+            next.automation = parseAutomationStatus(result.value);
+          } catch (parseError) {
+            next.automationError = parseError instanceof Error ? parseError.message : "自动化状态解析失败";
+          }
+        } else {
+          next.automationError = result.error.message;
+        }
+        continue;
+      }
       if (result.ok) {
         (next as AnyRecord)[key] = Array.isArray((result.value as AnyRecord)?.items) ? (result.value as AnyRecord).items : result.value;
       } else {
@@ -925,7 +958,7 @@ export function App() {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>正在加载工作区数据...</EmptyNote></>;
     const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, desktopSyncAuto, setDesktopSyncAuto, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
-      case "overview": return <OverviewPage data={data} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
+      case "overview": return <OverviewPage data={data} onRefresh={() => void loadData()} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "sessions": return <SessionsPage {...props} header={<PageHeader pageDef={pages.sessions} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "review": return <ReviewPage {...props} header={<PageHeader pageDef={pages.review} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
@@ -1014,7 +1047,7 @@ function ProjectPill({ project }: { project?: AnyRecord }) {
   return <span className="project-pill">{icon("folder_managed")} {project ? `${project.name} (${project.rootPath})` : "未加载项目"}</span>;
 }
 
-function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode }) {
+function OverviewPage({ data, header, onRefresh }: { data: WorkspaceData; header: ReactNode; onRefresh: () => void }) {
   const overview = data.overview;
   const activeProject = overview?.project || data.projects[0];
   const nextWork = overview?.nextWorkItems || data.workItems.filter((item) => ["READY", "IN_PROGRESS"].includes(item.status)).map((item) => ({ id: item.id, title: item.title, status: item.status, subtitle: item.description || "", updatedAt: item.updatedAt }));
@@ -1037,9 +1070,78 @@ function OverviewPage({ data, header }: { data: WorkspaceData; header: ReactNode
         <div className="span-4 stack">
           <Panel title="治理队列" iconName="inbox"><Rows rows={pendingReviews.slice(0, 5).map((item: AnyRecord) => [item.title, item.status, toneForStatus(item.status), item.subtitle || ""])} empty="暂无待审查项。" /></Panel>
           <Panel title="上下文健康度" iconName="link"><div className="metric-row"><span>活动数据源</span><strong>{contextHealth.activeSources}</strong></div><div className="metric-row"><span>暂停数据源</span><strong>{contextHealth.pausedSources}</strong></div><div className="metric-row"><span>证据快照</span><strong>{contextHealth.evidenceSnapshots}</strong></div><div className="metric-row"><span>过期上下文</span><strong>{contextHealth.staleContextItems}</strong></div></Panel>
+          <AutomationOverviewPanel data={data} onChanged={onRefresh} />
         </div>
       </div>
     </>
+  );
+}
+
+
+function AutomationOverviewPanel({ data, onChanged }: { data: WorkspaceData; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const status = data.automation;
+
+  const runDiscovery = async () => {
+    const projectId = status?.projects[0]?.projectId;
+    if (!projectId || busy) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = parseDiscovery(await sendJson(`/api/projects/${projectId}/automation/discovery`, "POST", {}));
+      setMessage({ text: response.created ? "发现任务已入队，等待调度执行。" : "已有发现任务在排队中。", error: false });
+      onChanged();
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "运行发现失败", error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (data.automationError) {
+    return <Panel title="自动化" iconName="bolt"><EmptyNote>自动化状态加载失败：{data.automationError}</EmptyNote></Panel>;
+  }
+  if (!status) return <Panel title="自动化" iconName="bolt"><EmptyNote>正在加载自动化状态…</EmptyNote></Panel>;
+
+  const byStatus = status.jobs.byStatus as AnyRecord;
+  const latestSync = status.projects.map((item) => item.lastSyncAt).filter(Boolean).sort().pop() || null;
+  const latestExtraction = status.projects.map((item) => item.lastExtractionAt).filter(Boolean).sort().pop() || null;
+  return (
+    <Panel title="自动化" iconName="bolt" meta={<Badge text={status.scheduler.running ? "调度运行中" : "调度已停止"} tone={status.scheduler.running ? "green" : ""} />}>
+      <div className="metric-row"><span>排队中 / 运行中 / 失败</span><strong>{byStatus.QUEUED || 0} / {byStatus.RUNNING || 0} / {byStatus.FAILED || 0}</strong></div>
+      <div className="metric-row"><span>待审核提取建议</span><strong>{status.candidates.pending}</strong></div>
+      <div className="metric-row"><span>最近同步</span><strong>{fmtDate(latestSync)}</strong></div>
+      <div className="metric-row"><span>最近提取</span><strong>{fmtDate(latestExtraction)}</strong></div>
+      {status.projects.length === 0 ? <EmptyNote>还没有项目启用自动化。</EmptyNote> : (
+        <Rows
+          rows={status.projects.map((item) => [
+            <span className="mono">{item.projectId}</span>,
+            automationModeText(item.mode),
+            item.mode === "OFF" ? "" : "blue",
+            <span>待审核 {item.pendingCandidates}</span>
+          ])}
+          empty="暂无自动化项目。"
+        />
+      )}
+      {status.projects.length > 0 ? (
+        <div className="row-actions">
+          <button className="btn" disabled={busy} onClick={() => void runDiscovery()}>{busy ? "正在入队…" : "运行发现"}</button>
+          {message ? <span className={message.error ? "error-text" : "muted"}>{message.text}</span> : null}
+        </div>
+      ) : null}
+      {status.recentFailures.length > 0 ? (
+        <div className="stack compact">
+          <div className="muted">最近失败</div>
+          {status.recentFailures.slice(0, 3).map((failure) => (
+            <div className="metric-row" key={failure.id}>
+              <span>{failureCodeText(failure.failureCode)}</span>
+              <span className="mono muted">{failure.failureCode || "无失败码"}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </Panel>
   );
 }
 
