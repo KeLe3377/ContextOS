@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { PrefixTranscriptSanitizer } from "../../packages/application/src/core/transcript-sanitizer.js";
-import { transcriptSanitizerVersion } from "../../packages/application/src/ports/transcript-compaction.js";
+import { transcriptSanitizerVersion } from "../../packages/application/src/core/transcript-sanitizer.js";
 import type { AgentTranscriptEvent } from "../../packages/application/src/ports/agent-adapter.js";
 
 const agentsInjection = "# AGENTS.md instructions for D:\\project\\ContextOS\n\n<INSTRUCTIONS>\nUse tabs.\n</INSTRUCTIONS>";

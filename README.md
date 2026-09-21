@@ -108,6 +108,26 @@ Overview 是唯一允许聚合多个对象的页面，但它只服务于“恢�
 - **跨 Agent 一致**：Agent 差异封装在 adapter 中，核心领域只关心统一的 Session、Evidence 和 Context 模型。
 - **页面职责清晰**：每页只管理一个对象，跨模块关系保持为引用。
 
+## 当前范围与未来能力
+
+ContextOS 当前交付的是一条可靠的 Codex 会话连续性闭环：
+
+- 启用自动化后自动发现 Codex thread；
+- 从 rollout EOF 首次绑定 ContextOS Session，不摄入绑定前的历史；
+- 绑定后的新增事件被正式调度增量捕获为不可变 Evidence；
+- 每次捕获在同一事务里确定性重建有界 Resume Capsule（12,000 字符上限、保留最新 user/assistant 与失败/未知工具结果、成功工具输出优先裁剪、去除运行时注入前缀）；
+- 用户点击 Continue，系统用同一 `externalSessionId` resume 回原 Codex 会话，并把刚捕获的连续性摘录带回去。
+
+以下能力**不在当前活跃运行路径**中：相关实现已退出运行时，只保留历史表与 migration 以便兼容与回滚。
+
+- Compaction Provider / Compaction Artifact；
+- Codex Context Extractor；
+- Extraction Candidate 与自动接受；
+- 自动化专属 Review、自动物化 Context Item；
+- Jev Provider、Codex error signal、新增 Agent Adapter、内部 Job 检查页面。
+
+这些能力若未来启用，会作为独立的治理能力接入，不会重新成为 Session 连续性闭环的前置条件。Candidate / Artifact 相关的历史 API 当前统一返回 `410 Gone` 与稳定错误码 `FEATURE_DEFERRED`。
+
 ## 技术方向
 
 当前设计基线采用：

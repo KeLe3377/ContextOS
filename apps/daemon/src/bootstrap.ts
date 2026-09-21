@@ -16,7 +16,6 @@ import {
 } from "../../../packages/application/src/core/automation-scheduler.js";
 import { AutomationJobRouter } from "../../../packages/application/src/core/automation-job-router.js";
 import { AutomationService } from "../../../packages/application/src/core/automation-service.js";
-import { extractionRunsRoot } from "../../../packages/infrastructure/src/extraction/codex-context-extractor.js";
 import type { AgentAdapter } from "../../../packages/application/src/ports/agent-adapter.js";
 import type { StartupRegistration } from "../../../packages/application/src/ports/startup-registration.js";
 import { ProjectService } from "../../../packages/application/src/project/project-service.js";
@@ -186,10 +185,9 @@ export async function createDaemonServer(
           );
         }
       },
-      // The extractor runs inside its own workspace under the data directory. Treating anything
-      // under it as runtime plumbing keeps an extraction run from being discovered as project
-      // work, which would otherwise let the pipeline feed itself.
-      ignoredWorkspaceRoots: [extractionRunsRoot(config.dataDir)]
+      // Extraction runs no longer exist in the active runtime, so there is no extraction
+      // workspace to exclude from discovery.
+      ignoredWorkspaceRoots: []
     });
     // Only discovery and transcript sync are live. COMPACT_EVIDENCE and EXTRACT_EVIDENCE_CONTEXT
     // remain parseable historical rows, but nothing is registered for them, so the scheduler

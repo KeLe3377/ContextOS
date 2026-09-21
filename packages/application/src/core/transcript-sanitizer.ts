@@ -1,9 +1,24 @@
 import type { AgentTranscriptEvent } from "../ports/agent-adapter.js";
-import {
-  transcriptSanitizerVersion,
-  type SanitizedTranscript,
-  type TranscriptSanitizer
-} from "../ports/transcript-compaction.js";
+
+/**
+ * Stable version of the sanitizer rules, recorded on derived artifacts.
+ *
+ * Kept here (not in the deferred `transcript-compaction` port) because the sanitizer is
+ * part of the active session-continuity path and must survive the compaction pipeline removal.
+ */
+export const transcriptSanitizerVersion = "contextos-transcript-sanitizer.v1";
+
+export type SanitizedTranscript = {
+  events: AgentTranscriptEvent[];
+  /** Ordinals dropped as known system injections, ascending. */
+  removedOrdinals: number[];
+  sanitizerVersion: string;
+};
+
+export interface TranscriptSanitizer {
+  readonly version: string;
+  sanitize(events: readonly AgentTranscriptEvent[]): SanitizedTranscript;
+}
 
 /**
  * Removes the known pseudo-user injections the agent runtime prepends to a session.

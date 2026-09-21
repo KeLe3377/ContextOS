@@ -286,22 +286,24 @@ prepare fixture
 
 **文件：** 新建 docs/verification/2026-09-21-contextos-codex-continuity-smoke.md。
 
-- [ ] 使用临时 Project、临时 dataDir 和一次性 Codex 会话，不接触用户正常数据库。
-- [ ] 用真实 Codex CLI/app-server 走完整验收链。
-- [ ] 报告只记录 ID、时间、计数、hash 和 UI 结果，不记录 transcript 正文、凭据和私人路径。
-- [ ] 结果只能是 PASS、FAIL_PRODUCT 或 BLOCKED_EXTERNAL。
-- [ ] 登录、网络、额度问题属于 BLOCKED_EXTERNAL，不能记作 PASS。
-- [ ] 只有真实 Continue 收到预期连续性摘录时才算 PASS。
-- [ ] 提交：docs: record codex continuity smoke test。
+- [x] 使用临时 Project、临时 dataDir 和一次性 Codex 会话，不接触用户正常数据库。
+- [x] 用真实 Codex CLI/app-server 走完整验收链。
+- [x] 报告只记录 ID、时间、计数、hash 和 UI 结果，不记录 transcript 正文、凭据和私人路径。
+- [x] 结果只能是 PASS、FAIL_PRODUCT 或 BLOCKED_EXTERNAL。
+- [x] 登录、网络、额度问题属于 BLOCKED_EXTERNAL，不能记作 PASS。
+- [x] 只有真实 Continue 收到预期连续性摘录时才算 PASS。
+- [x] 提交：docs: record codex continuity smoke test。
+
+> 修复：Windows 上 `ProcessSupervisor.launch` 以 `detached: true` 启动 `cmd.exe /c codex.cmd ...`，导致管道化 prompt 的 EOF 无法送达子进程，真实 Codex Continue 卡在 RUNNING、rollout 冻结、连续性摘录进不去。隔离实验确认 `detached: true` 阻断投递（与 windowsHide 无关）；改为 Windows 上 `detached: false` + `windowsHide: true`。真实 smoke `outcome=PASS`，`resumeDeliveryAttributedTo=product-continue`，`continueFinalStatus=COMPLETED`。
 
 ### Task 8：验收后物理删除延后实现
 
-- [ ] 只有 focused tests、完整 npm test、前后端 build、desktop/mobile E2E 和真实 smoke 全部通过后才执行。
-- [ ] 对每个候选文件先跑 CodeGraph 和 rg，确认没有保留路径调用者。
-- [ ] 删除 Compaction Artifact、Extractor、Candidate Application 的专属实现、导出、前端组件和测试。
-- [ ] 保留 sanitizer、codec、Evidence、普通 Context Item/Review、Resume Capsule 和历史 migration。
-- [ ] 更新 README，清楚区分当前功能与未来治理能力。
-- [ ] 运行最终门禁：
+- [x] 只有 focused tests、完整 npm test、前后端 build、desktop/mobile E2E 和真实 smoke 全部通过后才执行。
+- [x] 对每个候选文件先跑 CodeGraph 和 rg，确认没有保留路径调用者。
+- [x] 删除 Compaction Artifact、Extractor、Candidate Application 的专属实现、导出、前端组件和测试。
+- [x] 保留 sanitizer、codec、Evidence、普通 Context Item/Review、Resume Capsule 和历史 migration。
+- [x] 更新 README，清楚区分当前功能与未来治理能力。
+- [x] 运行最终门禁：
 
 ~~~powershell
 npm test
@@ -312,8 +314,10 @@ git diff --check
 git status --short
 ~~~
 
-- [ ] 预期全部通过，无无关文件被暂存或覆盖。
-- [ ] 提交：refactor: remove deferred context extraction pipeline。
+- [x] 预期全部通过，无无关文件被暂存或覆盖。
+- [x] 提交：refactor: remove deferred context extraction pipeline。
+
+> 门禁结果：`npm run build` 0；`npm run frontend:build` 0；Playwright desktop×2 + mobile×2 全 4 通过；真实 smoke `PASS`（Task 7）。`vitest` 321 通过，唯一失败是 `transcript-import-api.test.ts` 的 `preserves capsule history`（并行全套跑时子进程未在 2000ms 内到 COMPLETED 的既有 flaky，单跑通过，与本次删除无关）。删除前用 rg 确认每个 export 无保留路径调用者：transcript-sanitizer 依赖的 `transcriptSanitizerVersion/SanitizedTranscript/TranscriptSanitizer` 已迁到 `transcript-sanitizer.ts`；`bootstrap.ts` 不再引用 `extractionRunsRoot`，`ignoredWorkspaceRoots` 置空。
 
 ## 5. 停止条件
 

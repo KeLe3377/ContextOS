@@ -105,10 +105,11 @@ describe("自动化 fixture 路由（已启用）", () => {
   test("响应不泄露 rollout 路径或正文", async () => {
     const response = await post(handle!.baseUrl, "/__e2e/automation-fixture/append");
     const body = response.text;
+    // 响应只暴露批次元数据与一个无害的批次标记；绝不暴露 rollout 文件路径或 transcript 正文。
     expect(body).not.toContain("rollout");
-    expect(body).not.toContain("第 ");
     expect(body).not.toMatch(/[A-Za-z]:[\\/]/);
-    expect(Object.keys(response.json ?? {})).toEqual(["batch", "events", "sizeBytes"]);
+    expect(Object.keys(response.json ?? {})).toEqual(["batch", "events", "sizeBytes", "marker"]);
+    expect(String(response.json?.marker)).toMatch(/^[^\\/]+ 第 \d+ 批$/);
   });
 });
 
