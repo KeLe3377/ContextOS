@@ -234,13 +234,13 @@ commit prepared Evidence
 
 **文件：** runtime-services.ts、runtime-api.test.ts、transcript-import-api.test.ts。
 
-- [ ] 先写行为测试：绑定 Session 存在连续性 Capsule，Continue 后 adapter operation 必须为 resume、保持 external Session ID，并包含连续性文本。
-- [ ] 断言 prompt 不含 Evidence 文件路径、job payload 或无关内部 ID。
-- [ ] 运行新测试，确认旧 prompt 缺少该内容。
-- [ ] Continue 格式化 prompt 前读取 Resume Capsule；仅在非空时添加 Recent captured continuity 段落。
-- [ ] 分别运行 runtime-api.test.ts 和 transcript-import-api.test.ts。
-- [ ] 不得通过增加 timeout 掩盖生命周期失败。
-- [ ] 提交：feat: resume codex with captured session continuity。
+- [x] 先写行为测试：绑定 Session 存在连续性 Capsule，Continue 后 adapter operation 必须为 resume、保持 external Session ID，并包含连续性文本。
+- [x] 断言 prompt 不含 Evidence 文件路径、job payload 或无关内部 ID。
+- [x] 运行新测试，确认旧 prompt 缺少该内容。
+- [x] Continue 格式化 prompt 前读取 Resume Capsule；仅在非空时添加 Recent captured continuity 段落。
+- [x] 分别运行 runtime-api.test.ts 和 transcript-import-api.test.ts。
+- [x] 不得通过增加 timeout 掩盖生命周期失败。
+- [x] 提交：feat: resume codex with captured session continuity。
 
 ### Task 5：简化生产 API 和 UI
 

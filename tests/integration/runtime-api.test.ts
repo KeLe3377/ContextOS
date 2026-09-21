@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { createDaemonServer } from "../../apps/daemon/src/bootstrap.js";
 import { ClaudeCodeAdapter } from "../../packages/infrastructure/src/adapters/claude-code-adapter.js";
 import { CodexAdapter } from "../../packages/infrastructure/src/adapters/codex-adapter.js";
+import { SqliteRuntimeRepository } from "../../packages/infrastructure/src/sqlite/runtime-repository.js";
 
 let cleanupTasks: Array<() => Promise<void>> = [];
 
@@ -342,6 +343,101 @@ describe("runtime APIs", () => {
     await waitForSessionStatus(server, session.id, "COMPLETED");
     const finalEvidence = await getImportedTranscripts(server, session.id);
     expect(finalEvidence).toHaveLength(1);
+  });
+
+  test("brings the captured session continuity back into the resumed Codex session", async () => {
+    const externalSessionId = "codex-continuity-session";
+    const projectRoot = "D:/project/ContextOS";
+    const { server, tempDir } = await createTestServer(
+      (dir) => ["-e", promptCaptureScript(join(dir, "resume-prompt.txt"))],
+      async (dir) => {
+        const sessionsDir = join(dir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        const rows = [
+          { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
+          { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "之前的进度" }] } }
+        ];
+        await writeFile(join(sessionsDir, "rollout-continuity.jsonl"), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+
+    // Continuity is written by the sync path; this is the same production writer it uses.
+    const db = new Database(join(tempDir, "contextos.sqlite"));
+    try {
+      new SqliteRuntimeRepository(db).writeSessionContinuity({
+        sessionId: session.id,
+        summary: "已在同一事务内提交 Evidence 与 offset",
+        nextAction: "继续推进同步闭环",
+        contextText: "user: 请继续处理同步事务边界\nassistant: 已在同一事务内提交",
+        evidenceSnapshotIds: ["ev_continuity_1"]
+      }, Date.now());
+    } finally {
+      db.close();
+    }
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    expect(refreshed.json().externalSessionId).toBe(externalSessionId);
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.statusCode).toBe(200);
+    expect(continued.json()).toMatchObject({
+      launch: { operation: "resume", externalSessionId },
+      job: { payload: { launchInfo: { operation: "resume", externalSessionId } } }
+    });
+    expect(continued.json().launch.args).toEqual(expect.arrayContaining(["resume", externalSessionId]));
+
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+    const prompt = await readCapturedPrompt(join(tempDir, "resume-prompt.txt"));
+
+    expect(prompt).toContain("Recent captured continuity");
+    expect(prompt).toContain("请继续处理同步事务边界");
+    expect(prompt).toContain("已在同一事务内提交");
+    // The prompt carries the excerpt, never internal plumbing.
+    expect(prompt).not.toContain("ev_continuity_1");
+    expect(prompt).not.toContain(tempDir);
+    expect(prompt).not.toContain("storageRef");
+    expect(prompt).not.toContain("idempotencyKey");
+  });
+
+  test("omits the continuity section when the session has captured nothing yet", async () => {
+    const externalSessionId = "codex-no-continuity-session";
+    const projectRoot = "D:/project/ContextOS";
+    const { server, tempDir } = await createTestServer(
+      (dir) => ["-e", promptCaptureScript(join(dir, "resume-prompt.txt"))],
+      async (dir) => {
+        const sessionsDir = join(dir, "codex-sessions");
+        await mkdir(sessionsDir, { recursive: true });
+        const rows = [
+          { type: "session_meta", payload: { id: externalSessionId, cwd: projectRoot } },
+          { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "只有一条历史消息" }] } }
+        ];
+        await writeFile(join(sessionsDir, "rollout-no-continuity.jsonl"), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+      }
+    );
+    const session = await createSession(server);
+    const imported = await server.inject({ method: "POST", url: `/api/sessions/${session.id}/import-transcript/auto`, payload: {} });
+    expect(imported.statusCode).toBe(201);
+
+    const capsule = await server.inject({ method: "GET", url: `/api/sessions/${session.id}/resume-capsule` });
+    expect(capsule.json().contextText).toBeNull();
+
+    const refreshed = await server.inject({ method: "GET", url: `/api/sessions/${session.id}` });
+    const continued = await server.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/continue`,
+      payload: { expectedRevision: refreshed.json().revision }
+    });
+    expect(continued.json().launch.operation).toBe("resume");
+    await waitForSessionStatus(server, session.id, "COMPLETED");
+
+    const prompt = await readCapturedPrompt(join(tempDir, "resume-prompt.txt"));
+    expect(prompt).not.toContain("Recent captured continuity");
   });
 
   test("resumes the bound Codex session with an incremental context prompt", async () => {
@@ -844,6 +940,24 @@ async function createTestServerWithAdapters(createAdapters: (tempDir: string) =>
     await rm(tempDir, { recursive: true, force: true });
   });
   return { server, tempDir };
+}
+
+/** Node one-liner that copies whatever the daemon pipes in (the resume prompt) to a file. */
+function promptCaptureScript(outFile: string): string {
+  const target = JSON.stringify(outFile);
+  return `const fs=require("node:fs");let data="";process.stdin.setEncoding("utf8");process.stdin.on("data",(chunk)=>{data+=chunk;});process.stdin.on("end",()=>{fs.writeFileSync(${target},data);});`;
+}
+
+async function readCapturedPrompt(path: string): Promise<string> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, "utf8");
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error(`The controlled adapter never captured a resume prompt at ${path}`);
 }
 
 async function createSession(server: FastifyInstance): Promise<{ id: string; revision: number }> {
