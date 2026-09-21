@@ -412,9 +412,16 @@ export function App() {
     return { ruleId, versions: versions.ok ? versions.value?.items ?? [] : [], evaluations: evaluations.ok ? evaluations.value?.items ?? [] : [], usage: usage.ok ? usage.value : null, loading: false, error };
   }, []);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  /**
+   * 加载工作区数据。
+   *
+   * `background: true` 用于自动化等局部反馈后的刷新：不切到全屏 loading，因此当前页面与组件实例
+   * 不会被卸载，组件内的成功提示得以保留。首次加载仍走全屏 loading。
+   */
+  const loadData = useCallback(async (options: { background?: boolean } = {}) => {
+    const background = options.background === true;
+    if (!background) setLoading(true);
+    if (!background) setError(null);
     const requests = {
       health: fetchJson("/api/health"),
       overview: fetchJson("/api/workspace/overview"),
@@ -466,7 +473,14 @@ export function App() {
     const selectedRule = next.rules.find((rule) => rule.id === preferredRuleIdRef.current) || next.rules[0];
     const selectedContextSource = next.contextSources.find((source) => source.id === preferredContextSourceIdRef.current) || next.contextSources[0];
     setData(next);
-    setError(failures.length === entries.length ? "守护进程不可用" : failures[0] || null);
+    // 后台刷新失败时保留已有数据，不清空页面。
+    if (failures.length === entries.length && !background) {
+      setError("守护进程不可用");
+    } else if (background) {
+      if (failures.length > 0) setError(failures[0]!);
+    } else {
+      setError(failures[0] || null);
+    }
     preferredProjectIdRef.current = selectedProject?.id || null;
     preferredSessionIdRef.current = selectedSession?.id || null;
     preferredReviewIdRef.current = selectedReview?.id || null;
@@ -922,7 +936,7 @@ export function App() {
     if (loading) return <><PageHeader pageDef={pages[page]} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} /><EmptyNote>正在加载工作区数据...</EmptyNote></>;
     const props = { data, actionLoading, runAction, archiveProject, transitionProject, archiveSession, continueSession, importTranscriptAuto, syncSessionTranscript, bindDesktopSync, syncDesktopSync, unbindDesktopSync, desktopSyncAuto, setDesktopSyncAuto, interruptSession, exportSessionCapsule, syncSource, transitionSource, verifyEvidence, openEvidenceDetail, openEvidenceCompare, transitionContextItem, openContextItemDetail, restoreContextItemVersion, validateRule, testRule, transitionRule, renderRuleInstructions, transitionDecision, transitionWorkItem, startWorkItemSession, resolveReview, dismissReview, startReview, assignReview, setModal, defaultAdapterId, adapterList, selectedProjectId, selectProject, selectedSessionId, selectSession, openSession, sessionDetails, sessionDetailsLoading, selectedReviewId, selectReview, reviewActionLog, selectedDecisionId, selectDecision, decisionVersions, selectedWorkItemId, selectWorkItem, workItemDetail, selectedRuleId, selectRule, ruleDetail, ruleInstructionPreview, selectedContextSourceId, selectContextSource };
     switch (page) {
-      case "overview": return <OverviewPage data={data} onRefresh={() => void loadData()} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
+      case "overview": return <OverviewPage data={data} onRefresh={() => void loadData({ background: true })} header={<PageHeader pageDef={pages.overview} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "projects": return <ProjectsPage {...props} header={<PageHeader pageDef={pages.projects} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "sessions": return <SessionsPage {...props} header={<PageHeader pageDef={pages.sessions} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "review": return <ReviewPage {...props} header={<PageHeader pageDef={pages.review} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
