@@ -162,12 +162,12 @@ ContinueSessionService.continue() 继续创建 Context Package 作为 provenance
 
 **文件：** scripts/start-e2e-server.ts、playwright.automation.config.ts、tests/e2e/automation-workflow.spec.ts
 
-- [ ] 运行 git status --short 和三个文件的 git diff，记录用户已有改动。
-- [ ] 用精确补丁删除未验证的 fixture-only direct-SQL checkpoint，保留 prepare 和 append。
-- [ ] 若 Playwright 配置仍有重复 env 属性，只保留一项。
-- [ ] 运行 npm run build、npm run frontend:typecheck、git diff --check。
-- [ ] 预期全部 exit 0。
-- [ ] 精确暂存并提交：test: remove unverified automation checkpoint。
+- [x] 运行 git status --short 和三个文件的 git diff，记录用户已有改动。
+- [x] 用精确补丁删除未验证的 fixture-only direct-SQL checkpoint，保留 prepare 和 append。
+- [x] 若 Playwright 配置仍有重复 env 属性，只保留一项。
+- [x] 运行 npm run build、npm run frontend:typecheck、git diff --check。
+- [x] 预期全部 exit 0。
+- [x] 精确暂存并提交：test: remove unverified automation checkpoint。
 
 ### Task 1：实现确定性会话连续性构建器
 
