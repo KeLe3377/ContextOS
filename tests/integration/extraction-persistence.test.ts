@@ -17,7 +17,7 @@ import {
   acceptanceDeferralReason,
   decideDisposition
 } from "../../packages/application/src/core/extraction-service.js";
-import { ExtractionError, type ContextExtractor, type ExtractionInput, type ExtractionResult } from "../../packages/application/src/ports/context-extractor.js";
+import { ExtractionError, type ContextExtractor, type ExtractionCandidate, type ExtractionInput, type ExtractionResult } from "../../packages/application/src/ports/context-extractor.js";
 import { AutomationJobRouter } from "../../packages/application/src/core/automation-job-router.js";
 import { AutomationScheduler } from "../../packages/application/src/core/automation-scheduler.js";
 import { EvidenceSnapshotService } from "../../packages/application/src/core/context-services.js";
@@ -496,7 +496,7 @@ describe("automation policy", () => {
         expect(candidate.targetResourceId).toBeNull();
       }
     }
-    // The applied capsule points at the Session; the context item still needs its own object.
+    // The applied capsule points at the Session; this context item sits below the threshold.
     expect(stored.find((candidate) => candidate.kind === "RESUME_CAPSULE"))
       .toMatchObject({ status: "ACCEPTED", targetResourceType: "SESSION", targetResourceId: sessionId });
     expect(stored.find((candidate) => candidate.kind === "CONTEXT_ITEM"))
@@ -708,8 +708,81 @@ describe("scheduler integration", () => {
       targetResourceType: "SESSION",
       targetResourceId: sessionId
     });
-    // The context item still needs its governed object, so it stays in review.
+    // The SUMMARY item scores below the threshold, so it stays in review.
     expect(stored.find((candidate) => candidate.kind === "CONTEXT_ITEM")).toMatchObject({ status: "PENDING", targetResourceId: null });
     expect(openReviews()).toHaveLength(1);
+  });
+
+  function resultWith(itemType: ExtractionCandidate["itemType"], confidence: number): ExtractionResult {
+    const candidate: ExtractionCandidate = {
+      itemType,
+      title: `Candidate ${itemType}`,
+      summary: "A summary of the conclusion.",
+      body: "The body of the conclusion.",
+      confidence,
+      evidenceIds: [sourceEvidenceId],
+      explanation: "Stated in the transcript.",
+      fingerprint: "sha256:model-lies"
+    };
+    return extractionResult({ candidates: [candidate] });
+  }
+
+  test("auto accepts a high confidence SUMMARY context item", async () => {
+    setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.9);
+    extractor.result = resultWith("SUMMARY", 0.95);
+    const artifactRow = artifact(events);
+
+    const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+    expect(summary).toMatchObject({ autoAcceptEligible: 2, autoAccepted: 2 });
+    const item = candidates().find((candidate) => candidate.kind === "CONTEXT_ITEM")!;
+    expect(item).toMatchObject({ status: "ACCEPTED", targetResourceType: "CONTEXT_ITEM" });
+    expect(item.targetResourceId).toBeTruthy();
+    expect(openReviews()).toHaveLength(0);
+  });
+
+  test("auto accepts a high confidence HANDOFF context item", async () => {
+    setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.9);
+    extractor.result = resultWith("HANDOFF", 0.99);
+    const artifactRow = artifact(events);
+
+    await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+    expect(candidates().find((candidate) => candidate.kind === "CONTEXT_ITEM"))
+      .toMatchObject({ status: "ACCEPTED", targetResourceType: "CONTEXT_ITEM" });
+    expect(openReviews()).toHaveLength(0);
+  });
+
+  test("keeps every non-whitelisted type in review however confident it is", async () => {
+    setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.1);
+    for (const itemType of ["FACT", "RISK", "CONSTRAINT", "OPEN_QUESTION"] as const) {
+      extractor.result = resultWith(itemType, 1);
+      const artifactRow = artifact(events, { optionsHash: `sha256:options-${itemType}` });
+
+      await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+      const item = candidates().find(
+        (candidate) => candidate.kind === "CONTEXT_ITEM" && candidate.payload.kind === "CONTEXT_ITEM" && candidate.payload.itemType === itemType
+      )!;
+      expect(item.status).toBe("PENDING");
+      expect(item.targetResourceId).toBeNull();
+      expect(openReviews().some((review) => review.sourceId === item.id)).toBe(true);
+    }
+  });
+
+  test("keeps a whitelisted item below the threshold in review", async () => {
+    setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.95);
+    for (const itemType of ["SUMMARY", "HANDOFF"] as const) {
+      extractor.result = resultWith(itemType, 0.5);
+      const artifactRow = artifact(events, { optionsHash: `sha256:below-${itemType}` });
+
+      await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+      const item = candidates().find(
+        (candidate) => candidate.kind === "CONTEXT_ITEM" && candidate.payload.kind === "CONTEXT_ITEM" && candidate.payload.itemType === itemType
+      )!;
+      expect(item.status).toBe("PENDING");
+      expect(item.targetResourceId).toBeNull();
+    }
   });
 });

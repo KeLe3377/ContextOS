@@ -295,7 +295,6 @@ export async function createDaemonServer(
   });
     await registerAutomationRoutes(server, {
     automation: automationRepository,
-    automationService,
     application: candidateApplicationService,
     extraction: extractionService
   });

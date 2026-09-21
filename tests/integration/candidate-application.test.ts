@@ -27,8 +27,10 @@ let reviewItems: SqliteReviewItemRepository;
 let sessions: SessionService;
 let contextItems: ContextItemService;
 let application: CandidateApplicationService;
+let seedCounter = 0;
 let projectId: string;
 let sessionId: string;
+let runtime: SqliteRuntimeRepository;
 
 function seedCandidate(kind: "RESUME_CAPSULE" | "CONTEXT_ITEM", options: { sessionId?: string | null } = {}) {
   const payload = kind === "RESUME_CAPSULE"
@@ -42,6 +44,7 @@ function seedCandidate(kind: "RESUME_CAPSULE" | "CONTEXT_ITEM", options: { sessi
         confidence: "HIGH" as const
       };
 
+  seedCounter += 1;
   return automation.upsertCandidate(
     {
       projectId,
@@ -49,7 +52,7 @@ function seedCandidate(kind: "RESUME_CAPSULE" | "CONTEXT_ITEM", options: { sessi
       sourceEvidenceId,
       evidenceIds: [sourceEvidenceId],
       kind,
-      fingerprint: `sha256:${kind}-${Date.now()}`,
+      fingerprint: `sha256:${kind}-${seedCounter}`,
       payload,
       confidence: 0.9,
       extractorId: "fake-extractor",
@@ -81,11 +84,8 @@ beforeEach(async () => {
   automation = new SqliteAutomationRepository(client.db);
   reviewItems = new SqliteReviewItemRepository(client.db);
   contextItems = new ContextItemService(new SqliteContextItemRepository(client.db));
-  const continueSession = new ContinueSessionService(
-    new SqliteRuntimeRepository(client.db),
-    new AgentAdapterRegistry([]),
-    new ProcessSupervisor()
-  );
+  runtime = new SqliteRuntimeRepository(client.db);
+  const continueSession = new ContinueSessionService(runtime, new AgentAdapterRegistry([]), new ProcessSupervisor());
   sessions = new SessionService(new SqliteSessionRepository(client.db), continueSession);
 
   projectId = new SqliteProjectRepository(client.db)
@@ -282,5 +282,100 @@ describe("review item linkage", () => {
 
     expect(reviewItems.getById(review.id)).toMatchObject({ status: "OPEN" });
     expect(automation.getCandidate(candidate.id)).toMatchObject({ status: "PENDING" });
+  });
+
+
+});
+describe("candidates reaching agent context", () => {
+  function packageFor() {
+    return runtime.createContextPackageForSession({ projectId, sessionId, intent: "wire it" }, now);
+  }
+
+  test("an accepted context item enters a package built afterwards, and not one built before", () => {
+    const candidate = seedCandidate("CONTEXT_ITEM");
+    const before = packageFor();
+    expect(before.contextItems).toHaveLength(0);
+
+    const result = application.apply({ candidateId: candidate.id, expectedRevision: candidate.revision });
+    const itemId = result.target!.resourceId;
+
+    const created = contextItems.get(itemId);
+    expect(created).toMatchObject({ status: "ACTIVE", sourceSnapshotId: sourceEvidenceId });
+
+    // Packages are immutable snapshots, so the earlier one is untouched.
+    const stillBefore = runtime.getContextPackageForSession(sessionId);
+    expect(stillBefore.id).toBe(before.id);
+    expect(stillBefore.contextItems).toHaveLength(0);
+
+    const after = packageFor();
+    expect(after.contextItems.map((entry) => entry.id)).toEqual([itemId]);
+  });
+
+  test("pending and rejected candidates never enter a package", () => {
+    const pending = seedCandidate("CONTEXT_ITEM");
+    const rejected = seedCandidate("CONTEXT_ITEM");
+    application.reject({ candidateId: rejected.id, expectedRevision: rejected.revision });
+
+    const accepted = seedCandidate("CONTEXT_ITEM");
+    const applied = application.apply({ candidateId: accepted.id, expectedRevision: accepted.revision });
+
+    const built = packageFor();
+    const ids = built.contextItems.map((entry) => entry.id);
+    expect(ids).toEqual([applied.target!.resourceId]);
+    expect(ids).not.toContain(pending.id);
+    expect(automation.getCandidate(pending.id)).toMatchObject({ status: "PENDING" });
+    expect(automation.getCandidate(rejected.id)).toMatchObject({ status: "REJECTED" });
+  });
+
+  test("a resume capsule applied to a session is visible when the session is read", () => {
+    const candidate = seedCandidate("RESUME_CAPSULE");
+    expect(sessions.getResumeCapsule(sessionId).summary).not.toBe("Wired the extractor.");
+
+    application.apply({ candidateId: candidate.id, expectedRevision: candidate.revision });
+
+    expect(sessions.getResumeCapsule(sessionId)).toMatchObject({
+      summary: "Wired the extractor.",
+      nextAction: "Persist candidates."
+    });
+  });
+
+  test("rolls back the whole decision when the Review Item update fails", () => {
+    const candidate = seedCandidate("CONTEXT_ITEM");
+    const review = openReviewFor(candidate.id);
+
+    // The governed object and the candidate status both succeed, then the Review Item write fails.
+    const flaky = Object.create(reviewItems) as SqliteReviewItemRepository;
+    flaky.updateStatus = () => {
+      throw new Error("review update failed");
+    };
+    const failing = new CandidateApplicationService({
+      automation,
+      sessions,
+      contextItems,
+      reviewItems: flaky,
+      clock: () => now
+    });
+
+    // The fixture's own review item creation already wrote one activity row; the point is that
+    // the failed decision adds none.
+    const auditBefore = client.db.prepare("SELECT id FROM audit_events WHERE resource_type = 'EXTRACTION_CANDIDATE'").all();
+    const activityBefore = client.db.prepare("SELECT id FROM activity_events WHERE resource_type = 'EXTRACTION_CANDIDATE'").all();
+
+    expect(() => failing.resolveReviewItem({
+      reviewItemId: review.id,
+      expectedRevision: review.revision,
+      resolutionType: "APPROVED",
+      resolutionReason: "try it"
+    })).toThrow(/review update failed/);
+
+    // Nothing survived: no accepted candidate, no governed object, no audit residue.
+    expect(automation.getCandidate(candidate.id)).toMatchObject({ status: "PENDING", targetResourceId: null });
+    expect(contextItems.list({ projectId, limit: 50 })).toHaveLength(0);
+    expect(reviewItems.getById(review.id)).toMatchObject({ status: "OPEN" });
+
+    const audit = client.db.prepare("SELECT id FROM audit_events WHERE resource_type = 'EXTRACTION_CANDIDATE'").all();
+    expect(audit).toHaveLength(auditBefore.length);
+    const activity = client.db.prepare("SELECT id FROM activity_events WHERE resource_type = 'EXTRACTION_CANDIDATE'").all();
+    expect(activity).toHaveLength(activityBefore.length);
   });
 });

@@ -197,22 +197,30 @@ export class CandidateApplicationService {
       throw new CandidateApplicationError("CANDIDATE_NOT_APPLICABLE", "Review item is not a candidate suggestion");
     }
 
-    const candidate = this.requireCandidate(item.sourceId);
-    const approved = input.resolutionType === "APPROVED" || input.resolutionType === "ACCEPT";
+    // One transaction spans the candidate decision, the governed object, the candidate status
+    // and the Review Item. Nesting `apply`/`reject` inside it is safe because better-sqlite3
+    // uses savepoints, so a Review Item conflict rolls everything back and cannot leave an
+    // accepted candidate behind an open review.
+    const result = this.options.automation.runApplicationTransaction(() => {
+      const candidate = this.requireCandidate(item.sourceId);
+      const approved = input.resolutionType === "APPROVED" || input.resolutionType === "ACCEPT";
 
-    const application = approved
-      ? this.apply({ candidateId: candidate.id, expectedRevision: candidate.revision, actorType: input.actorType })
-      : this.reject({ candidateId: candidate.id, expectedRevision: candidate.revision, actorType: input.actorType, reason: input.resolutionReason });
+      const application = approved
+        ? this.apply({ candidateId: candidate.id, expectedRevision: candidate.revision, actorType: input.actorType })
+        : this.reject({ candidateId: candidate.id, expectedRevision: candidate.revision, actorType: input.actorType, reason: input.resolutionReason });
 
-    const reviewItem = this.options.reviewItems.updateStatus(
-      input.reviewItemId,
-      approved ? "RESOLVED" : "DISMISSED",
-      input.expectedRevision,
-      this.now(),
-      { type: input.resolutionType, reason: input.resolutionReason }
-    );
+      const reviewItem = this.options.reviewItems.updateStatus(
+        input.reviewItemId,
+        approved ? "RESOLVED" : "DISMISSED",
+        input.expectedRevision,
+        this.now(),
+        { type: input.resolutionType, reason: input.resolutionReason }
+      );
 
-    return { reviewItem, application };
+      return { reviewItem, application };
+    });
+
+    return result;
   }
 
   private requireCandidate(candidateId: string): ExtractionCandidateDto {

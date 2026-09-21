@@ -36,9 +36,10 @@ import type { EvidenceSnapshotService } from "./context-services.js";
  * 5. open one transaction and persist candidates, Evidence links and Review Items together;
  * 6. only then return, so the scheduler can mark the job SUCCEEDED.
  *
- * Automatic acceptance is deliberately not performed here: a candidate may only become ACCEPTED
- * together with the domain object it produces, so every candidate leaves this service PENDING
- * with a Review Item until the application step exists.
+ * Automatic acceptance is handed to CandidateApplicationService inside the same transaction, so a
+ * candidate only leaves this service ACCEPTED once the governed object exists and the target
+ * reference is recorded. Anything that cannot be applied automatically stays PENDING with a Review
+ * Item rather than failing the extraction.
  *
  * A failure anywhere in step 5 rolls the whole unit back and leaves the job to retry. Nothing is
  * written when the project is OFF, and nothing is written when the extractor fails.
@@ -93,7 +94,7 @@ export type ExtractionRunSummary = {
   candidatesReused: number;
   /** Candidates the policy marked eligible for automatic acceptance. */
   autoAcceptEligible: number;
-  /** Candidates actually accepted. Stays 0 until the domain application step exists. */
+  /** Candidates actually materialised and marked ACCEPTED in this run. */
   autoAccepted: number;
   reviewItemsCreated: number;
   inputItems: number;
@@ -322,11 +323,8 @@ export class ExtractionService {
         }
       }
 
-      // Acceptance is deferred on purpose. Marking a candidate ACCEPTED without a materialised
-      // target would record an acceptance with nothing behind it, and the automation design
-      // requires the domain service to apply the candidate first. So everything stays PENDING and
-      // gets a Review Item until that application step exists — whichever disposition the policy
-      // reached.
+      // Not applied automatically: it stays PENDING and gets a Review Item. An ACCEPTED candidate
+      // never leaves this loop, because it already carries its target.
       if (candidate.status === "ACCEPTED") continue;
 
       const existing = this.openReviewItemCount(input.projectId, candidate.id);
@@ -379,9 +377,9 @@ export class ExtractionService {
 }
 
 /**
- * Why an eligible candidate is not accepted yet. The policy can grant eligibility while the
- * application step that materialises the governed object is still missing; these are two
- * separate stages, and only the second one may move a candidate to ACCEPTED.
+ * Why a candidate can be left to a human even when the policy granted eligibility. The policy
+ * decision and the application are two separate stages, and only the second one may move a
+ * candidate to ACCEPTED.
  */
 export const acceptanceDeferralReason = "APPLICATION_PENDING";
 
@@ -407,11 +405,11 @@ export type DispositionReason =
  * items, rules, constraints and risks always go to review however confident they are.
  *
  * This function answers exactly one question — *is this candidate eligible for automatic
- * acceptance?* — and nothing else. Applying an acceptance is a separate stage: the automation
- * design requires the domain service to materialise the governed object, and the candidate status
- * update has to share a transaction with that application. Until that step exists, `persist`
- * defers every acceptance with `APPLICATION_PENDING`, so an `AUTO_ACCEPT` verdict here never
- * produces an ACCEPTED candidate on its own.
+ * acceptance?* — and nothing else. Applying an acceptance is a separate stage, performed by
+ * CandidateApplicationService inside `persist`: the automation design requires the domain service
+ * to materialise the governed object, and the candidate status update has to share a transaction
+ * with that application. An `AUTO_ACCEPT` verdict here therefore means "may be applied", not
+ * "has been accepted".
  */
 export function decideDisposition(input: {
   mode: AutomationMode;
