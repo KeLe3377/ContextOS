@@ -35,10 +35,14 @@ export class ProcessSupervisor {
   launch(input: LaunchProcessInput): LaunchProcessResult {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
-      detached: true,
+      // Windows: a detached child under `cmd.exe /c` never receives the piped
+      // stdin EOF, so the launched agent hangs forever (rollout frozen). Keep
+      // the child in the daemon's process group on Windows; only detach on
+      // POSIX where it is required for process-group signalling.
+      detached: process.platform !== "win32",
       stdio: input.captureOutput || input.stdinText !== undefined ? ["pipe", "pipe", "pipe"] : "ignore",
       shell: false,
-      windowsHide: false
+      windowsHide: true
     });
     const captured = new BoundedOutput(maxCapturedBytes);
     if (input.captureOutput) {
