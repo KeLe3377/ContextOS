@@ -3,11 +3,19 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { CompactionArtifactDto, CompactionEvent } from "../../packages/contracts/src/compaction.js";
-import { computeExtractionFingerprint } from "../../packages/application/src/core/extraction-candidate-mapping.js";
+import {
+  reviewSourceTypeExtractionCandidate,
+  reviewTriggerAutomationSuggestion
+} from "../../packages/contracts/src/review-items.js";
+import {
+  computeExtractionFingerprint,
+  toContextItemCandidate,
+  toResumeCapsuleCandidate
+} from "../../packages/application/src/core/extraction-candidate-mapping.js";
 import {
   ExtractionService,
-  reviewSourceTypeExtractionCandidate,
-  reviewTriggerTypeExtractionCandidate
+  acceptanceDeferralReason,
+  decideDisposition
 } from "../../packages/application/src/core/extraction-service.js";
 import { ExtractionError, type ContextExtractor, type ExtractionInput, type ExtractionResult } from "../../packages/application/src/ports/context-extractor.js";
 import { AutomationJobRouter } from "../../packages/application/src/core/automation-job-router.js";
@@ -109,9 +117,9 @@ function extractionResult(overrides: Partial<ExtractionResult> = {}): Extraction
   };
 }
 
-function service(options: { reviewItems?: SqliteReviewItemRepository } = {}): ExtractionService {
+function service(options: { reviewItems?: SqliteReviewItemRepository; automation?: SqliteAutomationRepository } = {}): ExtractionService {
   return new ExtractionService({
-    automation,
+    automation: options.automation ?? automation,
     artifacts,
     evidence,
     sessions,
@@ -195,7 +203,7 @@ describe("extraction persistence", () => {
 
     const reviews = openReviews();
     expect(reviews).toHaveLength(2);
-    expect(reviews.every((item) => item.triggerType === reviewTriggerTypeExtractionCandidate)).toBe(true);
+    expect(reviews.every((item) => item.triggerType === reviewTriggerAutomationSuggestion)).toBe(true);
     expect(reviews.some((item) => item.summary.includes("resume capsule"))).toBe(true);
     expect(reviews.some((item) => item.summary.includes("Daemon owns polling"))).toBe(true);
   });
@@ -336,7 +344,7 @@ describe("extraction persistence", () => {
         projectId,
         sourceType: reviewSourceTypeExtractionCandidate,
         sourceId: "rev_probe",
-        triggerType: reviewTriggerTypeExtractionCandidate,
+        triggerType: reviewTriggerAutomationSuggestion,
         priority: "MEDIUM",
         summary: "probe"
       }, now);
@@ -451,20 +459,47 @@ describe("automation policy", () => {
     expect(reviewItems.list({ projectId, limit: 100 })).toHaveLength(0);
   });
 
-  test("auto accepts only the whitelisted resume capsule above the threshold", async () => {
+  test("defers acceptance: an eligible resume capsule stays PENDING with a review item", async () => {
     setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.9);
     extractor.result = extractionResult();
     const artifactRow = artifact(events);
 
     const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
-    // Whitelisted capsule: accepted. Whitelisted context item: a governed object would have to be
-    // materialised first, so it stays in review.
-    expect(summary).toMatchObject({ autoAccepted: 1, reviewItemsCreated: 1 });
+    // Eligibility is granted, but nothing is accepted: acceptance has to happen together with the
+    // domain object it produces, and that application step does not exist yet.
+    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, reviewItemsCreated: 2 });
+
     const stored = candidates();
-    expect(stored.find((candidate) => candidate.kind === "RESUME_CAPSULE")!.status).toBe("ACCEPTED");
-    expect(stored.find((candidate) => candidate.kind === "CONTEXT_ITEM")!.status).toBe("PENDING");
-    expect(openReviews()).toHaveLength(1);
+    expect(stored).toHaveLength(2);
+    expect(stored.every((candidate) => candidate.status === "PENDING")).toBe(true);
+    // An empty target resource can never accompany an acceptance.
+    for (const candidate of stored) {
+      expect(candidate.targetResourceType).toBeNull();
+      expect(candidate.targetResourceId).toBeNull();
+      expect(candidate.status).not.toBe("ACCEPTED");
+    }
+    expect(stored.find((candidate) => candidate.kind === "RESUME_CAPSULE")!.status).toBe("PENDING");
+
+    const capsuleReviews = openReviews().filter((item) =>
+      candidates().some((candidate) => candidate.kind === "RESUME_CAPSULE" && candidate.id === item.sourceId)
+    );
+    expect(capsuleReviews).toHaveLength(1);
+    expect(capsuleReviews[0]!.triggerType).toBe(reviewTriggerAutomationSuggestion);
+  });
+
+  test("does not duplicate a capsule or its review when an eligible run is retried", async () => {
+    setMode("AUTO_ACCEPT_HIGH_CONFIDENCE", 0.9);
+    extractor.result = extractionResult();
+    const artifactRow = artifact(events);
+
+    await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+    const retry = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+    expect(retry).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, candidatesCreated: 0, candidatesReused: 2, reviewItemsCreated: 0 });
+    expect(candidates()).toHaveLength(2);
+    expect(openReviews()).toHaveLength(2);
+    expect(candidates().every((candidate) => candidate.status === "PENDING")).toBe(true);
   });
 
   test("keeps non-whitelisted types in review however confident they are", async () => {
@@ -478,9 +513,37 @@ describe("automation policy", () => {
 
     const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
-    expect(summary.autoAccepted).toBe(1);
-    expect(candidates().find((candidate) => candidate.payload.kind === "CONTEXT_ITEM")!.status).toBe("PENDING");
-    expect(openReviews()).toHaveLength(1);
+    // Only the capsule is eligible; the constraint goes to review at any confidence.
+    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, reviewItemsCreated: 2 });
+    expect(candidates().every((candidate) => candidate.status === "PENDING")).toBe(true);
+    expect(openReviews()).toHaveLength(2);
+  });
+
+  test("the pure policy function still grants eligibility independently of persistence", () => {
+    const capsule = toResumeCapsuleCandidate({ summary: "s", nextAction: "n" });
+    const handoff = toContextItemCandidate({
+      itemType: "HANDOFF" as const, title: "t", summary: "s", body: "b", confidence: 0.99, evidenceIds: [sourceEvidenceId], explanation: "e"
+    });
+    const risk = toContextItemCandidate({
+      itemType: "RISK" as const, title: "t", summary: "s", body: "b", confidence: 0.99, evidenceIds: [sourceEvidenceId], explanation: "e"
+    });
+
+    expect(decideDisposition({ mode: "AUTO_ACCEPT_HIGH_CONFIDENCE", draft: capsule, threshold: 0.9 }))
+      .toEqual({ disposition: "AUTO_ACCEPT", reason: "WHITELISTED" });
+    expect(decideDisposition({ mode: "AUTO_ACCEPT_HIGH_CONFIDENCE", draft: handoff, threshold: 0.9 }))
+      .toEqual({ disposition: "AUTO_ACCEPT", reason: "WHITELISTED" });
+    expect(decideDisposition({ mode: "AUTO_ACCEPT_HIGH_CONFIDENCE", draft: risk, threshold: 0.9 }))
+      .toEqual({ disposition: "REVIEW", reason: "NOT_WHITELISTED" });
+    // A capsule carries no model confidence (the mapping treats it as certain), so the threshold
+    // gate is exercised through a whitelisted context item instead.
+    const lukewarm = toContextItemCandidate({
+      itemType: "HANDOFF" as const, title: "t", summary: "s", body: "b", confidence: 0.5, evidenceIds: [sourceEvidenceId], explanation: "e"
+    });
+    expect(decideDisposition({ mode: "AUTO_ACCEPT_HIGH_CONFIDENCE", draft: lukewarm, threshold: 0.9 }))
+      .toEqual({ disposition: "REVIEW", reason: "BELOW_THRESHOLD" });
+    expect(decideDisposition({ mode: "SUGGEST_ONLY", draft: capsule, threshold: 0.9 }))
+      .toEqual({ disposition: "REVIEW", reason: "SUGGEST_ONLY" });
+    expect(acceptanceDeferralReason).toBe("APPLICATION_PENDING");
   });
 
   test("keeps a whitelisted context item below the threshold in review", async () => {
@@ -492,10 +555,12 @@ describe("automation policy", () => {
     });
     const artifactRow = artifact(events);
 
-    await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+    const summary = await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
+    // Below the threshold the whitelisted item is not even eligible; the capsule alone is.
+    expect(summary).toMatchObject({ autoAcceptEligible: 1, autoAccepted: 0, reviewItemsCreated: 2 });
     expect(candidates().find((candidate) => candidate.kind === "CONTEXT_ITEM")!.status).toBe("PENDING");
-    expect(openReviews()).toHaveLength(1);
+    expect(openReviews()).toHaveLength(2);
   });
 });
 
@@ -570,6 +635,37 @@ describe("scheduler integration", () => {
     await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
     await service().extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
 
+    expect(candidates()).toHaveLength(2);
+    expect(openReviews()).toHaveLength(2);
+    expect(client.db.prepare("SELECT COUNT(*) AS count FROM extraction_candidate_evidence").get()).toEqual({ count: 2 });
+  });
+
+  test("recovers when the activity update fails after the transaction committed", async () => {
+    extractor.result = extractionResult();
+    const artifactRow = artifact(events);
+
+    // Activity is recorded after the business transaction, so a failure there leaves the
+    // candidates committed and the job retryable.
+    let activityCalls = 0;
+    const flaky = Object.create(automation) as SqliteAutomationRepository;
+    flaky.markProjectActivity = () => {
+      activityCalls += 1;
+      if (activityCalls === 1) throw new Error("activity write failed");
+    };
+
+    await expect(service({ automation: flaky }).extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId }))
+      .rejects.toThrow(/activity write failed/);
+
+    expect(activityCalls).toBe(1);
+    expect(candidates()).toHaveLength(2);
+    expect(openReviews()).toHaveLength(2);
+    expect(client.db.prepare("SELECT COUNT(*) AS count FROM extraction_candidate_evidence").get()).toEqual({ count: 2 });
+
+    // The retry converges on the committed state instead of duplicating it.
+    const retry = await service({ automation: flaky }).extractArtifact({ projectId, artifactId: artifactRow.id, sourceEvidenceId });
+
+    expect(retry).toMatchObject({ candidatesCreated: 0, candidatesReused: 2, reviewItemsCreated: 0 });
+    expect(activityCalls).toBe(2);
     expect(candidates()).toHaveLength(2);
     expect(openReviews()).toHaveLength(2);
     expect(client.db.prepare("SELECT COUNT(*) AS count FROM extraction_candidate_evidence").get()).toEqual({ count: 2 });

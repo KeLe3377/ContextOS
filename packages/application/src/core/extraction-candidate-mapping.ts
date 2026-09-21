@@ -41,6 +41,8 @@ export function toResumeCapsuleCandidate(capsule: ExtractionResumeCapsule): Cand
   return {
     kind: "RESUME_CAPSULE",
     payload,
+    // The extractor contract gives a capsule no confidence score, so it is treated as certain.
+    // That is a stand-in for the score, never a signal that it may bypass review.
     confidence: 1,
     fingerprintMaterial: normalizeMaterial([capsule.summary, capsule.nextAction])
   };

@@ -4,6 +4,16 @@ import { resourceMetaSchema } from "./common.js";
 export const reviewItemStatusSchema = z.enum(["OPEN", "IN_PROGRESS", "RESOLVED", "DISMISSED"]);
 export const reviewItemPrioritySchema = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]);
 
+/**
+ * Vocabulary the automation pipeline raises Review Items with.
+ *
+ * `sourceType` and `sourceId` come from the automation design; `triggerType` is the plan's
+ * automation suggestion trigger. They are free-form strings in the schema, so the values live
+ * here as the single source of truth rather than being re-declared per caller.
+ */
+export const reviewSourceTypeExtractionCandidate = "EXTRACTION_CANDIDATE";
+export const reviewTriggerAutomationSuggestion = "AUTOMATION_SUGGESTION";
+
 export const reviewItemInputSchema = z.object({
   projectId: z.string().min(1),
   sourceType: z.string().min(1),

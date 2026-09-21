@@ -5,6 +5,10 @@ import type {
   ExtractionCandidateProvenance
 } from "../../../contracts/src/automation.js";
 import type { EvidenceSnapshotDto } from "../../../contracts/src/context.js";
+import {
+  reviewSourceTypeExtractionCandidate,
+  reviewTriggerAutomationSuggestion
+} from "../../../contracts/src/review-items.js";
 import type { AutomationJobRecord, SqliteAutomationRepository } from "../../../infrastructure/src/sqlite/automation-repository.js";
 import type { SqliteCompactionArtifactRepository } from "../../../infrastructure/src/sqlite/compaction-artifact-repository.js";
 import type { SqliteReviewItemRepository, SqliteSessionRepository } from "../../../infrastructure/src/sqlite/core-repositories.js";
@@ -31,15 +35,16 @@ import type { EvidenceSnapshotService } from "./context-services.js";
  * 5. open one transaction and persist candidates, Evidence links and Review Items together;
  * 6. only then return, so the scheduler can mark the job SUCCEEDED.
  *
+ * Automatic acceptance is deliberately not performed here: a candidate may only become ACCEPTED
+ * together with the domain object it produces, so every candidate leaves this service PENDING
+ * with a Review Item until the application step exists.
+ *
  * A failure anywhere in step 5 rolls the whole unit back and leaves the job to retry. Nothing is
  * written when the project is OFF, and nothing is written when the extractor fails.
  *
  * Review Items follow the automation design: `sourceType` is `EXTRACTION_CANDIDATE` and
  * `sourceId` is the candidate id, which is what keeps retries from piling up duplicates.
  */
-
-export const reviewSourceTypeExtractionCandidate = "EXTRACTION_CANDIDATE";
-export const reviewTriggerTypeExtractionCandidate = "EXTRACTION_CANDIDATE_REVIEW";
 
 export type ExtractionPipelineFailureCode =
   | "COMPACTION_ARTIFACT_NOT_FOUND"
@@ -79,6 +84,9 @@ export type ExtractionRunSummary = {
   skipped: boolean;
   candidatesCreated: number;
   candidatesReused: number;
+  /** Candidates the policy marked eligible for automatic acceptance. */
+  autoAcceptEligible: number;
+  /** Candidates actually accepted. Stays 0 until the domain application step exists. */
   autoAccepted: number;
   reviewItemsCreated: number;
   inputItems: number;
@@ -123,6 +131,7 @@ export class ExtractionService {
         skipped: true,
         candidatesCreated: 0,
         candidatesReused: 0,
+        autoAcceptEligible: 0,
         autoAccepted: 0,
         reviewItemsCreated: 0,
         inputItems: 0,
@@ -170,6 +179,7 @@ export class ExtractionService {
       skipped: false,
       candidatesCreated: persisted.candidatesCreated,
       candidatesReused: persisted.candidatesReused,
+      autoAcceptEligible: persisted.autoAcceptEligible,
       autoAccepted: persisted.autoAccepted,
       reviewItemsCreated: persisted.reviewItemsCreated,
       inputItems: extractionInput.transcript.length,
@@ -257,9 +267,10 @@ export class ExtractionService {
     drafts: DraftWithEvidence[];
     provenance: ExtractionCandidateProvenance;
     now: number;
-  }): { candidatesCreated: number; candidatesReused: number; autoAccepted: number; reviewItemsCreated: number } {
+  }): { candidatesCreated: number; candidatesReused: number; autoAcceptEligible: number; autoAccepted: number; reviewItemsCreated: number } {
     let candidatesCreated = 0;
     let candidatesReused = 0;
+    let autoAcceptEligible = 0;
     let autoAccepted = 0;
     let reviewItemsCreated = 0;
 
@@ -296,15 +307,13 @@ export class ExtractionService {
         draft,
         threshold: input.autoAcceptThreshold
       });
+      if (disposition.disposition === "AUTO_ACCEPT") autoAcceptEligible += 1;
 
-      if (disposition.disposition === "AUTO_ACCEPT" && candidate.status !== "ACCEPTED") {
-        this.options.automation.transitionCandidate(
-          { id: candidate.id, status: "ACCEPTED", expectedRevision: candidate.revision },
-          input.now
-        );
-        autoAccepted += 1;
-        continue;
-      }
+      // Acceptance is deferred on purpose. Marking a candidate ACCEPTED without a materialised
+      // target would record an acceptance with nothing behind it, and the automation design
+      // requires the domain service to apply the candidate first. So everything stays PENDING and
+      // gets a Review Item until that application step exists — whichever disposition the policy
+      // reached.
       if (candidate.status === "ACCEPTED") continue;
 
       const existing = this.openReviewItemCount(input.projectId, candidate.id);
@@ -313,7 +322,7 @@ export class ExtractionService {
           projectId: input.projectId,
           sourceType: reviewSourceTypeExtractionCandidate,
           sourceId: candidate.id,
-          triggerType: reviewTriggerTypeExtractionCandidate,
+          triggerType: reviewTriggerAutomationSuggestion,
           priority: "MEDIUM",
           summary: reviewSummaryFor(draft)
         },
@@ -322,7 +331,7 @@ export class ExtractionService {
       if (existing === 0) reviewItemsCreated += 1;
     }
 
-    return { candidatesCreated, candidatesReused, autoAccepted, reviewItemsCreated };
+    return { candidatesCreated, candidatesReused, autoAcceptEligible, autoAccepted, reviewItemsCreated };
   }
 
   private openReviewItemCount(projectId: string, candidateId: string): number {
@@ -338,13 +347,19 @@ export class ExtractionService {
   }
 }
 
+/**
+ * Why an eligible candidate is not accepted yet. The policy can grant eligibility while the
+ * application step that materialises the governed object is still missing; these are two
+ * separate stages, and only the second one may move a candidate to ACCEPTED.
+ */
+export const acceptanceDeferralReason = "APPLICATION_PENDING";
+
 export type CandidateDisposition = "REVIEW" | "AUTO_ACCEPT";
 
 export type DispositionReason =
   | "SUGGEST_ONLY"
   | "NOT_WHITELISTED"
   | "BELOW_THRESHOLD"
-  | "APPLICATION_PENDING"
   | "WHITELISTED";
 
 /**
@@ -353,10 +368,12 @@ export type DispositionReason =
  * the first-stage whitelist is Resume Capsule plus SUMMARY/HANDOFF context items. Decisions, work
  * items, rules, constraints and risks always go to review however confident they are.
  *
- * One safety condition the design cannot settle yet: accepting a context item must materialise a
- * governed object through the domain service, and that application step does not exist. Recording
- * an acceptance with nothing behind it would be a lie, so context items stay in review until it
- * does. Every other unclear condition also defaults to review.
+ * This function answers exactly one question — *is this candidate eligible for automatic
+ * acceptance?* — and nothing else. Applying an acceptance is a separate stage: the automation
+ * design requires the domain service to materialise the governed object, and the candidate status
+ * update has to share a transaction with that application. Until that step exists, `persist`
+ * defers every acceptance with `APPLICATION_PENDING`, so an `AUTO_ACCEPT` verdict here never
+ * produces an ACCEPTED candidate on its own.
  */
 export function decideDisposition(input: {
   mode: AutomationMode;
@@ -374,7 +391,6 @@ export function decideDisposition(input: {
 
   if (!whitelisted) return { disposition: "REVIEW", reason: "NOT_WHITELISTED" };
   if (input.draft.confidence < input.threshold) return { disposition: "REVIEW", reason: "BELOW_THRESHOLD" };
-  if (input.draft.kind === "CONTEXT_ITEM") return { disposition: "REVIEW", reason: "APPLICATION_PENDING" };
 
   return { disposition: "AUTO_ACCEPT", reason: "WHITELISTED" };
 }
