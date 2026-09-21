@@ -246,13 +246,13 @@ commit prepared Evidence
 
 **文件：** automation routes/contracts、frontend automation.ts、App.tsx、AutomationOverview、ProjectAutomationSettings 及相关测试。
 
-- [ ] 可见状态只保留：启用/关闭、Scheduler 状态、WATCHING Session 数、发现/同步 job 状态、最近同步、最近 Evidence、最后错误、运行发现。
-- [ ] 移除 Candidate 数、最近提取、accept/reject/retry 和自动化 Review UI。
-- [ ] 普通 Review 继续保留。
-- [ ] Candidate mutation API 统一返回 410 FEATURE_DEFERRED。
-- [ ] Settings 数据层兼容原 mode；UI 只表达自动化启用/关闭，不增加页面。
-- [ ] 运行 automation API/frontend contract tests、frontend:typecheck、frontend:build。
-- [ ] 预期通过。提交：refactor: focus automation ui on session continuity。
+- [x] 可见状态只保留：启用/关闭、Scheduler 状态、WATCHING Session 数、发现/同步 job 状态、最近同步、最近 Evidence、最后错误、运行发现。
+- [x] 移除 Candidate 数、最近提取、accept/reject/retry 和自动化 Review UI。
+- [x] 普通 Review 继续保留。
+- [x] Candidate mutation API 统一返回 410 FEATURE_DEFERRED。
+- [x] Settings 数据层兼容原 mode；UI 只表达自动化启用/关闭，不增加页面。
+- [x] 运行 automation API/frontend contract tests、frontend:typecheck、frontend:build。
+- [x] 预期通过。提交：refactor: focus automation ui on session continuity。
 
 ### Task 6：用一条生产路径 E2E 替换未完成规格
 

@@ -1,88 +1,61 @@
 import { describe, expect, test } from "vitest";
 import {
+  automationEnabledText,
+  automationJobKindText,
   automationModeText,
-  candidateActions,
-  candidateKindText,
-  candidateStatusText,
   contextItemTypeText,
   failureCodeText,
   jobStatusText,
-  parseApplicationResult,
+  latestEvidenceAt,
+  latestSyncAt,
   parseAutomationSettings,
   parseAutomationStatus,
-  parseCandidate,
-  parseCandidateList,
   parseDiscovery,
-  parseReviewResolve,
-  reviewTriggerText,
-  safeProvenance
+  validateAutomationPatch,
+  watchingSessionCount
 } from "../../frontend/src/automation.js";
 
 /**
  * 前端访问层的契约测试。
  *
- * 重点是两件事：界面文案必须是中文，且不把 transcript、提示词、模型输出或本地路径带出来。
+ * 只覆盖仍在运行路径上的能力：启用/关闭文案、任务状态、最近同步与最近捕获、发现入队。
+ * 界面文案必须是中文，且不把 transcript、提示词、模型输出或本地路径带出来。
  */
 
-const candidatePayload = {
-  id: "cand_1",
-  projectId: "proj_1",
-  sessionId: "sess_1",
-  sourceEvidenceId: "ev_1",
-  evidenceIds: ["ev_1"],
-  kind: "CONTEXT_ITEM",
-  fingerprint: "sha256:abc",
-  payload: { kind: "CONTEXT_ITEM", itemType: "SUMMARY", title: "标题", summary: "摘要", confidence: "HIGH" },
-  confidence: 0.9,
-  status: "PENDING",
-  extractorId: "codex-cli",
-  extractorVersion: "1.0.0",
-  targetResourceType: null,
-  targetResourceId: null,
-  reviewedAt: null,
-  supersededById: null,
-  provenance: {
-    sourceArtifactId: "cmp_1",
-    sourceEvidenceId: "ev_1",
-    extractorId: "codex-cli",
-    extractorVersion: "1.0.0",
-    extractionInputHash: "sha256:input"
-  },
-  createdAt: "2026-09-21T00:00:00.000Z",
-  updatedAt: "2026-09-21T00:00:00.000Z",
-  revision: 1
+const overview = {
+  generatedAt: "2026-09-21T00:00:00.000Z",
+  scheduler: { running: true, startedAt: null, lastTickAt: null, activeJobs: 0 },
+  activeKinds: ["DISCOVER_CODEX_THREADS", "SYNC_SESSION_TRANSCRIPT"],
+  jobs: { total: 2, byStatus: { QUEUED: 1, RUNNING: 0, SUCCEEDED: 1, FAILED: 0, CANCELED: 0 } },
+  recentFailures: [{ id: "job_1", kind: "SYNC_SESSION_TRANSCRIPT", failureCode: "AUTOMATION_JOB_FAILED", failureMessage: "同步失败" }],
+  projects: [
+    { projectId: "proj_1", mode: "SUGGEST_ONLY", lastDiscoveryAt: null, lastSyncAt: "2026-09-21T00:00:01.000Z", watchingSessions: 2, lastEvidenceAt: "2026-09-21T00:00:02.000Z" },
+    { projectId: "proj_2", mode: "OFF", lastDiscoveryAt: null, lastSyncAt: null, watchingSessions: 0, lastEvidenceAt: null }
+  ]
 };
 
 describe("前端中文文案映射", () => {
-  test("自动化模式不出现内部枚举", () => {
+  test("自动化只表达启用与关闭", () => {
+    expect(automationEnabledText("OFF")).toBe("关闭");
+    expect(automationEnabledText("SUGGEST_ONLY")).toBe("启用");
+    expect(automationEnabledText("AUTO_ACCEPT_HIGH_CONFIDENCE")).toBe("启用");
     expect(automationModeText("OFF")).toBe("关闭");
-    expect(automationModeText("SUGGEST_ONLY")).toBe("仅生成建议");
-    expect(automationModeText("AUTO_ACCEPT_HIGH_CONFIDENCE")).toBe("自动接受高置信度建议");
-    for (const label of Object.values({
-      a: automationModeText("OFF"),
-      b: automationModeText("SUGGEST_ONLY"),
-      c: automationModeText("AUTO_ACCEPT_HIGH_CONFIDENCE")
-    })) {
+    // 内部枚举不直接出现在界面上。
+    for (const label of [automationEnabledText("SUGGEST_ONLY"), automationModeText("AUTO_ACCEPT_HIGH_CONFIDENCE")]) {
       expect(label).not.toMatch(/AUTO_ACCEPT_HIGH_CONFIDENCE|SUGGEST_ONLY|^OFF$/);
     }
   });
 
-  test("候选状态与类型使用中文", () => {
-    expect(candidateStatusText("PENDING")).toBe("待审核");
-    expect(candidateStatusText("ACCEPTED")).toBe("已接受");
-    expect(candidateStatusText("REJECTED")).toBe("已拒绝");
-    expect(candidateStatusText("SUPERSEDED")).toBe("已被取代");
-    expect(candidateKindText("RESUME_CAPSULE")).toBe("恢复摘要");
-    expect(candidateKindText("CONTEXT_ITEM")).toBe("上下文条目");
-    expect(contextItemTypeText("OPEN_QUESTION")).toBe("待确认问题");
-    expect(contextItemTypeText("HANDOFF")).toBe("交接信息");
+  test("任务类型与状态使用中文", () => {
+    expect(automationJobKindText("DISCOVER_CODEX_THREADS")).toBe("发现 Codex 会话");
+    expect(automationJobKindText("SYNC_SESSION_TRANSCRIPT")).toBe("同步会话记录");
     expect(jobStatusText("QUEUED")).toBe("排队中");
-    expect(reviewTriggerText("AUTOMATION_SUGGESTION")).toBe("自动提取建议");
+    expect(contextItemTypeText("HANDOFF")).toBe("交接信息");
   });
 
   test("失败码有中文解释", () => {
-    expect(failureCodeText("EXTRACTOR_TIMEOUT")).toBe("提取超时");
-    expect(failureCodeText("CANDIDATE_TARGET_SESSION_MISSING")).toBe("缺少目标会话，无法应用");
+    expect(failureCodeText("AUTOMATION_JOB_FAILED")).toBe("自动化任务失败");
+    expect(failureCodeText("FEATURE_DEFERRED")).toBe("该能力已延后，暂不可用");
     expect(failureCodeText("SOMETHING_NEW")).toBe("未知失败");
   });
 });
@@ -104,20 +77,23 @@ describe("前端响应解析", () => {
     expect(settings).toMatchObject({ mode: "SUGGEST_ONLY", revision: 2 });
   });
 
-  test("解析状态汇总与候选列表", () => {
-    const status = parseAutomationStatus({
-      generatedAt: "2026-09-21T00:00:00.000Z",
-      scheduler: { running: true, startedAt: null, lastTickAt: null, activeJobs: 0 },
-      jobs: { total: 2, byStatus: { QUEUED: 1, RUNNING: 0, SUCCEEDED: 1, FAILED: 0, CANCELED: 0 } },
-      candidates: { pending: 3 },
-      recentFailures: [{ id: "job_1", kind: "EXTRACT_EVIDENCE_CONTEXT", failureCode: "EXTRACTOR_TIMEOUT", failureMessage: "超时" }],
-      projects: [{ projectId: "proj_1", mode: "SUGGEST_ONLY", lastDiscoveryAt: null, lastSyncAt: null, lastExtractionAt: null, pendingCandidates: 3 }]
-    });
-    expect(status.projects).toHaveLength(1);
-    expect(status.candidates.pending).toBe(3);
+  test("解析状态汇总并派生概览数值", () => {
+    const status = parseAutomationStatus(overview);
     expect(status.scheduler.running).toBe(true);
-    expect(parseCandidateList({ candidates: [candidatePayload] })).toHaveLength(1);
-    expect(parseCandidate(candidatePayload).kind).toBe("CONTEXT_ITEM");
+    expect(status.activeKinds).toEqual(["DISCOVER_CODEX_THREADS", "SYNC_SESSION_TRANSCRIPT"]);
+    expect(status.projects).toHaveLength(2);
+    expect(watchingSessionCount(status)).toBe(2);
+    expect(latestSyncAt(status)).toBe("2026-09-21T00:00:01.000Z");
+    expect(latestEvidenceAt(status)).toBe("2026-09-21T00:00:02.000Z");
+  });
+
+  test("状态响应里不再出现提取建议或压缩产物字段", () => {
+    const status = parseAutomationStatus(overview);
+    const serialized = JSON.stringify(status);
+    expect(serialized).not.toContain("pendingCandidates");
+    expect(serialized).not.toContain("lastExtractionAt");
+    expect(serialized).not.toContain("COMPACT_EVIDENCE");
+    expect(serialized).not.toContain("EXTRACT_EVIDENCE_CONTEXT");
   });
 
   test("发现响应区分已入队", () => {
@@ -128,73 +104,8 @@ describe("前端响应解析", () => {
     });
   });
 
-  test("解析应用结果并校验候选结构", () => {
-    const result = parseApplicationResult({
-      outcome: "APPLIED",
-      candidate: { ...candidatePayload, status: "ACCEPTED", targetResourceType: "CONTEXT_ITEM", targetResourceId: "ci_1" },
-      target: { resourceType: "CONTEXT_ITEM", resourceId: "ci_1" }
-    });
-    expect(result.outcome).toBe("APPLIED");
-    expect(result.candidate.status).toBe("ACCEPTED");
-    expect(result.target).toEqual({ resourceType: "CONTEXT_ITEM", resourceId: "ci_1" });
-  });
-
-  test("解析审查解决结果", () => {
-    const resolved = parseReviewResolve({
-      reviewItem: {
-        id: "rev_1",
-        projectId: "proj_1",
-        sourceType: "EXTRACTION_CANDIDATE",
-        sourceId: "cand_1",
-        triggerType: "AUTOMATION_SUGGESTION",
-        status: "RESOLVED",
-        priority: "MEDIUM",
-        summary: "自动提取建议",
-        proposedResolution: null,
-        reviewerId: null,
-        resolutionType: "APPROVED",
-        resolutionReason: "ok",
-        resolvedAt: "2026-09-21T00:00:00.000Z",
-        createdAt: "2026-09-21T00:00:00.000Z",
-        updatedAt: "2026-09-21T00:00:00.000Z",
-        revision: 2
-      },
-      application: { outcome: "APPLIED", candidate: candidatePayload, target: null }
-    });
-    expect(resolved.reviewItem.status).toBe("RESOLVED");
-    expect(resolved.application.outcome).toBe("APPLIED");
-  });
-
-  test("拒绝结构不合法的响应", () => {
-    expect(() => parseCandidate({ ...candidatePayload, kind: "RULE" })).toThrow();
-    expect(() => parseCandidateList({ candidates: "not-an-array" })).toThrow();
-  });
-});
-
-describe("按状态决定可用操作", () => {
-  test("待审核可执行接受、拒绝与重试", () => {
-    expect(candidateActions(parseCandidate(candidatePayload))).toEqual({ accept: true, reject: true, retry: true });
-  });
-
-  test("已接受不再显示接受或拒绝", () => {
-    const accepted = parseCandidate({ ...candidatePayload, status: "ACCEPTED" });
-    expect(candidateActions(accepted)).toEqual({ accept: false, reject: false, retry: false });
-  });
-
-  test("已拒绝不再显示接受", () => {
-    const rejected = parseCandidate({ ...candidatePayload, status: "REJECTED" });
-    expect(candidateActions(rejected)).toEqual({ accept: false, reject: false, retry: true });
-  });
-});
-
-describe("溯源字段脱敏", () => {
-  test("只暴露安全的溯源字段", () => {
-    const rows = safeProvenance(parseCandidate(candidatePayload));
-    const flattened = JSON.stringify(rows);
-    expect(rows.map(([label]) => label)).toEqual(["提取器", "提取器版本", "压缩产物", "来源证据"]);
-    expect(flattened).not.toContain("extractionInputHash");
-    expect(flattened).not.toContain("transcript");
-    expect(flattened).not.toContain("prompt");
-    expect(flattened).not.toMatch(/[A-Za-z]:[\\/]/);
+  test("轮询间隔仍受最小 5000ms 约束", () => {
+    expect(() => validateAutomationPatch({ pollIntervalMs: 1_000, expectedRevision: 1 })).toThrow();
+    expect(validateAutomationPatch({ pollIntervalMs: 5_000, expectedRevision: 1 })).toMatchObject({ pollIntervalMs: 5_000 });
   });
 });

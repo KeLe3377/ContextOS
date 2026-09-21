@@ -168,8 +168,8 @@ type ProjectStatusRow = {
   mode: AutomationMode | null;
   last_discovery_at: number | null;
   last_sync_at: number | null;
-  last_extraction_at: number | null;
-  pending_candidates: number;
+  watching_sessions: number | null;
+  last_evidence_at: number | null;
 };
 
 function iso(value: number | null): string | null {
@@ -498,15 +498,22 @@ export class SqliteAutomationRepository {
     return (row as { count: number }).count;
   }
 
+  /**
+   * Per-Project automation state, narrowed to what session continuity actually surfaces:
+   * whether automation is on, when it last discovered and synced, how many Sessions it watches
+   * and when it last captured Evidence. Candidate counts belong to the deferred pipeline.
+   */
   listProjectStatuses(): AutomationProjectStatus[] {
     const rows = this.db.prepare(
       `SELECT projects.id AS project_id,
               settings.mode AS mode,
               settings.last_discovery_at AS last_discovery_at,
               settings.last_sync_at AS last_sync_at,
-              settings.last_extraction_at AS last_extraction_at,
-              (SELECT COUNT(*) FROM extraction_candidates candidates
-                WHERE candidates.project_id = projects.id AND candidates.status = 'PENDING') AS pending_candidates
+              (SELECT COUNT(*) FROM session_sync_state state
+                JOIN sessions ON sessions.id = state.session_id
+                WHERE sessions.project_id = projects.id AND state.status = 'WATCHING') AS watching_sessions,
+              (SELECT MAX(evidence.created_at) FROM evidence_snapshots evidence
+                WHERE evidence.project_id = projects.id) AS last_evidence_at
          FROM projects
          LEFT JOIN project_automation_settings settings ON settings.project_id = projects.id
         ORDER BY projects.created_at ASC, projects.id ASC`
@@ -516,8 +523,8 @@ export class SqliteAutomationRepository {
       mode: row.mode ?? automationSettingsDefaults.mode,
       lastDiscoveryAt: iso(row.last_discovery_at),
       lastSyncAt: iso(row.last_sync_at),
-      lastExtractionAt: iso(row.last_extraction_at),
-      pendingCandidates: row.pending_candidates
+      watchingSessions: row.watching_sessions ?? 0,
+      lastEvidenceAt: iso(row.last_evidence_at)
     }));
   }
 

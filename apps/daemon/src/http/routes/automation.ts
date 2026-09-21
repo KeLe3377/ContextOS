@@ -46,8 +46,6 @@ export async function registerAutomationRoutes(
         total: Object.values(byStatus).reduce((total, count) => total + count, 0),
         byStatus
       },
-      // Still counted until the UI stops surfacing it: rows written before the pruning exist.
-      candidates: { pending: services.automation.countPendingCandidates() },
       // Only the stable failure code and a short message; job payloads never leave the daemon.
       recentFailures: services.automation.listLatestFailures(5).map((job) => ({
         id: job.id,

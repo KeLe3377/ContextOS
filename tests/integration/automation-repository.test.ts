@@ -115,18 +115,35 @@ describe("automation settings storage", () => {
     expect(() => repository.getSettings("proj_missing", now)).toThrowError(/Project not found/i);
   });
 
-  test("records discovery, sync and extraction timestamps", () => {
+  test("records discovery and sync timestamps with no candidate surface", () => {
     repository.markProjectActivity(projectId, "DISCOVERY", now);
     repository.markProjectActivity(projectId, "SYNC", now + 1_000);
-    repository.markProjectActivity(projectId, "EXTRACTION", now + 2_000);
     const [status] = repository.listProjectStatuses();
     expect(status).toMatchObject({
       projectId,
       mode: "SUGGEST_ONLY",
       lastDiscoveryAt: new Date(now).toISOString(),
       lastSyncAt: new Date(now + 1_000).toISOString(),
-      lastExtractionAt: new Date(now + 2_000).toISOString(),
-      pendingCandidates: 0
+      watchingSessions: 0
+    });
+    // The deferred pipeline's counters are gone from the status projection entirely.
+    expect(status).not.toHaveProperty("lastExtractionAt");
+    expect(status).not.toHaveProperty("pendingCandidates");
+  });
+
+  test("counts watched sessions and the latest captured evidence per project", () => {
+    const sessionId = "sess_watched";
+    client.db.prepare("INSERT INTO sessions (id, project_id, agent_adapter_id, status, intent, runtime_state, created_at, updated_at, revision) VALUES (?, ?, 'codex', 'CREATED', NULL, '{}', ?, ?, 1)")
+      .run(sessionId, projectId, now, now);
+    client.db.prepare("INSERT INTO session_sync_state (session_id, adapter_id, transcript_path, status, byte_offset, events_ingested, last_synced_at, updated_at) VALUES (?, 'codex', ?, 'WATCHING', 0, 0, ?, ?)")
+      .run(sessionId, join(tempDir, "rollout.jsonl"), now, now);
+    client.db.prepare("INSERT INTO evidence_snapshots (id, project_id, evidence_type, title, content_hash, metadata_json, captured_at, created_at) VALUES (?, ?, 'AGENT_OUTPUT', 'Batch', 'sha256:x', '{}', ?, ?)")
+      .run("ev_status", projectId, now + 5_000, now + 5_000);
+
+    const [status] = repository.listProjectStatuses();
+    expect(status).toMatchObject({
+      watchingSessions: 1,
+      lastEvidenceAt: new Date(now + 5_000).toISOString()
     });
   });
 });

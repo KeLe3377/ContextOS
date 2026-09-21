@@ -3,23 +3,9 @@ import { Badge, EmptyNote, Panel, Rows, fmtDate, toneForStatus } from "./ui";
 import { AutomationOverview } from "./components/automation/AutomationOverview";
 import type { AutomationSettingsValues } from "./components/automation/ProjectAutomationSettings";
 import { ProjectAutomationSettings } from "./components/automation/ProjectAutomationSettings";
-import { CandidateDetail } from "./components/automation/CandidateDetail";
-import { AutomationReviewDetail } from "./components/automation/AutomationReviewDetail";
 import {
-  automationModeText,
   parseAutomationSettings,
-  parseCandidate,
-  type ExtractionCandidateDto,
-  candidateActions,
-  candidateKindText,
-  candidateStatusText,
-  failureCodeText,
-  jobStatusText,
   parseAutomationStatus,
-  parseDiscovery,
-  reviewTriggerText,
-  safeProvenance,
-  type AutomationMode,
   type AutomationOverviewDto
 } from "./automation";
 
@@ -1277,23 +1263,7 @@ function ReviewPage(props: AnyRecord & { header: ReactNode }) {
   const selectedReview = data.reviews.find((item: AnyRecord) => item.id === selectedReviewId) || data.reviews.find((item: AnyRecord) => ["OPEN", "IN_PROGRESS"].includes(item.status)) || data.reviews[0];
   const sourceObject = selectedReview ? [...data.rules, ...data.sessions, ...data.contextItems, ...data.evidenceSnapshots, ...data.decisions, ...data.workItems].find((item: AnyRecord) => item.id === selectedReview.sourceId) : null;
   const logItems = selectedReview && reviewActionLog?.reviewId === selectedReview.id ? reviewActionLog.items : [];
-  const [automationCandidate, setAutomationCandidate] = useState<ExtractionCandidateDto | null>(null);
-  const isAutomationReview = selectedReview?.sourceType === "EXTRACTION_CANDIDATE";
-
-  useEffect(() => {
-    if (!isAutomationReview) {
-      setAutomationCandidate(null);
-      return;
-    }
-    let cancelled = false;
-    void fetchJson(`/api/automation/candidates/${selectedReview!.sourceId}`)
-      .then((value) => { if (!cancelled) setAutomationCandidate(parseCandidate(value)); })
-      .catch(() => { if (!cancelled) setAutomationCandidate(null); });
-    return () => { cancelled = true; };
-  }, [isAutomationReview, selectedReview?.sourceId]);
-
-  const resolveAutomationReview = (resolutionType: string, reason: string, expectedRevision: number) =>
-    sendJson(`/api/automation/review-items/${selectedReview!.id}/resolve`, "POST", { resolutionType, resolutionReason: reason, expectedRevision });
+  // 自动化专属审核与提取建议已退出运行路径，这里只处理普通审查项。
   return <>{header}<div className="grid cols-12"><div className="span-8 stack">
     <Panel title="审查队列" iconName="inbox"><Table headers={["审查项", "来源", "优先级", "状态", "操作"]} rows={data.reviews.map((item: AnyRecord) => [
       <div className={`session-cell ${item.id === selectedReview?.id ? "selected" : ""}`}><strong>{item.summary}</strong><div className="muted">{item.proposedResolution || item.triggerType}</div></div>,
@@ -1309,22 +1279,6 @@ function ReviewPage(props: AnyRecord & { header: ReactNode }) {
       </div>
     ])} empty="暂无审查项。" /></Panel>
   </div><div className="span-4 stack">
-    {isAutomationReview && selectedReview ? <AutomationReviewDetail review={selectedReview} candidate={automationCandidate} onResolve={resolveAutomationReview} onOpenCandidate={(candidateId) => void fetchJson(`/api/automation/candidates/${candidateId}`).then((value) => setAutomationCandidate(parseCandidate(value))).catch(() => undefined)} /> : null}
-    {isAutomationReview && automationCandidate ? (
-      <CandidateDetail
-        candidate={automationCandidate}
-        onAccept={(expectedRevision) => sendJson(`/api/automation/candidates/${automationCandidate.id}/accept`, "POST", { expectedRevision })}
-        onReject={(expectedRevision) => sendJson(`/api/automation/candidates/${automationCandidate.id}/reject`, "POST", { expectedRevision })}
-        onRetry={(expectedRevision) => sendJson(`/api/automation/candidates/${automationCandidate.id}/retry`, "POST", { expectedRevision })}
-        onOpenTarget={(resourceType, resourceId) => {
-          if (resourceType === "SESSION") {
-            void selectSession?.(resourceId);
-            return;
-          }
-          void fetchJson(`/api/automation/candidates/${automationCandidate.id}`).then((value) => setAutomationCandidate(parseCandidate(value))).catch(() => undefined);
-        }}
-      />
-    ) : null}
     <Panel title="所选审查" iconName="rate_review" meta={selectedReview?.id || "No review"}>
       {selectedReview ? <div className="session-detail">
         <div className="detail-grid source-detail-grid">

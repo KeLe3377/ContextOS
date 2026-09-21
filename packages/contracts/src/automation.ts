@@ -201,16 +201,6 @@ export const automationJobSchema = resourceMetaSchema.extend({
   endedAt: z.string().nullable()
 });
 
-export const automationJobFailureSchema = automationJobSchema.pick({
-  id: true,
-  kind: true,
-  projectId: true,
-  failureCode: true,
-  failureMessage: true,
-  attempts: true,
-  endedAt: true
-});
-
 export const automationSchedulerStatusSchema = z.object({
   running: z.boolean(),
   startedAt: z.string().nullable(),
@@ -223,8 +213,10 @@ export const automationProjectStatusSchema = z.object({
   mode: automationModeSchema,
   lastDiscoveryAt: z.string().nullable(),
   lastSyncAt: z.string().nullable(),
-  lastExtractionAt: z.string().nullable(),
-  pendingCandidates: z.number().int().nonnegative()
+  /** Sessions currently watched for this Project — the thing automation is actually doing. */
+  watchingSessions: z.number().int().nonnegative(),
+  /** When the most recent transcript Evidence for this Project was captured. */
+  lastEvidenceAt: z.string().nullable()
 });
 
 /**
@@ -250,32 +242,15 @@ export const automationOverviewSchema = z.object({
     total: z.number().int().nonnegative(),
     byStatus: z.record(automationJobStatusSchema, z.number().int().nonnegative())
   }),
-  candidates: z.object({
-    pending: z.number().int().nonnegative()
-  }),
   recentFailures: z.array(automationOverviewFailureSchema),
   projects: z.array(automationProjectStatusSchema)
 });
 
-export const automationStatusSchema = z.object({
-  generatedAt: z.string(),
-  scheduler: automationSchedulerStatusSchema,
-  jobs: z.object({
-    total: z.number().int().nonnegative(),
-    byStatus: z.record(automationJobStatusSchema, z.number().int().nonnegative()),
-    byKind: z.record(automationJobKindSchema, z.number().int().nonnegative()),
-    latestFailures: z.array(automationJobFailureSchema)
-  }),
-  projects: z.array(automationProjectStatusSchema),
-  extractor: z.object({
-    id: z.string(),
-    version: z.string(),
-    available: z.boolean()
-  }),
-  candidates: z.object({
-    pending: z.number().int().nonnegative()
-  })
-});
+/** 概览里只出现这两类任务，所以文案只需要覆盖它们。 */
+export const automationJobKindLabels = {
+  DISCOVER_CODEX_THREADS: "发现 Codex 会话",
+  SYNC_SESSION_TRANSCRIPT: "同步会话记录"
+} as const satisfies Record<ActiveAutomationJobKind, string>;
 
 export const automationRunDiscoveryInputSchema = z
   .object({
@@ -312,10 +287,8 @@ export type ExtractionCandidateListQuery = z.infer<typeof extractionCandidateLis
 export type ExtractionCandidateAcceptInput = z.infer<typeof extractionCandidateAcceptSchema>;
 export type ExtractionCandidateRejectInput = z.infer<typeof extractionCandidateRejectSchema>;
 export type AutomationJobDto = z.infer<typeof automationJobSchema>;
-export type AutomationJobFailureDto = z.infer<typeof automationJobFailureSchema>;
 export type AutomationSchedulerStatus = z.infer<typeof automationSchedulerStatusSchema>;
 export type AutomationProjectStatus = z.infer<typeof automationProjectStatusSchema>;
-export type AutomationStatusDto = z.infer<typeof automationStatusSchema>;
 export type AutomationOverviewDto = z.infer<typeof automationOverviewSchema>;
 export type AutomationRunDiscoveryInput = z.infer<typeof automationRunDiscoveryInputSchema>;
 export type AutomationRunDiscoveryResult = z.infer<typeof automationRunDiscoveryResultSchema>;

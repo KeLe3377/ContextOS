@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { automationModeText, validateAutomationPatch, type AutomationMode } from "../../automation";
+import { automationEnabledText, validateAutomationPatch, type AutomationMode } from "../../automation";
 import { Badge, Panel } from "../../ui";
 
 /** 与后端 schema 一致的输入范围，前端不允许必然失败的值。 */
@@ -9,8 +9,6 @@ export const automationSettingRanges = {
   sourceMaxBytes: { min: 1_024, max: 1_000_000, step: 1_024 },
   autoAcceptThreshold: { min: 0, max: 1, step: 0.05 }
 } as const;
-
-const modes: AutomationMode[] = ["OFF", "SUGGEST_ONLY", "AUTO_ACCEPT_HIGH_CONFIDENCE"];
 
 export type AutomationSettingsValues = {
   mode: AutomationMode;
@@ -24,8 +22,9 @@ export type AutomationSettingsValues = {
 /**
  * 项目自动化设置。
  *
- * 所有可见文案为中文，内部枚举不直接显示；保存时携带 expectedRevision，
- * 409 时提示已被其他操作更新并重新加载最新值。
+ * 界面只表达“启用 / 关闭”：开启即让守护进程发现并持续保存 Codex 会话，关闭即停止。
+ * 其余字段仍按后端契约一并提交，因为数据层保持原样，只是不再占用界面空间。
+ * 保存时携带 expectedRevision，冲突时提示已被其他操作更新并重新载入最新值。
  */
 export function ProjectAutomationSettings({
   values,
@@ -41,6 +40,7 @@ export function ProjectAutomationSettings({
   const current = draft || values;
   if (!current) return <Panel title="自动化设置" iconName="tune"><div className="empty-note">正在加载自动化设置…</div></Panel>;
 
+  const enabled = current.mode !== "OFF";
   const patch = (next: Partial<AutomationSettingsValues>) => setDraft({ ...current, ...next });
 
   const save = async () => {
@@ -72,11 +72,14 @@ export function ProjectAutomationSettings({
   };
 
   return (
-    <Panel title="自动化设置" iconName="tune" meta={<Badge text={automationModeText(current.mode)} tone={current.mode === "OFF" ? "" : "blue"} />}>
-      <label>自动化模式
-        <select value={current.mode} onChange={(event) => patch({ mode: event.target.value as AutomationMode })}>
-          {modes.map((mode) => <option value={mode} key={mode}>{automationModeText(mode)}</option>)}
-        </select>
+    <Panel title="自动化设置" iconName="tune" meta={<Badge text={automationEnabledText(current.mode)} tone={enabled ? "blue" : ""} />}>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(event) => patch({ mode: event.target.checked ? "SUGGEST_ONLY" : "OFF" })}
+        />
+        <span>启用自动化：自动发现并持续保存 Codex 会话</span>
       </label>
       <label>轮询间隔（毫秒）
         <input
@@ -87,37 +90,6 @@ export function ProjectAutomationSettings({
           step={automationSettingRanges.pollIntervalMs.step}
           onChange={(event) => patch({ pollIntervalMs: Number(event.target.value) })}
         />
-      </label>
-      <label>最大并发任务数
-        <input
-          type="number"
-          value={current.maxConcurrentJobs}
-          min={automationSettingRanges.maxConcurrentJobs.min}
-          max={automationSettingRanges.maxConcurrentJobs.max}
-          step={automationSettingRanges.maxConcurrentJobs.step}
-          onChange={(event) => patch({ maxConcurrentJobs: Number(event.target.value) })}
-        />
-      </label>
-      <label>单次来源读取上限（字节）
-        <input
-          type="number"
-          value={current.sourceMaxBytes}
-          min={automationSettingRanges.sourceMaxBytes.min}
-          max={automationSettingRanges.sourceMaxBytes.max}
-          step={automationSettingRanges.sourceMaxBytes.step}
-          onChange={(event) => patch({ sourceMaxBytes: Number(event.target.value) })}
-        />
-      </label>
-      <label>自动接受阈值
-        <input
-          type="range"
-          value={current.autoAcceptThreshold}
-          min={automationSettingRanges.autoAcceptThreshold.min}
-          max={automationSettingRanges.autoAcceptThreshold.max}
-          step={automationSettingRanges.autoAcceptThreshold.step}
-          onChange={(event) => patch({ autoAcceptThreshold: Number(event.target.value) })}
-        />
-        <span className="mono">{current.autoAcceptThreshold.toFixed(2)}</span>
       </label>
       <div className="list-row">
         <button className="btn primary" disabled={busy} onClick={() => void save()}>{busy ? "保存中…" : "保存设置"}</button>

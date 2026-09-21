@@ -8,7 +8,7 @@ import {
   automationRunDiscoveryInputSchema,
   automationSettingsDtoSchema,
   automationSettingsPatchSchema,
-  automationStatusSchema,
+  automationOverviewSchema,
   automationTerminalJobStatuses,
   candidateActiveStatuses,
   candidateKindSchema,
@@ -244,42 +244,41 @@ describe("extraction candidate contract", () => {
 });
 
 describe("automation status contract", () => {
-  test("parses a status snapshot and keeps failures payload-free", () => {
-    const parsed = automationStatusSchema.parse({
+  test("parses the overview snapshot and keeps failures payload-free", () => {
+    const parsed = automationOverviewSchema.parse({
       generatedAt: "2026-09-20T00:00:00.000Z",
       scheduler: { running: true, startedAt: "2026-09-20T00:00:00.000Z", lastTickAt: "2026-09-20T00:00:05.000Z", activeJobs: 1 },
+      activeKinds: ["DISCOVER_CODEX_THREADS", "SYNC_SESSION_TRANSCRIPT"],
       jobs: {
         total: 3,
-        byStatus: { QUEUED: 1, RUNNING: 1, SUCCEEDED: 1, FAILED: 0, CANCELED: 0 },
-        byKind: { SYNC_SESSION_TRANSCRIPT: 2, EXTRACT_EVIDENCE_CONTEXT: 1 },
-        latestFailures: [
-          {
-            id: "job_2",
-            kind: "EXTRACT_EVIDENCE_CONTEXT",
-            projectId: "proj_1",
-            failureCode: "EXTRACTOR_TIMEOUT",
-            failureMessage: "Codex CLI timed out",
-            attempts: 2,
-            endedAt: "2026-09-20T00:01:00.000Z"
-          }
-        ]
+        byStatus: { QUEUED: 1, RUNNING: 1, SUCCEEDED: 1, FAILED: 0, CANCELED: 0 }
       },
+      recentFailures: [
+        {
+          id: "job_2",
+          kind: "SYNC_SESSION_TRANSCRIPT",
+          failureCode: "AUTOMATION_JOB_FAILED",
+          failureMessage: "Sync failed"
+        }
+      ],
       projects: [
         {
           projectId: "proj_1",
           mode: "SUGGEST_ONLY",
           lastDiscoveryAt: null,
           lastSyncAt: "2026-09-20T00:00:05.000Z",
-          lastExtractionAt: null,
-          pendingCandidates: 2
+          watchingSessions: 2,
+          lastEvidenceAt: "2026-09-20T00:00:06.000Z"
         }
-      ],
-      extractor: { id: "codex-cli", version: "1.0.0", available: true },
-      candidates: { pending: 2 }
+      ]
     });
 
-    expect(parsed.jobs.latestFailures[0]).not.toHaveProperty("payload");
+    expect(parsed.recentFailures[0]).not.toHaveProperty("payload");
     expect(parsed.scheduler.activeJobs).toBe(1);
+    // 概览只描述会话连续性闭环，提取建议与压缩产物不在其中。
+    expect(parsed.projects[0]).not.toHaveProperty("pendingCandidates");
+    expect(parsed).not.toHaveProperty("candidates");
+    expect(parsed).not.toHaveProperty("extractor");
   });
 
   test("run-discovery accepts an optional project scope only", () => {

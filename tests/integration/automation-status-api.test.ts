@@ -78,7 +78,6 @@ describe("自动化状态接口", () => {
 
     expect(status.jobs.byStatus.QUEUED).toBeGreaterThanOrEqual(1);
     expect(status.jobs.total).toBeGreaterThanOrEqual(1);
-    expect(status.candidates.pending).toBe(0);
   });
 
   test("记录项目最近发现与同步时间", async () => {
@@ -155,6 +154,6 @@ describe("自动化状态接口", () => {
     const entry = status.projects.find((item) => item.projectId === projectId)!;
 
     expect(entry.mode).toBe("OFF");
-    expect(entry.pendingCandidates).toBe(0);
+    expect(entry.watchingSessions).toBe(0);
   });
 });
