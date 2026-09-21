@@ -173,6 +173,8 @@ type ResumeSessionRow = {
 type ResumeCapsuleState = {
   summary?: string;
   nextAction?: string | null;
+  /** Derived continuity excerpt; preserved by patch so editing summary/nextAction keeps it. */
+  contextText?: string | null;
   lastRunId?: string | null;
   evidenceSnapshotIds?: string[];
   updatedAt?: string;
@@ -503,6 +505,8 @@ export class SqliteRuntimeRepository {
         intent: row.intent,
         summary: input.summary,
         nextAction: current.nextAction,
+        // An imported transcript is raw text, not a decoded batch, so it builds no continuity.
+        contextText: current.contextText,
         lastRunId: current.lastRunId,
         evidenceSnapshotIds,
         updatedAt: importedAt
@@ -510,6 +514,7 @@ export class SqliteRuntimeRepository {
       state.resumeCapsule = {
         summary: next.summary,
         nextAction: next.nextAction,
+        contextText: next.contextText,
         lastRunId: next.lastRunId,
         evidenceSnapshotIds: next.evidenceSnapshotIds,
         updatedAt: next.updatedAt
@@ -578,6 +583,36 @@ export class SqliteRuntimeRepository {
     return this.getResumeCapsule(input.sessionId);
   }
 
+  /**
+   * Writes the deterministic continuity excerpt produced from captured transcript Evidence.
+   *
+   * Deliberately separate from `writeResumeCapsule`: that one is driven by a run finishing,
+   * while this one is driven by a sync batch and must be callable inside the ingestion
+   * transaction so Evidence, reader offset and continuity commit — or roll back — together.
+   */
+  writeSessionContinuity(input: {
+    sessionId: string;
+    summary: string;
+    nextAction: string | null;
+    contextText: string;
+    evidenceSnapshotIds: string[];
+  }, now: number): ResumeCapsuleDto {
+    const row = this.getResumeSessionRow(input.sessionId);
+    const state = JSON.parse(row.runtime_state) as Record<string, unknown>;
+    const current = (state.resumeCapsule ?? {}) as ResumeCapsuleState;
+    state.resumeCapsule = {
+      summary: input.summary,
+      nextAction: input.nextAction,
+      contextText: input.contextText,
+      lastRunId: current.lastRunId ?? null,
+      evidenceSnapshotIds: input.evidenceSnapshotIds,
+      updatedAt: new Date(now).toISOString()
+    };
+    this.db.prepare("UPDATE sessions SET runtime_state = ?, resume_capsule_id = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+      .run(JSON.stringify(state), input.evidenceSnapshotIds.at(-1) ?? null, now, input.sessionId);
+    return this.getResumeCapsule(input.sessionId);
+  }
+
   getResumeCapsule(sessionId: string): ResumeCapsuleDto {
     const row = this.getResumeSessionRow(sessionId);
     const state = JSON.parse(row.runtime_state) as { resumeCapsule?: ResumeCapsuleState };
@@ -596,6 +631,8 @@ export class SqliteRuntimeRepository {
     state.resumeCapsule = {
       summary: input.summary ?? current.summary,
       nextAction: input.nextAction === undefined ? current.nextAction : input.nextAction,
+      // Continuity is derived from Evidence, so a manual edit must never drop or forge it.
+      contextText: current.contextText,
       lastRunId: current.lastRunId,
       evidenceSnapshotIds: current.evidenceSnapshotIds,
       updatedAt: new Date(now).toISOString()
@@ -805,6 +842,7 @@ function mapResumeCapsule(row: ResumeSessionRow, capsule?: ResumeCapsuleState): 
       intent: row.intent,
       summary: row.intent ? `Session is ready to continue: ${row.intent}` : "Session is ready to continue.",
       nextAction: "Continue in Agent",
+      contextText: null,
       lastRunId: null,
       evidenceSnapshotIds: [],
       updatedAt: new Date(row.updated_at).toISOString()
@@ -816,6 +854,7 @@ function mapResumeCapsule(row: ResumeSessionRow, capsule?: ResumeCapsuleState): 
     intent: row.intent,
     summary: capsule.summary ?? "Session has a resume capsule.",
     nextAction: capsule.nextAction ?? null,
+    contextText: capsule.contextText ?? null,
     lastRunId: capsule.lastRunId ?? null,
     evidenceSnapshotIds: capsule.evidenceSnapshotIds ?? [],
     updatedAt: capsule.updatedAt ?? new Date(row.updated_at).toISOString()

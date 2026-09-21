@@ -13,6 +13,7 @@ import type { EvidenceSnapshotService } from "./context-services.js";
 import type { DesktopSyncBatch, DesktopSyncRead, DesktopSyncService } from "./desktop-sync-service.js";
 import { AutomationDispatchError } from "./automation-scheduler.js";
 import { encodeTranscriptEvents, type TranscriptEventIdentity } from "./transcript-event-codec.js";
+import { buildSessionContinuity, type SessionContinuityWriter } from "./session-continuity.js";
 import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./project-thread-matcher.js";
 
 /**
@@ -33,6 +34,11 @@ export type AutomationServiceOptions = {
   adapters: AgentAdapterRegistry;
   desktopSync: DesktopSyncService;
   /**
+   * Persists the deterministic continuity excerpt derived from captured Evidence. Injected, so
+   * the service never builds a runtime repository of its own.
+   */
+  resumeCapsuleWriter: SessionContinuityWriter;
+  /**
    * Runtime-owned roots (the extraction run workspace) that must never be attributed to a
    * business Project, so an extraction run cannot feed itself back into the pipeline.
    */
@@ -51,6 +57,14 @@ export type AutomationDiscoverySummary = {
 };
 
 const discoveryThreadLimit = 100;
+
+/**
+ * How many recent transcript batches one continuity rebuild may read.
+ *
+ * The excerpt is character-bounded anyway, so going further back would only add I/O: this keeps
+ * a sync proportional to recent activity instead of to the age of the Session.
+ */
+const continuityBatchLimit = 24;
 
 /** Adapter id used for discovery when the Project does not name one explicitly. */
 const defaultDiscoveryAdapterId = "codex";
@@ -220,7 +234,7 @@ export class AutomationService {
 
     // Read first, commit second: nothing is persisted until the batch is captured as Evidence.
     const read = this.options.desktopSync.read(session.id);
-    const persisted = this.commitRead({ projectId: session.projectId, read, now });
+    const persisted = this.commitRead({ projectId: session.projectId, read });
 
     this.options.automation.markProjectActivity(session.projectId, "SYNC", now);
     const nextPollScheduled = this.scheduleNextSync(session.id, now, now + settings.pollIntervalMs);
@@ -244,9 +258,10 @@ export class AutomationService {
   /**
    * Persists one read as a single unit of work.
    *
-   * The Evidence Snapshot row, the advanced reader offset and the derived extraction job commit
-   * together, so the reader can never end up past events that were never captured. A read that
-   * produced no events only moves the offset, which is already a single atomic statement.
+   * The Evidence Snapshot row, the advanced reader offset and the Resume Capsule's continuity
+   * excerpt commit together, so the reader can never end up past events that were never captured
+   * and the capsule can never claim continuity it has no Evidence for. A read that produced no
+   * events only moves the offset, which is already a single atomic statement.
    *
    * The Evidence blob is written to disk before the transaction opens — it is the one step that
    * cannot take part in a SQLite transaction — and is deleted again if the transaction fails.
@@ -254,9 +269,8 @@ export class AutomationService {
   private commitRead(input: {
     projectId: string;
     read: DesktopSyncRead;
-    now: number;
   }): { evidenceId: string; reused: boolean } | null {
-    const { projectId, read, now } = input;
+    const { projectId, read } = input;
     if (!read.batch) {
       this.options.sync.upsert(read.nextState);
       return null;
@@ -290,8 +304,13 @@ export class AutomationService {
       this.options.sync.runIngestionTransaction(() => {
         evidenceId = this.options.evidence.commitPreparedAgentOutput(prepared).id;
         this.options.sync.upsert(read.nextState);
-        // Only a newly captured batch needs follow-up work; a reused one was queued already.
-        if (!prepared.existing) this.enqueueCompaction({ projectId, batch, evidenceId: evidenceId!, now });
+        // Only a newly captured batch changes the excerpt; a reused one was already folded in.
+        if (!prepared.existing) {
+          this.options.resumeCapsuleWriter.write({
+            sessionId: batch.sessionId,
+            ...this.buildSessionContinuity({ projectId, sessionId: batch.sessionId })
+          });
+        }
       });
     } catch (error) {
       this.options.evidence.discardPreparedAgentOutput(prepared);
@@ -302,24 +321,21 @@ export class AutomationService {
   }
 
   /**
-   * Queues compaction for an Evidence Snapshot that was just committed.
+   * Rebuilds the bounded continuity excerpt from every captured batch of this Session.
    *
-   * Extraction is deliberately not queued here: it runs against the compaction artifact, and
-   * CompactionService only queues it once that artifact exists.
+   * Runs inside the ingestion transaction, after the new Snapshot row exists, so the capsule
+   * always names the Evidence it was derived from. A batch that no longer decodes fails loudly:
+   * silently skipping it would produce an excerpt that quietly contradicts the stored Evidence.
    */
-  private enqueueCompaction(input: { projectId: string; batch: DesktopSyncBatch; evidenceId: string; now: number }): void {
-    this.options.automation.enqueue(
-      {
-        kind: "COMPACT_EVIDENCE",
+  private buildSessionContinuity(input: { projectId: string; sessionId: string }) {
+    return buildSessionContinuity({
+      evidence: this.options.evidence.readSessionTranscriptBatches({
         projectId: input.projectId,
-        sessionId: input.batch.sessionId,
-        resourceType: "EVIDENCE_SNAPSHOT",
-        resourceId: input.evidenceId,
-        payload: { evidenceId: input.evidenceId, sessionId: input.batch.sessionId },
-        idempotencyKey: `COMPACT_EVIDENCE:${input.evidenceId}`
-      },
-      input.now
-    );
+        sessionId: input.sessionId,
+        stream: desktopSyncEvidenceStream,
+        limit: continuityBatchLimit
+      })
+    });
   }
 
   /**

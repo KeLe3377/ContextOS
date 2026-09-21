@@ -16,6 +16,7 @@ import { SqliteReviewItemRepository, SqliteSessionRepository } from "../../packa
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { SqliteProjectRepository } from "../../packages/infrastructure/src/sqlite/project-repository.js";
 import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/sqlite/session-sync-repository.js";
+import type { SessionContinuity, SessionContinuityWriter } from "../../packages/application/src/core/session-continuity.js";
 
 const externalSessionId = "01a0dddd-0000-7000-8000-000000000001";
 const pollIntervalMs = 30_000;
@@ -32,6 +33,13 @@ let service: AutomationService;
 let projectId: string;
 let sessionId: string;
 let clockNow: number;
+let continuityWrites: Array<{ sessionId: string } & SessionContinuity>;
+
+const recordingWriter: SessionContinuityWriter = {
+  write: (input) => {
+    continuityWrites.push(input);
+  }
+};
 
 function messageRow(role: "user" | "assistant", text: string, timestamp: string): string {
   return JSON.stringify({
@@ -119,6 +127,7 @@ beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "contextos-evidence-"));
   rolloutPath = join(tempDir, "rollout.jsonl");
   clockNow = Math.floor(Date.now() / 1000) * 1000;
+  continuityWrites = [];
 
   client = SqliteClient.open({ databaseFile: join(tempDir, "contextos.sqlite") });
   runMigrations(client);
@@ -148,6 +157,7 @@ beforeEach(async () => {
     evidence: new EvidenceSnapshotService(evidenceRepository, new FileEvidenceStore(tempDir), reviewItems),
     adapters,
     desktopSync,
+    resumeCapsuleWriter: recordingWriter,
     clock: () => clockNow
   });
 
@@ -163,7 +173,7 @@ afterEach(async () => {
 });
 
 describe("automatic transcript evidence", () => {
-  test("stores one Evidence snapshot per batch and queues compaction for it", async () => {
+  test("stores one Evidence snapshot per batch and derives continuity from it", async () => {
     await bindAtEnd();
     await appendMessage("first message");
     const summary = await syncOnce();
@@ -176,11 +186,16 @@ describe("automatic transcript evidence", () => {
     expect(rows[0]).toMatchObject({ evidence_type: "AGENT_OUTPUT", project_id: projectId });
     expect(rows[0]!.content_hash).toMatch(/^sha256:/);
 
-    const jobs = compactionJobs();
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]).toMatchObject({ status: "QUEUED", resource_type: "EVIDENCE_SNAPSHOT", resource_id: summary.evidenceId });
-    expect(jobs[0]!.idempotency_key).toBe(`COMPACT_EVIDENCE:${summary.evidenceId}`);
-    expect(JSON.parse(jobs[0]!.payload_json)).toMatchObject({ evidenceId: summary.evidenceId, sessionId });
+    // No deferred pipeline job is queued any more; continuity is derived in the same unit.
+    expect(compactionJobs()).toHaveLength(0);
+    expect(continuityWrites).toEqual([
+      expect.objectContaining({
+        sessionId,
+        evidenceSnapshotIds: [summary.evidenceId],
+        nextAction: "first message"
+      })
+    ]);
+    expect(continuityWrites[0]!.contextText).toContain("first message");
   });
 
   test("records provenance without copying the transcript body into metadata", async () => {
@@ -220,12 +235,13 @@ describe("automatic transcript evidence", () => {
     await appendMessage("only message");
     await syncOnce();
     expect(evidenceRows()).toHaveLength(1);
-    expect(compactionJobs()).toHaveLength(1);
+    expect(continuityWrites).toHaveLength(1);
 
     const idle = await syncOnce();
     expect(idle).toMatchObject({ newEvents: 0, evidenceId: null });
     expect(evidenceRows()).toHaveLength(1);
-    expect(compactionJobs()).toHaveLength(1);
+    // An empty read cannot change the excerpt.
+    expect(continuityWrites).toHaveLength(1);
   });
 
   test("reuses the existing Evidence when the same rows are re-read after an offset reset", async () => {
@@ -242,8 +258,8 @@ describe("automatic transcript evidence", () => {
 
     expect(replay).toMatchObject({ newEvents: 1, evidenceReused: true, evidenceId: first.evidenceId });
     expect(evidenceRows()).toHaveLength(1);
-    // No second compaction job: the reused Evidence was already queued.
-    expect(compactionJobs()).toHaveLength(1);
+    // No second continuity write: the reused Evidence was already folded into the excerpt.
+    expect(continuityWrites).toHaveLength(1);
   });
 
   test("captures successive batches as separate Evidence rows", async () => {
@@ -259,6 +275,10 @@ describe("automatic transcript evidence", () => {
     expect(rows.map((row) => row.content_hash)).toHaveLength(2);
     expect(rows[1]!.metadata_json).toContain('"startOrdinal":1');
     expect(rows[1]!.metadata_json).toContain('"endOrdinal":2');
-    expect(compactionJobs()).toHaveLength(2);
+    // Each new batch rebuilds the excerpt, and the newest one names both Evidence rows.
+    expect(continuityWrites).toHaveLength(2);
+    expect(continuityWrites[1]!.evidenceSnapshotIds).toEqual([first.evidenceId, second.evidenceId]);
+    expect(continuityWrites[1]!.contextText).toContain("first batch");
+    expect(continuityWrites[1]!.contextText).toContain("second batch");
   });
 });

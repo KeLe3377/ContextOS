@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AutomationService } from "../../packages/application/src/core/automation-service.js";
 import { EvidenceSnapshotService } from "../../packages/application/src/core/context-services.js";
 import { DesktopSyncService } from "../../packages/application/src/core/desktop-sync-service.js";
+import { buildSessionContinuity } from "../../packages/application/src/core/session-continuity.js";
 import type { AgentAdapter, AgentTranscriptEvent } from "../../packages/application/src/ports/agent-adapter.js";
 import { AgentAdapterRegistry } from "../../packages/infrastructure/src/adapters/registry.js";
 import { CodexTranscriptTailer } from "../../packages/infrastructure/src/adapters/codex-transcript-tailer.js";
@@ -15,7 +16,9 @@ import { SqliteEvidenceSnapshotRepository } from "../../packages/infrastructure/
 import { SqliteReviewItemRepository, SqliteSessionRepository } from "../../packages/infrastructure/src/sqlite/core-repositories.js";
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { SqliteProjectRepository } from "../../packages/infrastructure/src/sqlite/project-repository.js";
+import { SqliteRuntimeRepository } from "../../packages/infrastructure/src/sqlite/runtime-repository.js";
 import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/sqlite/session-sync-repository.js";
+import type { SessionContinuityWriter } from "../../packages/application/src/core/session-continuity.js";
 
 const externalSessionId = "01a0cccc-0000-7000-8000-000000000001";
 const pollIntervalMs = 30_000;
@@ -31,6 +34,8 @@ let service: AutomationService;
 let projectId: string;
 let sessionId: string;
 let clockNow: number;
+let runtime: SqliteRuntimeRepository;
+let evidenceService: EvidenceSnapshotService;
 
 function messageRow(role: "user" | "assistant", text: string, timestamp: string): string {
   return JSON.stringify({
@@ -81,6 +86,16 @@ function syncStateRow() {
   };
 }
 
+function readBatch(id: string): string {
+  return evidenceService.readFullText(id).contentText;
+}
+
+const resumeCapsuleWriter: SessionContinuityWriter = {
+  write: (input) => {
+    runtime.writeSessionContinuity(input, clockNow);
+  }
+};
+
 function syncJobs() {
   return client.db.prepare(
     "SELECT id, status, available_at, idempotency_key FROM automation_jobs WHERE kind = 'SYNC_SESSION_TRANSCRIPT' ORDER BY created_at, id"
@@ -95,6 +110,12 @@ beforeEach(async () => {
 
   client = SqliteClient.open({ databaseFile: join(tempDir, "contextos.sqlite") });
   runMigrations(client);
+  runtime = new SqliteRuntimeRepository(client.db);
+  evidenceService = new EvidenceSnapshotService(
+    new SqliteEvidenceSnapshotRepository(client.db),
+    new FileEvidenceStore(tempDir),
+    new SqliteReviewItemRepository(client.db)
+  );
   projects = new SqliteProjectRepository(client.db);
   sessions = new SqliteSessionRepository(client.db);
   sync = new SqliteSessionSyncRepository(client.db);
@@ -116,13 +137,10 @@ beforeEach(async () => {
     sync,
     reviewItems: new SqliteReviewItemRepository(client.db),
     automation,
-    evidence: new EvidenceSnapshotService(
-      new SqliteEvidenceSnapshotRepository(client.db),
-      new FileEvidenceStore(tempDir),
-      new SqliteReviewItemRepository(client.db)
-    ),
+    evidence: evidenceService,
     adapters,
     desktopSync,
+    resumeCapsuleWriter,
     clock: () => clockNow
   });
 
@@ -336,6 +354,58 @@ describe("background transcript sync", () => {
 
     expect(rewound).toMatchObject({ newEvents: 1, startOrdinal: 0, endOrdinal: 1, resetReason: "offset_beyond_eof" });
     expect(syncStateRow()).toMatchObject({ events_ingested: 1 });
+  });
+
+  test("updates the resume capsule continuity from the batch it just captured", async () => {
+    await writeFile(rolloutPath, `${messageRow("user", "history question", new Date(clockNow - 5_000).toISOString())}\n`, "utf8");
+    await service.syncSessionTranscript({ sessionId });
+    // Binding at EOF must not fabricate continuity out of pre-bind history.
+    expect(runtime.getResumeCapsule(sessionId).contextText).toBeNull();
+
+    await appendFile(rolloutPath, [
+      messageRow("user", "what did we just decide", new Date(clockNow).toISOString()),
+      messageRow("assistant", "we kept the transaction boundary", new Date(clockNow + 1_000).toISOString()),
+      ""
+    ].join("\n"), "utf8");
+    clockNow += pollIntervalMs;
+    await service.syncSessionTranscript({ sessionId });
+
+    const capsule = runtime.getResumeCapsule(sessionId);
+    expect(capsule.contextText).toContain("what did we just decide");
+    expect(capsule.contextText).toContain("we kept the transaction boundary");
+    expect(capsule.summary).toBe("we kept the transaction boundary");
+    expect(capsule.nextAction).toBe("what did we just decide");
+    expect(capsule.evidenceSnapshotIds).toHaveLength(1);
+  });
+
+  test("grows the excerpt deterministically as later batches arrive", async () => {
+    await writeFile(rolloutPath, "", "utf8");
+    await service.syncSessionTranscript({ sessionId });
+
+    await appendFile(rolloutPath, `${messageRow("user", "batch one", new Date(clockNow).toISOString())}\n`, "utf8");
+    clockNow += pollIntervalMs;
+    await service.syncSessionTranscript({ sessionId });
+    const first = runtime.getResumeCapsule(sessionId);
+
+    await appendFile(rolloutPath, `${messageRow("user", "batch two", new Date(clockNow).toISOString())}\n`, "utf8");
+    clockNow += pollIntervalMs;
+    await service.syncSessionTranscript({ sessionId });
+    const second = runtime.getResumeCapsule(sessionId);
+
+    expect(second.evidenceSnapshotIds).toHaveLength(2);
+    expect(second.evidenceSnapshotIds[0]).toBe(first.evidenceSnapshotIds[0]);
+    expect(second.contextText).toContain("batch one");
+    expect(second.contextText).toContain("batch two");
+    expect(second.nextAction).toBe("batch two");
+    // Same Evidence in, same excerpt out: rebuilding is not allowed to drift.
+    expect(second.contextText).toBe(
+      buildSessionContinuity({
+        evidence: [
+          { id: second.evidenceSnapshotIds[0]!, canonicalText: readBatch(second.evidenceSnapshotIds[0]!) },
+          { id: second.evidenceSnapshotIds[1]!, canonicalText: readBatch(second.evidenceSnapshotIds[1]!) }
+        ]
+      }).contextText
+    );
   });
 
   test("records the sync activity timestamp for the status endpoint", async () => {

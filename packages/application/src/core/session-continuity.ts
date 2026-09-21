@@ -45,6 +45,17 @@ export type SessionContinuity = {
   evidenceSnapshotIds: string[];
 };
 
+/**
+ * The narrow port AutomationService uses to persist an excerpt.
+ *
+ * It is a writer and nothing else: the service must not reach for the runtime repository, and
+ * the implementation is expected to run inside the caller's transaction so continuity, Evidence
+ * and the reader offset either all land or all roll back.
+ */
+export type SessionContinuityWriter = {
+  write(input: { sessionId: string } & SessionContinuity): void;
+};
+
 type ContinuityEntry = {
   /** Chronological position across every batch; the excerpt is re-emitted in this order. */
   order: number;

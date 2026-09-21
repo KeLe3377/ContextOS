@@ -17,7 +17,9 @@ import { SqliteEvidenceSnapshotRepository } from "../../packages/infrastructure/
 import { SqliteReviewItemRepository, SqliteSessionRepository } from "../../packages/infrastructure/src/sqlite/core-repositories.js";
 import { runMigrations } from "../../packages/infrastructure/src/sqlite/migrations.js";
 import { SqliteProjectRepository } from "../../packages/infrastructure/src/sqlite/project-repository.js";
+import { SqliteRuntimeRepository } from "../../packages/infrastructure/src/sqlite/runtime-repository.js";
 import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/sqlite/session-sync-repository.js";
+import type { SessionContinuityWriter } from "../../packages/application/src/core/session-continuity.js";
 
 const externalSessionId = "01a0eeee-0000-7000-8000-000000000001";
 const pollIntervalMs = 30_000;
@@ -35,6 +37,8 @@ let projectId: string;
 let sessionId: string;
 let clockNow: number;
 let parserVersion: string;
+let runtime: SqliteRuntimeRepository;
+let failContinuityWrite: boolean;
 
 function messageRow(text: string, timestamp: string): string {
   return JSON.stringify({
@@ -116,11 +120,23 @@ async function syncOnce() {
   return service.syncSessionTranscript({ sessionId });
 }
 
+const resumeCapsuleWriter: SessionContinuityWriter = {
+  write: (input) => {
+    if (failContinuityWrite) throw new Error("resume capsule write failed");
+    runtime.writeSessionContinuity(input, clockNow);
+  }
+};
+
+function capsule() {
+  return runtime.getResumeCapsule(sessionId);
+}
+
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "contextos-atomic-"));
   rolloutPath = join(tempDir, "rollout.jsonl");
   clockNow = Math.floor(Date.now() / 1000) * 1000;
   parserVersion = "codex-jsonl.test.v1";
+  failContinuityWrite = false;
 
   client = SqliteClient.open({ databaseFile: join(tempDir, "contextos.sqlite") });
   runMigrations(client);
@@ -129,6 +145,7 @@ beforeEach(async () => {
   sync = new SqliteSessionSyncRepository(client.db);
   automation = new SqliteAutomationRepository(client.db);
   const reviewItems = new SqliteReviewItemRepository(client.db);
+  runtime = new SqliteRuntimeRepository(client.db);
   evidenceService = new EvidenceSnapshotService(new SqliteEvidenceSnapshotRepository(client.db), new FileEvidenceStore(tempDir), reviewItems);
 
   const adapters = new AgentAdapterRegistry([createTranscriptAdapter()]);
@@ -150,6 +167,8 @@ beforeEach(async () => {
     evidence: evidenceService,
     adapters,
     desktopSync,
+    // The real repository, so the capsule genuinely shares the ingestion transaction.
+    resumeCapsuleWriter,
     clock: () => clockNow
   });
 
@@ -165,7 +184,7 @@ afterEach(async () => {
 });
 
 describe("transcript ingestion commit boundary", () => {
-  test("commits Evidence, the reader offset and the compaction job together", async () => {
+  test("commits Evidence, the reader offset and the session continuity together", async () => {
     await bindAtEnd();
     await appendMessage("first message");
     const summary = await syncOnce();
@@ -174,38 +193,40 @@ describe("transcript ingestion commit boundary", () => {
     expect(state).toMatchObject({ events_ingested: 1, status: "WATCHING" });
     expect(state.byte_offset).toBe(summary.endByteOffset);
     expect(evidenceRows()).toHaveLength(1);
-    expect(jobsOf("COMPACT_EVIDENCE")).toEqual([
-      expect.objectContaining({ status: "QUEUED", attempts: 0 })
-    ]);
+    // The deferred compaction/extraction pipeline is no longer part of this unit of work.
+    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(0);
     await expect(evidenceFileCount()).resolves.toBe(1);
+
+    // The capsule names the Evidence it was derived from and carries the captured text.
+    expect(capsule()).toMatchObject({
+      evidenceSnapshotIds: [summary.evidenceId],
+      nextAction: "first message"
+    });
+    expect(capsule().contextText).toContain("first message");
   });
 
-  test("rolls the whole ingestion back when the transaction fails, then re-reads the same batch", async () => {
+  test("rolls the whole ingestion back when the continuity write fails, then re-reads the same batch", async () => {
     await bindAtEnd();
     await appendMessage("must not be lost");
     const offsetBefore = syncState()!.byte_offset;
 
-    const originalEnqueue = automation.enqueue.bind(automation);
-    (automation as unknown as { enqueue: typeof automation.enqueue }).enqueue = (input, now) => {
-      if (input.kind === "COMPACT_EVIDENCE") throw new Error("automation queue unavailable");
-      return originalEnqueue(input, now);
-    };
+    failContinuityWrite = true;
+    await expect(syncOnce()).rejects.toThrow("resume capsule write failed");
+    failContinuityWrite = false;
 
-    await expect(syncOnce()).rejects.toThrow("automation queue unavailable");
-    (automation as unknown as { enqueue: typeof automation.enqueue }).enqueue = originalEnqueue;
-
-    // Nothing may survive a failed unit: no offset advance, no Snapshot row, no job, no blob.
+    // Nothing may survive a failed unit: no offset advance, no Snapshot row, no blob, no capsule.
     expect(syncState()).toMatchObject({ byte_offset: offsetBefore, events_ingested: 0 });
     expect(evidenceRows()).toHaveLength(0);
-    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(0);
     await expect(evidenceFileCount()).resolves.toBe(0);
+    expect(capsule().contextText).toBeNull();
+    expect(capsule().evidenceSnapshotIds).toEqual([]);
 
     // The reader is still behind the batch, so the next attempt ingests it exactly once.
     const retried = await syncOnce();
     expect(retried).toMatchObject({ newEvents: 1, evidenceReused: false });
     expect(evidenceRows()).toHaveLength(1);
-    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(1);
     await expect(evidenceFileCount()).resolves.toBe(1);
+    expect(capsule().contextText).toContain("must not be lost");
   });
 
   test("keeps the reader behind the batch when the offset write itself fails", async () => {
@@ -271,6 +292,8 @@ describe("agent output evidence identity", () => {
     expect(second).toMatchObject({ newEvents: 1, evidenceReused: false });
     expect(second.evidenceId).not.toBe(first.evidenceId);
     expect(evidenceRows()).toHaveLength(2);
+    // Continuity is rebuilt from every batch of the stream, oldest first.
+    expect(capsule().evidenceSnapshotIds).toEqual([first.evidenceId, second.evidenceId]);
   });
 
   test("reuses the capture when nothing that defines identity changed", async () => {
@@ -283,7 +306,8 @@ describe("agent output evidence identity", () => {
 
     expect(second).toMatchObject({ newEvents: 1, evidenceReused: true, evidenceId: first.evidenceId });
     expect(evidenceRows()).toHaveLength(1);
-    expect(jobsOf("COMPACT_EVIDENCE")).toHaveLength(1);
+    // A reused capture changes nothing, so the excerpt is not rewritten either.
+    expect(capsule().evidenceSnapshotIds).toEqual([first.evidenceId]);
   });
 });
 

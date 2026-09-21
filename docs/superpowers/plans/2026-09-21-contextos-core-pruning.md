@@ -173,9 +173,9 @@ ContinueSessionService.continue() 继续创建 Context Package 作为 provenance
 
 **文件：** 新建 session-continuity.ts 和 session-continuity.test.ts；复用现有 canonical codec 与 transcript-sanitizer.ts。
 
-- [ ] 先写测试：消息顺序、失败/未知工具结果、成功工具输出裁剪、handoff 前缀清理、12,000 字符上限、500 字符 nextAction、Evidence ID 稳定顺序、确定性。
-- [ ] 运行 npx vitest run tests/integration/session-continuity.test.ts，确认因实现缺失而失败。
-- [ ] 实现窄接口：
+- [x] 先写测试：消息顺序、失败/未知工具结果、成功工具输出裁剪、handoff 前缀清理、12,000 字符上限、500 字符 nextAction、Evidence ID 稳定顺序、确定性。
+- [x] 运行 npx vitest run tests/integration/session-continuity.test.ts，确认因实现缺失而失败。
+- [x] 实现窄接口：
 
 ~~~ts
 export type SessionContinuityInput = {
@@ -200,11 +200,11 @@ export function buildSessionContinuity(input: SessionContinuityInput): SessionCo
 
 **文件：** automation-service.ts、runtime-repository.ts、bootstrap.ts、automation-ingestion-atomicity.test.ts、automation-transcript-sync.test.ts。
 
-- [ ] 先把旧 COMPACT_EVIDENCE 断言改为连续性断言。
-- [ ] 测试证明 Evidence、offset、Resume Capsule、来源 Evidence IDs 在同一事务收敛。
-- [ ] 测试证明 Capsule 写入失败会回滚 Evidence 元数据和 offset，并清理 prepared blob。
-- [ ] 运行两个测试文件，确认旧实现无法满足新断言。
-- [ ] 将 commitRead() 改为：
+- [x] 先把旧 COMPACT_EVIDENCE 断言改为连续性断言。
+- [x] 测试证明 Evidence、offset、Resume Capsule、来源 Evidence IDs 在同一事务收敛。
+- [x] 测试证明 Capsule 写入失败会回滚 Evidence 元数据和 offset，并清理 prepared blob。
+- [x] 运行两个测试文件，确认旧实现无法满足新断言。
+- [x] 将 commitRead() 改为：
 
 ~~~text
 commit prepared Evidence
@@ -214,10 +214,10 @@ commit prepared Evidence
 -> write Resume Capsule
 ~~~
 
-- [ ] 删除该路径中的 enqueueCompaction()；保留下一轮 sync 调度。
-- [ ] 通过构造参数注入窄 Resume Capsule writer；AutomationService 不得创建 repository。
-- [ ] 运行相关 ingestion、sync、Evidence Store、Evidence recovery 测试，预期通过。
-- [ ] 提交：feat: update session continuity during transcript sync。
+- [x] 删除该路径中的 enqueueCompaction()；保留下一轮 sync 调度。
+- [x] 通过构造参数注入窄 Resume Capsule writer；AutomationService 不得创建 repository。
+- [x] 运行相关 ingestion、sync、Evidence Store、Evidence recovery 测试，预期通过。
+- [x] 提交：feat: update session continuity during transcript sync。
 
 ### Task 3：活跃 Automation Job 从四类减到两类
 

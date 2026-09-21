@@ -70,6 +70,7 @@ function createService(
     adapters: registry,
     desktopSync,
     ignoredWorkspaceRoots: extra.ignoredWorkspaceRoots,
+    resumeCapsuleWriter: { write: () => {} },
     clock: () => now
   });
 }

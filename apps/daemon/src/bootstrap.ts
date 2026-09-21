@@ -184,6 +184,22 @@ export async function createDaemonServer(
       evidence: evidenceSnapshotService,
       adapters: adapterRegistry,
       desktopSync,
+      // Continuity is written inside the sync's own transaction, so the capsule, the Evidence
+      // row and the reader offset always agree.
+      resumeCapsuleWriter: {
+        write: (input) => {
+          runtimeRepository.writeSessionContinuity(
+            {
+              sessionId: input.sessionId,
+              summary: input.summary,
+              nextAction: input.nextAction,
+              contextText: input.contextText,
+              evidenceSnapshotIds: input.evidenceSnapshotIds
+            },
+            nowMs()
+          );
+        }
+      },
       // The extractor runs inside its own workspace under the data directory. Treating anything
       // under it as runtime plumbing keeps an extraction run from being discovered as project
       // work, which would otherwise let the pipeline feed itself.

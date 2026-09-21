@@ -166,6 +166,19 @@ export class SqliteEvidenceSnapshotRepository {
     return (this.db.prepare(`SELECT * FROM evidence_snapshots ${whereSql} ORDER BY created_at DESC, id DESC LIMIT ?`).all(...params) as EvidenceSnapshotRow[]).map(mapEvidenceSnapshot);
   }
 
+  /**
+   * The most recent batches of one stream for one Session, oldest first.
+   *
+   * Narrow on purpose: only the sync path needs it, and only to rebuild the continuity excerpt
+   * from batches this daemon wrote. `limit` bounds how many blobs a single sync has to read.
+   */
+  listSessionStream(input: { projectId: string; sessionId: string; stream: string; limit: number }): EvidenceSnapshotDto[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM evidence_snapshots WHERE project_id = ? AND json_extract(metadata_json, '$.sessionId') = ? AND json_extract(metadata_json, '$.stream') = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+    ).all(input.projectId, input.sessionId, input.stream, input.limit) as EvidenceSnapshotRow[];
+    return rows.reverse().map(mapEvidenceSnapshot);
+  }
+
   getById(id: string): EvidenceSnapshotDto | null {
     const row = this.db.prepare("SELECT * FROM evidence_snapshots WHERE id = ?").get(id) as EvidenceSnapshotRow | undefined;
     return row ? mapEvidenceSnapshot(row) : null;

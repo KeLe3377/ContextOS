@@ -285,6 +285,24 @@ export class EvidenceSnapshotService {
     return { snapshot, contentText: this.readSnapshotContent(snapshot) };
   }
 
+  /**
+   * The verified canonical text of the most recent batches of one stream for one Session,
+   * oldest first — exactly what the session continuity builder consumes.
+   *
+   * Every batch goes through the same integrity check as any other read, so an excerpt can never
+   * be built from a blob whose hash or size no longer matches its Snapshot row.
+   */
+  readSessionTranscriptBatches(input: {
+    projectId: string;
+    sessionId: string;
+    stream: string;
+    limit: number;
+  }): Array<{ id: string; canonicalText: string }> {
+    return this.snapshots
+      .listSessionStream(input)
+      .map((snapshot) => ({ id: snapshot.id, canonicalText: this.readSnapshotContent(snapshot) }));
+  }
+
   content(id: string, maxChars: number): EvidenceSnapshotContentDto {
     const snapshot = this.snapshots.getByIdOrThrow(id);
     const contentText = this.readSnapshotContent(snapshot);

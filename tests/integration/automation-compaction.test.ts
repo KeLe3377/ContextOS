@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AutomationService } from "../../packages/application/src/core/automation-service.js";
 import { AutomationJobRouter } from "../../packages/application/src/core/automation-job-router.js";
 import { AutomationScheduler } from "../../packages/application/src/core/automation-scheduler.js";
+import type { SessionContinuityWriter } from "../../packages/application/src/core/session-continuity.js";
 import { CompactionService, hashCompactionOptions } from "../../packages/application/src/core/compaction-service.js";
 import { ContextOsCompactionAdapter } from "../../packages/application/src/core/compaction-adapter.js";
 import { EvidenceSnapshotService } from "../../packages/application/src/core/context-services.js";
@@ -29,6 +30,8 @@ import { SqliteSessionSyncRepository } from "../../packages/infrastructure/src/s
 
 const externalSessionId = "01a0aaaa-0000-7000-8000-000000000001";
 const pollIntervalMs = 30_000;
+/** Compaction is out of the active path; the writer only has to exist for the sync to run. */
+const recordingWriter: SessionContinuityWriter = { write: () => {} };
 const agentsInjection = "# AGENTS.md instructions for D:\\project\\ContextOS\n\n<INSTRUCTIONS>be terse</INSTRUCTIONS>";
 const longResult = "z".repeat(6_000);
 
@@ -232,6 +235,7 @@ beforeEach(async () => {
     evidence: evidenceService,
     adapters,
     desktopSync,
+    resumeCapsuleWriter: recordingWriter,
     clock: () => clockNow
   });
 

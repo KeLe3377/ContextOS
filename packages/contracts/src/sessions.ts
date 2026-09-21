@@ -42,6 +42,11 @@ export const resumeCapsuleDtoSchema = z.object({
   intent: z.string().nullable(),
   summary: z.string(),
   nextAction: z.string().nullable(),
+  /**
+   * Deterministic, bounded transcript excerpt ("session continuity") rebuilt from the captured
+   * Evidence. Null until a batch has been captured, because it is derived, never authored.
+   */
+  contextText: z.string().nullable(),
   lastRunId: z.string().nullable(),
   evidenceSnapshotIds: z.array(z.string()),
   updatedAt: z.string()
