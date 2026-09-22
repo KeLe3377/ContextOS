@@ -1,11 +1,18 @@
 import { z } from "zod";
 import { resourceMetaSchema } from "./common.js";
+import { compactionApiConfigDtoSchema, compactionApiConfigPatchSchema } from "./semantic-compaction.js";
 
 export const settingsPatchSchema = z.object({
   launchAtStartup: z.boolean().optional(),
   startMinimized: z.boolean().optional(),
   confirmDestructiveActions: z.boolean().optional(),
   defaultAdapterId: z.string().min(1).nullable().optional(),
+  /**
+   * Semantic compaction configuration. This is the only request shape that may carry a real
+   * API key, and only transiently: the value is written to the local secret file, never to the
+   * settings row, a log, or a response.
+   */
+  compactionConfig: compactionApiConfigPatchSchema.optional(),
   expectedRevision: z.number().int().positive()
 });
 
@@ -18,6 +25,11 @@ export const settingsDtoSchema = resourceMetaSchema.extend({
   contextConfig: z.record(z.unknown()),
   privacyConfig: z.record(z.unknown()),
   dataDirectory: z.string(),
+  /**
+   * Non-secret semantic compaction view. Never contains a key. Optional on the shared type so the
+   * persistence layer can omit it; the settings service always populates it for API responses.
+   */
+  compactionConfig: compactionApiConfigDtoSchema.optional(),
   requiresRestart: z.boolean().default(false)
 });
 

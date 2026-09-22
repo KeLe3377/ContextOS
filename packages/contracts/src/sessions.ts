@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { EvidenceSnapshotDto } from "./context.js";
 import { resourceMetaSchema } from "./common.js";
+import {
+  capsuleSourceSchema,
+  compactionDegradationReasonSchema,
+  compactionProviderMetaSchema,
+  structuredResumeCapsuleSchema
+} from "./semantic-compaction.js";
 
 export const sessionStatusSchema = z.enum(["CREATED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "ARCHIVED"]);
 
@@ -47,6 +53,18 @@ export const resumeCapsuleDtoSchema = z.object({
    * Evidence. Null until a batch has been captured, because it is derived, never authored.
    */
   contextText: z.string().nullable(),
+  /**
+   * Which implementation produced the current capsule: the API path (`api`) or the deterministic
+   * fallback (`deterministic`). Null before any capsule exists. The UI shows this so the user can
+   * tell an API semantic capsule from a fallback.
+   */
+  source: capsuleSourceSchema.nullable(),
+  /** Why the API path degraded, when it did. Null when the API path succeeded or was never tried. */
+  degradationReason: compactionDegradationReasonSchema.nullable(),
+  /** The structured Chinese capsule, present only when `source === "api"`. */
+  structured: structuredResumeCapsuleSchema.nullable(),
+  /** Derived-product metadata (provider, model, versions, tokens, latency). Never the body. */
+  meta: compactionProviderMetaSchema.nullable(),
   lastRunId: z.string().nullable(),
   evidenceSnapshotIds: z.array(z.string()),
   updatedAt: z.string()

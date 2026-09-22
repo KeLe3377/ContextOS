@@ -76,7 +76,7 @@ describe("daemon health endpoint", () => {
 
     const body = response.json();
     expect(body.version).toMatch(/\d+\.\d+\.\d+/);
-    expect(body.schemaVersion).toBe(14);
+    expect(body.schemaVersion).toBe(15);
     expect(body.processState).toBe("ready");
     expect(body.recovery).toEqual({
       orphanContinuesRecovered: 0,

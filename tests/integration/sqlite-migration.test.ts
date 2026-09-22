@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(14);
+    expect(getSchemaVersion(client)).toBe(15);
     const tables = tableNames();
 
     for (const tableName of coreTableNames) {
@@ -63,7 +63,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(14);
+    expect(getSchemaVersion(client)).toBe(15);
     const tables = tableNames();
     for (const tableName of coreTableNames) {
       expect(tables).toContain(tableName);
@@ -125,7 +125,7 @@ describe("SQLite migrations", () => {
 
     runMigrations(client);
 
-    expect(getSchemaVersion(client)).toBe(14);
+    expect(getSchemaVersion(client)).toBe(15);
     const repository = new SqliteAutomationRepository(client.db);
     const candidate = repository.getCandidate("cand_old")!;
     expect(candidate.kind).toBe("RESUME_CAPSULE");
