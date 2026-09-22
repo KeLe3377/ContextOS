@@ -3,6 +3,8 @@ import { Badge, EmptyNote, Panel, Rows, fmtDate, toneForStatus } from "./ui";
 import { AutomationOverview } from "./components/automation/AutomationOverview";
 import type { AutomationSettingsValues } from "./components/automation/ProjectAutomationSettings";
 import { ProjectAutomationSettings } from "./components/automation/ProjectAutomationSettings";
+import { SemanticCompactionSettings } from "./components/SemanticCompactionSettings";
+import { capsuleSourceLabel, type CompactionConfigValues } from "./semanticCompaction";
 import {
   parseAutomationSettings,
   parseAutomationStatus,
@@ -930,7 +932,7 @@ export function App() {
       case "work": return <WorkPage {...props} header={<PageHeader pageDef={pages.work} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "context": return <ContextPage {...props} header={<PageHeader pageDef={pages.context} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
       case "rules": return <RulesPage {...props} header={<PageHeader pageDef={pages.rules} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
-      case "settings": return <SettingsPage {...props} header={<PageHeader pageDef={pages.settings} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
+      case "settings": return <SettingsPage {...props} onRefresh={() => void loadData({ background: true })} header={<PageHeader pageDef={pages.settings} actionLoading={actionLoading} error={error} actionMessage={actionMessage} onAction={handleAction} />} />;
     }
   };
 
@@ -1216,6 +1218,7 @@ function SessionsPage(props: AnyRecord & { header: ReactNode }) {
             <div className="detail-wide detail-with-action"><div><span className="mono muted">上下文包</span><strong className="mono">{details.contextPack?.id || "Not generated"}</strong></div><button className="icon-btn table-action" title="复制上下文包 ID" disabled={!details.contextPack?.id} onClick={() => copyText(details.contextPack?.id)}>{icon("content_copy")}</button></div>
             <div className="detail-wide"><span className="mono muted">运行时</span><strong>{runtime?.run?.status || "No active run"}</strong><div className="muted mono">{runtime?.process ? `pid ${runtime.process.pid} · managed ${runtime.process.managed} · running ${runtime.process.running}` : "No managed process"}</div>{runtime?.run?.failureMessage ? <div className="muted">{runtime.run.failureCode}: {runtime.run.failureMessage}</div> : null}</div>
             <div className="detail-wide"><span className="mono muted">恢复摘要</span><strong>{details.resumeCapsule?.summary || "No resume capsule yet"}</strong></div>
+            <div className="detail-wide"><span className="mono muted">Capsule 来源</span><strong>{capsuleSourceLabel(details.resumeCapsule)}</strong></div>
             <div className="detail-wide"><span className="mono muted">下一步动作</span><strong>{details.resumeCapsule?.nextAction || "-"}</strong></div>
           </div>
           <div className="row-actions">
@@ -1578,13 +1581,27 @@ function RulesPage(props: AnyRecord & { header: ReactNode }) {
   </div></div></>;
 }
 
-function SettingsPage(props: AnyRecord & { header: ReactNode }) {
-  const { data, header, defaultAdapterId, adapterList, openSession } = props;
+function SettingsPage(props: AnyRecord & { header: ReactNode; onRefresh: () => void }) {
+  const { data, header, defaultAdapterId, adapterList, openSession, onRefresh } = props;
   const settings = data.settings;
   const runtimeHealth = data.runtimeHealth;
   const connected = data.adapters.filter((adapter: AnyRecord) => adapter.available).length;
   const failedRuns = runtimeHealth?.sessionRuns?.latestFailed || [];
   const failedJobs = runtimeHealth?.jobs?.latestFailed || [];
+
+  // Saves the semantic-compaction configuration. A key, when present, is sent exactly once and
+  // never read back; a 409 means the settings row moved on and the caller should reload.
+  const saveCompactionSettings = async (compactionConfig: Record<string, unknown>): Promise<string | null> => {
+    try {
+      await sendJson("/api/settings", "PATCH", { compactionConfig, expectedRevision: settings?.revision });
+      onRefresh();
+      return null;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("409")) return "设置已被其他操作更新";
+      throw error;
+    }
+  };
+
   return (
     <>{header}<div className="stack">
       <Panel title="常规" iconName="tune" meta="工作区 & Defaults">
@@ -1595,6 +1612,7 @@ function SettingsPage(props: AnyRecord & { header: ReactNode }) {
           <div className="setting-row"><div><div className="title-sm">数据目录</div><div className="muted mono">{settings.dataDirectory}</div></div><Badge text={`rev ${settings.revision}`} /></div>
         </> : <EmptyNote>设置不可用。</EmptyNote>}
       </Panel>
+      <SemanticCompactionSettings config={(settings?.compactionConfig as CompactionConfigValues | undefined) ?? null} onSave={saveCompactionSettings} />
       <Panel title="运行时健康" iconName="monitor_heart" meta={runtimeHealth ? fmtDate(runtimeHealth.generatedAt) : "不可用"}>
         {runtimeHealth ? <>
           <div className="kpi-grid compact-kpis">
