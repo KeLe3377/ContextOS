@@ -9,6 +9,8 @@ import { ContextItemService, ContextSourceService, EvidenceSnapshotService } fro
 import { DecisionService, ReviewItemService, SessionService, WorkItemService } from "../../../packages/application/src/core/core-services.js";
 import { RuleService } from "../../../packages/application/src/core/rule-service.js";
 import { AgentAdapterService, ContinueSessionService, SettingsService } from "../../../packages/application/src/core/runtime-services.js";
+import { ApiCompactionCoordinator } from "../../../packages/application/src/core/semantic-compaction/coordinator.js";
+import { CompactionSecretStore } from "../../../packages/infrastructure/src/compaction/compaction-secret-store.js";
 import { DesktopSyncService } from "../../../packages/application/src/core/desktop-sync-service.js";
 import {
   AutomationScheduler,
@@ -142,7 +144,11 @@ export async function createDaemonServer(
       port: config.port,
       dataDirectory: config.dataDir
     });
-    const settingsService = new SettingsService(runtimeRepository, startupRegistration);
+    const settingsService = new SettingsService(runtimeRepository, startupRegistration, new CompactionSecretStore(config.dataDir));
+    // API-version semantic compaction. The coordinator only ever reads Evidence and writes derived
+    // capsules; the deterministic capsule written inside the ingestion transaction remains the
+    // fallback whenever the API path is off, unconfigured, or fails.
+    const compactionCoordinator = new ApiCompactionCoordinator(nowMs);
     const sessionSyncRepository = new SqliteSessionSyncRepository(sqlite.db);
     const desktopSync = new DesktopSyncService({
       sessions: new SqliteSessionRepository(sqlite.db),
@@ -179,7 +185,11 @@ export async function createDaemonServer(
               summary: input.summary,
               nextAction: input.nextAction,
               contextText: input.contextText,
-              evidenceSnapshotIds: input.evidenceSnapshotIds
+              evidenceSnapshotIds: input.evidenceSnapshotIds,
+              source: input.source ?? null,
+              degradationReason: input.degradationReason ?? null,
+              structured: input.structured ?? null,
+              meta: input.meta ?? null
             },
             nowMs()
           );
@@ -187,7 +197,11 @@ export async function createDaemonServer(
       },
       // Extraction runs no longer exist in the active runtime, so there is no extraction
       // workspace to exclude from discovery.
-      ignoredWorkspaceRoots: []
+      ignoredWorkspaceRoots: [],
+      compaction: {
+        coordinator: compactionCoordinator,
+        resolveConfig: () => settingsService.resolveCompactionRuntimeConfig()
+      }
     });
     // Only discovery and transcript sync are live. COMPACT_EVIDENCE and EXTRACT_EVIDENCE_CONTEXT
     // remain parseable historical rows, but nothing is registered for them, so the scheduler

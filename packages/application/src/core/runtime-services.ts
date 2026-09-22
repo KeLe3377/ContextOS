@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { AgentAdapterStatusDto, AgentLaunchInfoDto, ResourceActivityEventDto, RuntimeHealthDto, RuntimeJobDto, SessionInterruptRuntimeDto, SessionRunDto, SessionRuntimeStatusDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
+import type { CompactionApiConfigDto, CompactionApiConfigPatch } from "../../../contracts/src/semantic-compaction.js";
 import type { AdapterTranscriptImportInput, AdapterTranscriptImportResult, ResumeCapsuleDto, ResumeCapsulePatch, SessionDto, SessionStatus, SessionTranscriptEventsDto, TranscriptImportInput, TranscriptImportResult } from "../../../contracts/src/sessions.js";
 import type { AgentAdapterRegistry } from "../../../infrastructure/src/adapters/registry.js";
+import { CompactionSecretStore, keyHint, type CompactionSecretsPatch } from "../../../infrastructure/src/compaction/compaction-secret-store.js";
 import type { FileEvidenceStore } from "../../../infrastructure/src/evidence/evidence-store.js";
 import type { ProcessExitInfo, ProcessSupervisor } from "../../../infrastructure/src/process-supervisor.js";
 import type { SqliteRuntimeRepository } from "../../../infrastructure/src/sqlite/runtime-repository.js";
@@ -10,6 +12,8 @@ import type { StartupRegistration } from "../ports/startup-registration.js";
 import { nowMs } from "../../../shared/src/clock.js";
 import { newId } from "../../../shared/src/id.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
+import { parseStoredConfig, resolveApiKeys, toConfigDto, toRuntimeConfig, type CompactionStoredConfig } from "./semantic-compaction/config.js";
+import type { CompactionRuntimeConfig } from "./semantic-compaction/coordinator.js";
 
 export type SessionContinueRuntime = {
   run: SessionRunDto;
@@ -19,10 +23,15 @@ export type SessionContinueRuntime = {
 };
 
 export class SettingsService {
-  constructor(private readonly runtime: SqliteRuntimeRepository, private readonly startupRegistration: StartupRegistration) {}
+  constructor(
+    private readonly runtime: SqliteRuntimeRepository,
+    private readonly startupRegistration: StartupRegistration,
+    private readonly compactionSecrets: CompactionSecretStore,
+    private readonly env: () => Record<string, string | undefined> = () => process.env
+  ) {}
 
   get(): SettingsDto {
-    return this.runtime.getSettings();
+    return { ...this.runtime.getSettings(), compactionConfig: this.compactionDto() };
   }
 
   patch(input: SettingsPatch): SettingsDto {
@@ -31,7 +40,11 @@ export class SettingsService {
     const startupChanged = launchAtStartup !== undefined && launchAtStartup !== current.launchAtStartup;
     if (startupChanged) this.startupRegistration.sync(launchAtStartup);
     try {
-      return this.runtime.patchSettings(input, nowMs());
+      let result = this.runtime.patchSettings(input, nowMs());
+      // A compaction patch may carry a real key; it is written to the local secret file here and
+      // only the sanitised JSON reaches the settings row.
+      if (input.compactionConfig) result = this.applyCompactionPatch(input.compactionConfig);
+      return { ...result, compactionConfig: this.compactionDto() };
     } catch (error) {
       if (startupChanged) this.startupRegistration.sync(current.launchAtStartup);
       throw error;
@@ -40,6 +53,68 @@ export class SettingsService {
 
   runtimeHealth(): RuntimeHealthDto {
     return this.runtime.getRuntimeHealth(nowMs());
+  }
+
+  /** The runtime view the automation coordinator consumes; resolves the real keys. */
+  resolveCompactionRuntimeConfig(): CompactionRuntimeConfig {
+    const stored = this.storedConfig();
+    return toRuntimeConfig(stored, resolveApiKeys(stored, this.compactionSecrets.read(), this.env()));
+  }
+
+  private storedConfig(): CompactionStoredConfig {
+    return parseStoredConfig(safeJson(this.runtime.getCompactionConfigJson()));
+  }
+
+  private compactionDto(): CompactionApiConfigDto {
+    const stored = this.storedConfig();
+    return toConfigDto(stored, resolveApiKeys(stored, this.compactionSecrets.read(), this.env()));
+  }
+
+  private applyCompactionPatch(patch: CompactionApiConfigPatch): SettingsDto {
+    const next: CompactionStoredConfig = { ...this.storedConfig() };
+    const assign = <K extends keyof CompactionStoredConfig>(key: K, value: CompactionStoredConfig[K] | undefined): void => {
+      if (value !== undefined) next[key] = value;
+    };
+    assign("apiCompactionEnabled", patch.apiCompactionEnabled);
+    assign("deterministicFallbackEnabled", patch.deterministicFallbackEnabled);
+    assign("inputTokenBudget", patch.inputTokenBudget);
+    assign("outputTokenBudget", patch.outputTokenBudget);
+    assign("preserveRecentMessages", patch.preserveRecentMessages);
+    assign("keepThreshold", patch.keepThreshold);
+    assign("truncateHeadChars", patch.truncateHeadChars);
+
+    const secrets: CompactionSecretsPatch = {};
+    if (patch.jev) {
+      assign("jevEnabled", patch.jev.enabled);
+      assign("jevEndpoint", patch.jev.endpoint);
+      assign("jevModel", patch.jev.model);
+      assign("jevTimeoutMs", patch.jev.timeoutMs);
+      if (patch.jev.apiKey !== undefined) {
+        secrets.jevApiKey = patch.jev.apiKey;
+        next.jevKeyHint = patch.jev.apiKey ? keyHint(patch.jev.apiKey) : null;
+      }
+    }
+    if (patch.llm) {
+      assign("llmEnabled", patch.llm.enabled);
+      assign("llmEndpoint", patch.llm.endpoint);
+      assign("llmModel", patch.llm.model);
+      assign("llmReasoning", patch.llm.reasoning);
+      assign("llmTimeoutMs", patch.llm.timeoutMs);
+      if (patch.llm.apiKey !== undefined) {
+        secrets.llmApiKey = patch.llm.apiKey;
+        next.llmKeyHint = patch.llm.apiKey ? keyHint(patch.llm.apiKey) : null;
+      }
+    }
+    if (Object.keys(secrets).length > 0) this.compactionSecrets.write(secrets);
+    return this.runtime.writeCompactionConfig(JSON.stringify(next), nowMs());
+  }
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
   }
 }
 

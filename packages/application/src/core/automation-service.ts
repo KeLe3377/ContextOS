@@ -14,6 +14,7 @@ import type { DesktopSyncBatch, DesktopSyncRead, DesktopSyncService } from "./de
 import { AutomationDispatchError } from "./automation-scheduler.js";
 import { encodeTranscriptEvents, type TranscriptEventIdentity } from "./transcript-event-codec.js";
 import { buildSessionContinuity, type SessionContinuityWriter } from "./session-continuity.js";
+import type { ApiCompactionCoordinator, CompactionRuntimeConfig } from "./semantic-compaction/coordinator.js";
 import { matchThreadToProject, threadTitle, type ThreadMatchProject } from "./project-thread-matcher.js";
 
 /**
@@ -38,6 +39,15 @@ export type AutomationServiceOptions = {
    * the service never builds a runtime repository of its own.
    */
   resumeCapsuleWriter: SessionContinuityWriter;
+  /**
+   * API-version semantic compaction. When present, a newly captured batch also gets an API
+   * capsule (Jev -> reconstructed transcript -> LLM) written after the ingestion transaction; any
+   * API failure leaves the deterministic capsule in place, so Continue is never blocked.
+   */
+  compaction?: {
+    coordinator: ApiCompactionCoordinator;
+    resolveConfig: () => CompactionRuntimeConfig;
+  };
   /**
    * Runtime-owned roots (the extraction run workspace) that must never be attributed to a
    * business Project, so an extraction run cannot feed itself back into the pipeline.
@@ -236,6 +246,13 @@ export class AutomationService {
     const read = this.options.desktopSync.read(session.id);
     const persisted = this.commitRead({ projectId: session.projectId, read });
 
+    // A newly captured batch may also get an API capsule. This runs outside the ingestion
+    // transaction (the API call is network-bound) and can only ever replace the capsule with a
+    // better-sourced one; a failure leaves the deterministic capsule the transaction just wrote.
+    if (persisted && !persisted.reused) {
+      await this.applySemanticCapsule({ projectId: session.projectId, sessionId: session.id });
+    }
+
     this.options.automation.markProjectActivity(session.projectId, "SYNC", now);
     const nextPollScheduled = this.scheduleNextSync(session.id, now, now + settings.pollIntervalMs);
 
@@ -336,6 +353,47 @@ export class AutomationService {
         limit: continuityBatchLimit
       })
     });
+  }
+
+  /**
+   * Replaces the just-written deterministic capsule with an API one when the coordinator can
+   * produce it, and records which source was used either way.
+   *
+   * It reads the same Evidence window the deterministic capsule read, so a degraded run produces
+   * exactly the capsule the transaction already wrote (only `source`/`reason` are added). The
+   * whole step is best-effort: a failure here can never fail the sync or block Continue.
+   */
+  private async applySemanticCapsule(input: { projectId: string; sessionId: string }): Promise<void> {
+    const compaction = this.options.compaction;
+    if (!compaction) return;
+    try {
+      const evidence = this.options.evidence.readSessionTranscriptBatches({
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        stream: desktopSyncEvidenceStream,
+        limit: continuityBatchLimit
+      });
+      if (evidence.length === 0) return;
+      const { capsule } = await compaction.coordinator.build({
+        sessionId: input.sessionId,
+        goal: null,
+        evidence,
+        config: compaction.resolveConfig()
+      });
+      this.options.resumeCapsuleWriter.write({
+        sessionId: input.sessionId,
+        summary: capsule.summary,
+        nextAction: capsule.nextAction,
+        contextText: capsule.contextText,
+        evidenceSnapshotIds: capsule.evidenceSnapshotIds,
+        source: capsule.source,
+        degradationReason: capsule.degradationReason,
+        structured: capsule.structured,
+        meta: capsule.meta
+      });
+    } catch {
+      // Deterministic capsule from the ingestion transaction already keeps Continue working.
+    }
   }
 
   /**
