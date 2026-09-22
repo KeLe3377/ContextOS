@@ -2,6 +2,12 @@ import type { Database } from "better-sqlite3";
 import type { ContextPackageDto, EvidenceSnapshotDto } from "../../../contracts/src/context.js";
 import type { ResourceActivityEventDto, RuntimeHealthDto, RuntimeJobDto, SessionRunDto, SettingsDto, SettingsPatch } from "../../../contracts/src/runtime.js";
 import type { ResumeCapsuleDto, SessionStatus, TranscriptImportResult } from "../../../contracts/src/sessions.js";
+import type {
+  CapsuleSource,
+  CompactionDegradationReason,
+  CompactionProviderMeta,
+  StructuredResumeCapsule
+} from "../../../contracts/src/semantic-compaction.js";
 import { ContextOsError } from "../../../shared/src/errors.js";
 import { newId } from "../../../shared/src/id.js";
 
@@ -36,6 +42,7 @@ type SettingsRow = {
   default_adapter_id: string | null;
   context_config_json: string;
   privacy_config_json: string;
+  compaction_config_json: string;
   data_directory: string;
   created_at: number;
   updated_at: number;
@@ -175,6 +182,14 @@ type ResumeCapsuleState = {
   nextAction?: string | null;
   /** Derived continuity excerpt; preserved by patch so editing summary/nextAction keeps it. */
   contextText?: string | null;
+  /** `api` when the LLM produced it, `deterministic` when the fallback did. */
+  source?: CapsuleSource | null;
+  /** Why the API path degraded, when it did. */
+  degradationReason?: CompactionDegradationReason | null;
+  /** Structured Chinese capsule; present only for `source === "api"`. */
+  structured?: StructuredResumeCapsule | null;
+  /** Derived-product metadata; never the transcript body. */
+  meta?: CompactionProviderMeta | null;
   lastRunId?: string | null;
   evidenceSnapshotIds?: string[];
   updatedAt?: string;
@@ -244,6 +259,26 @@ export class SqliteRuntimeRepository {
         input.expectedRevision
       );
     if (result.changes === 0) throw new ContextOsError("CONFLICT", "Settings revision conflict", { expectedRevision: input.expectedRevision });
+    return this.getSettings();
+  }
+
+  /** The raw non-secret compaction configuration JSON. Never contains a key. */
+  getCompactionConfigJson(): string {
+    const row = this.db.prepare("SELECT compaction_config_json FROM settings WHERE id = 'singleton'").get() as { compaction_config_json: string } | undefined;
+    if (!row) throw new ContextOsError("NOT_FOUND", "Settings not found");
+    return row.compaction_config_json;
+  }
+
+  /**
+   * Persists the merged non-secret compaction configuration.
+   *
+   * Kept separate from `patchSettings` so a key submitted with a settings patch can never reach a
+   * database column: the service strips the key into the local secret file and calls this with
+   * the sanitised JSON only.
+   */
+  writeCompactionConfig(json: string, now: number): SettingsDto {
+    const result = this.db.prepare("UPDATE settings SET compaction_config_json = ?, updated_at = ?, revision = revision + 1 WHERE id = 'singleton'").run(json, now);
+    if (result.changes === 0) throw new ContextOsError("NOT_FOUND", "Settings not found");
     return this.getSettings();
   }
 
@@ -507,6 +542,10 @@ export class SqliteRuntimeRepository {
         nextAction: current.nextAction,
         // An imported transcript is raw text, not a decoded batch, so it builds no continuity.
         contextText: current.contextText,
+        source: current.source ?? null,
+        degradationReason: current.degradationReason ?? null,
+        structured: current.structured ?? null,
+        meta: current.meta ?? null,
         lastRunId: current.lastRunId,
         evidenceSnapshotIds,
         updatedAt: importedAt
@@ -515,6 +554,10 @@ export class SqliteRuntimeRepository {
         summary: next.summary,
         nextAction: next.nextAction,
         contextText: next.contextText,
+        source: next.source ?? null,
+        degradationReason: next.degradationReason ?? null,
+        structured: next.structured ?? null,
+        meta: next.meta ?? null,
         lastRunId: next.lastRunId,
         evidenceSnapshotIds: next.evidenceSnapshotIds,
         updatedAt: next.updatedAt
@@ -596,6 +639,10 @@ export class SqliteRuntimeRepository {
     nextAction: string | null;
     contextText: string;
     evidenceSnapshotIds: string[];
+    source?: CapsuleSource | null;
+    degradationReason?: CompactionDegradationReason | null;
+    structured?: StructuredResumeCapsule | null;
+    meta?: CompactionProviderMeta | null;
   }, now: number): ResumeCapsuleDto {
     const row = this.getResumeSessionRow(input.sessionId);
     const state = JSON.parse(row.runtime_state) as Record<string, unknown>;
@@ -604,6 +651,10 @@ export class SqliteRuntimeRepository {
       summary: input.summary,
       nextAction: input.nextAction,
       contextText: input.contextText,
+      source: input.source ?? null,
+      degradationReason: input.degradationReason ?? null,
+      structured: input.structured ?? null,
+      meta: input.meta ?? null,
       lastRunId: current.lastRunId ?? null,
       evidenceSnapshotIds: input.evidenceSnapshotIds,
       updatedAt: new Date(now).toISOString()
@@ -633,6 +684,10 @@ export class SqliteRuntimeRepository {
       nextAction: input.nextAction === undefined ? current.nextAction : input.nextAction,
       // Continuity is derived from Evidence, so a manual edit must never drop or forge it.
       contextText: current.contextText,
+      source: current.source,
+      degradationReason: current.degradationReason,
+      structured: current.structured,
+      meta: current.meta,
       lastRunId: current.lastRunId,
       evidenceSnapshotIds: current.evidenceSnapshotIds,
       updatedAt: new Date(now).toISOString()
@@ -843,6 +898,10 @@ function mapResumeCapsule(row: ResumeSessionRow, capsule?: ResumeCapsuleState): 
       summary: row.intent ? `Session is ready to continue: ${row.intent}` : "Session is ready to continue.",
       nextAction: "Continue in Agent",
       contextText: null,
+      source: null,
+      degradationReason: null,
+      structured: null,
+      meta: null,
       lastRunId: null,
       evidenceSnapshotIds: [],
       updatedAt: new Date(row.updated_at).toISOString()
@@ -855,6 +914,10 @@ function mapResumeCapsule(row: ResumeSessionRow, capsule?: ResumeCapsuleState): 
     summary: capsule.summary ?? "Session has a resume capsule.",
     nextAction: capsule.nextAction ?? null,
     contextText: capsule.contextText ?? null,
+    source: capsule.source ?? null,
+    degradationReason: capsule.degradationReason ?? null,
+    structured: capsule.structured ?? null,
+    meta: capsule.meta ?? null,
     lastRunId: capsule.lastRunId ?? null,
     evidenceSnapshotIds: capsule.evidenceSnapshotIds ?? [],
     updatedAt: capsule.updatedAt ?? new Date(row.updated_at).toISOString()

@@ -1,4 +1,10 @@
 import type { AgentTranscriptEvent } from "../ports/agent-adapter.js";
+import type {
+  CapsuleSource,
+  CompactionDegradationReason,
+  CompactionProviderMeta,
+  StructuredResumeCapsule
+} from "../../../contracts/src/semantic-compaction.js";
 import { decodeTranscriptEvents } from "./transcript-event-codec.js";
 import { PrefixTranscriptSanitizer } from "./transcript-sanitizer.js";
 
@@ -53,7 +59,15 @@ export type SessionContinuity = {
  * and the reader offset either all land or all roll back.
  */
 export type SessionContinuityWriter = {
-  write(input: { sessionId: string } & SessionContinuity): void;
+  write(
+    input: { sessionId: string } & SessionContinuity & {
+      /** Which implementation produced this capsule; null keeps the row's previous value. */
+      source?: CapsuleSource | null;
+      degradationReason?: CompactionDegradationReason | null;
+      structured?: StructuredResumeCapsule | null;
+      meta?: CompactionProviderMeta | null;
+    }
+  ): void;
 };
 
 type ContinuityEntry = {
