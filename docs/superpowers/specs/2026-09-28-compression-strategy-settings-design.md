@@ -764,6 +764,167 @@ API Key 规则不变：
 - MCP/CLI 不修改 Key。
 - GUI 可以修改 Key。
 
+### MCP/CLI 具体契约
+
+MCP 和 CLI 使用同一套 handler、同一套 JSON 请求结构、同一套校验逻辑。CLI 是 shell 入口，MCP 是 Agent 工具入口；二者不分叉实现。
+
+CLI 形态：
+
+```powershell
+contextos-cli settings get --input request.json
+contextos-cli settings update --input request.json
+```
+
+MCP 形态：
+
+```json
+{
+  "name": "contextos_settings",
+  "arguments": {
+    "operation": "get",
+    "section": "compression"
+  }
+}
+```
+
+`settings.get section=compression` 返回完整 public settings。`settings.update section=compression` 接收局部 patch：只修改传入字段，未传字段保持不变。对象递归合并，数组整体替换，字符串按原样保存但 trim 首尾空白。`null` 不表示删除；需要恢复默认时使用单独的 `reset_defaults` 字段，避免把 `null` 变成隐式规则语言。
+
+更新示例：
+
+```json
+{
+  "operation": "update",
+  "section": "compression",
+  "data": {
+    "service": {
+      "llm_enabled": true,
+      "active_llm_provider_id": "openrouter",
+      "llm_timeout_secs": 900
+    },
+    "strategy": {
+      "mechanical": {
+        "generic_large_output_rule": {
+          "min_output_chars": 4000,
+          "head_chars": 900,
+          "tail_chars": 700
+        }
+      },
+      "jev": {
+        "jev_candidate_min_chars": 2500,
+        "jev_fallback_on_error": "use_mechanical"
+      },
+      "llm": {
+        "llm_temperature": 0.2
+      }
+    }
+  }
+}
+```
+
+恢复默认示例：
+
+```json
+{
+  "operation": "update",
+  "section": "compression",
+  "reset_defaults": [
+    "strategy.mechanical.empty_output_rule",
+    "strategy.jev.jev_score_levels",
+    "strategy.llm.llm_user_prompt_template"
+  ]
+}
+```
+
+`reset_defaults` 只接受明确白名单路径，不能接受通配符、表达式或脚本。
+
+### Public Settings 结构
+
+最终返回结构应稳定为：
+
+```json
+{
+  "service": {
+    "llm_enabled": true,
+    "llm_providers": [
+      {
+        "id": "stable-id",
+        "name": "My Provider",
+        "api_url": "https://example.com/v1",
+        "model": "model-name",
+        "api_key_configured": true,
+        "active": true
+      }
+    ],
+    "active_llm_provider_id": "stable-id",
+    "llm_timeout_secs": 600,
+    "llm_input_limit_chars": 1000000,
+    "jev_enabled": false,
+    "jev_api_url": "",
+    "jev_api_key_configured": false,
+    "jev_timeout_secs": 60
+  },
+  "strategy": {
+    "mechanical": {},
+    "jev": {},
+    "llm": {}
+  }
+}
+```
+
+`strategy.mechanical` 使用前文机械规则组结构。`strategy.jev` 使用 Jev 判断策略结构。`strategy.llm` 使用 LLM 策略段和外层 prompt 模板结构。
+
+### 字段权限
+
+| 字段范围 | GUI | MCP/CLI | 说明 |
+|---|---|---|---|
+| `service.llm_enabled` | 读写 | 读写 | 控制是否启用 LLM 压缩。 |
+| `service.llm_providers[].name` | 读写 | 读写 | Provider 显示名称。 |
+| `service.llm_providers[].api_url` | 读写 | 读写 | OpenAI-compatible API 基址。 |
+| `service.llm_providers[].model` | 读写 | 读写 | 模型名。 |
+| `service.llm_providers[].api_key` | 读写 | 不可见/不可写 | MCP/CLI 只返回 `api_key_configured`。 |
+| `service.active_llm_provider_id` | 读写 | 读写 | 当前启用 Provider。 |
+| `service.llm_timeout_secs` | 读写 | 读写 | 数值范围由 core 校验。 |
+| `service.llm_input_limit_chars` | 读写 | 读写 | 控制 LLM 分块输入上限。 |
+| `service.jev_enabled` | 读写 | 读写 | 控制是否启用 Jev 辅助评分。 |
+| `service.jev_api_url` | 读写 | 读写 | Jev API 地址。 |
+| `service.jev_api_key` | 读写 | 不可见/不可写 | MCP/CLI 只返回 `jev_api_key_configured`。 |
+| `service.jev_timeout_secs` | 读写 | 读写 | Jev 请求超时。 |
+| `strategy.mechanical.*` | 读写 | 读写 | 内置机械规则组参数。 |
+| `strategy.jev.*` | 读写 | 读写 | Jev 候选阈值、评分提示词、评分等级和降级策略。 |
+| `strategy.llm.*` | 读写 | 读写 | LLM 策略段、外层 prompt 模板和 temperature。 |
+
+MCP/CLI 的设计原则是开放业务能力和必要参数，而不是复制 GUI 的弹窗流程。GUI 需要通过“编辑”弹窗组织信息；MCP/CLI 则直接暴露结构化字段，方便 Agent 批量读取、修改、运行压缩、查看诊断并再次调整。
+
+### MCP/CLI 与压缩运行联动
+
+Agent 推荐流程：
+
+1. 调用 `contextos_settings get section=compression` 读取当前策略和服务设置。
+2. 调用 `contextos_settings update section=compression` 修改非密钥字段。
+3. 调用 `contextos_compression run` 用真实会话运行压缩。
+4. 查看压缩结果中的 diagnostics，确认机械规则命中、Jev 等级分布、LLM block 数量和 active provider。
+5. 必要时再次更新 settings。
+
+`contextos_compression run` 可以继续支持单次运行 override，例如 `jev_enabled`、`llm_enabled`、输出路径、是否生成 memory candidates。单次 override 不应修改持久设置，也不能覆盖 API Key。
+
+### ContextOS Skill 更新设计
+
+本阶段不直接修改 `skills/contextos/SKILL.md`。Skill 应在实际代码实现、CLI/MCP schema 更新、真实调用验证完成后再更新，避免文档提前描述不存在的字段。
+
+实现完成后，ContextOS skill 需要补充：
+
+- Agent 可以通过 `contextos-cli settings get/update` 或 MCP `contextos_settings` 读取和修改压缩设置。
+- API Key 不会通过 MCP/CLI 返回，也不能通过 MCP/CLI 修改；需要用户在 GUI 中配置。
+- 压缩策略分为 `service` 与 `strategy`：
+  - `service` 管 LLM/Jev 连接和运行参数。
+  - `strategy` 管机械规则、Jev 评分、LLM prompt。
+- 调整策略后，应通过真实 `contextos_compression run` 验证，并查看 diagnostics。
+- 不要尝试通过 JSON 发明新压缩操作、运行脚本或构造规则 DSL。
+- 如果需要新增真实压缩行为，优先修改 Rust 压缩引擎操作函数，编译并通过真实 MCP/CLI/GUI 链路验证。
+- 压缩引擎会拆成更清晰的模块；Agent 应优先查找 `settings.rs`、`mechanical.rs`、`jev.rs`、`llm_prompt.rs`、`diagnostics.rs` 这类模块边界。
+
+如果兼容发布仍包含 `skills/wake/SKILL.md`，实现完成后同步更新同一段说明，避免旧 skill 给 Agent 过期指导。
+
 ## 数据迁移与兼容
 
 1. 现有策略 key 继续读取，新增字段不存在时使用 `wake-core` 默认值。
@@ -822,8 +983,9 @@ API Key 规则不变：
 6. 提取 Jev 评分等级和判断策略并接入运行链路。
 7. 提取 LLM 外层模板并接入 prompt 构造。
 8. 重构压缩服务模块边界。
-9. 更新 MCP Schema、CLI 文档、MCP 文档和 ContextOS skill。
-10. 执行真实链路验证。
+9. 更新 MCP Schema、CLI 文档和 MCP 文档。
+10. 执行真实链路验证，确认字段、命令、诊断和密钥隐藏规则都与实现一致。
+11. 验证完成后再更新 ContextOS skill，把实际可用的 MCP/CLI 能力和压缩引擎修改边界写给 Agent。
 
 ## 已确认边界
 
