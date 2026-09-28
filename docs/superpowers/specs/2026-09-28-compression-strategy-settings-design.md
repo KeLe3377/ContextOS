@@ -7,7 +7,7 @@
 1. 产品层实现 B：让 GUI、MCP、CLI 可编辑机械压缩、Jev 判断、LLM 提示词的关键参数和模板。
 2. 工程层重构压缩引擎：把硬编码逻辑拆成清晰的 Rust 模块和操作函数，让 Codex/Agent 后续通过改代码、编译、真实验证来扩展新压缩能力。
 3. 设置界面拆成两个页面：`压缩服务` 管模型/Jev 连接和运行参数，`压缩策略` 管压缩判断、裁剪、评分和提示词内容。
-4. LLM Provider 配置改为不限数量的模型配置弹窗，替代当前固定 3 个 Provider 和逐项设置行。
+4. LLM Provider 配置改为不限数量的 OpenAI-compatible 模型配置弹窗，替代当前固定 3 个 Provider 和逐项设置行。
 
 ## 背景
 
@@ -24,7 +24,7 @@ ContextOS 已经完成 MCP、CLI、GUI 共用 `wake-core` 压缩服务的基础�
 1. 用户可以在 GUI 中编辑常用压缩参数和 prompt 模板，不需要改代码。
 2. Agent 可以通过 MCP/CLI 读取和更新同一套策略字段，且不暴露或修改 API Key。
 3. 压缩服务连接配置与压缩策略配置分离，界面职责清晰。
-4. LLM Provider 支持不限数量，集中在模型配置弹窗中新增、编辑、复制、删除、启用和测试。
+4. LLM Provider 支持不限数量的 OpenAI-compatible 端点，集中在模型配置弹窗中新增、编辑、复制、删除、启用和测试。
 5. 压缩引擎代码拆成更清晰的模块，新增真实压缩行为时优先改 Rust 操作函数，而不是发明运行时规则语言。
 
 ## 非目标
@@ -97,16 +97,16 @@ ContextOS 已经完成 MCP、CLI、GUI 共用 `wake-core` 压缩服务的基础�
 
 ### 存储模型
 
-新增 v2 存储：
+新增 Provider List v2 存储。这里的 `v2` 只表示 ContextOS 的第二版 Provider 存储结构，不表示 OpenRouter 或某个供应商协议；所有 Provider 都按 OpenAI-compatible chat completions 端点处理。
 
 ```json
 [
   {
     "id": "stable-id",
-    "name": "OpenRouter",
-    "api_url": "https://openrouter.ai/api/v1",
+    "name": "My Provider",
+    "api_url": "https://example.com/v1",
     "api_key": "...",
-    "model": "anthropic/claude-sonnet-4"
+    "model": "model-name"
   }
 ]
 ```
@@ -118,9 +118,11 @@ ContextOS 已经完成 MCP、CLI、GUI 共用 `wake-core` 压缩服务的基础�
 
 兼容逻辑：
 
-- 如果 v2 不存在，则从旧 `compression_llm_providers` 和 `compression_llm_active_provider` 读取并转换。
-- 保存后写入 v2。
-- 旧 key 暂不删除，避免回滚版本无法读取。
+- 如果 v2 不存在，则从旧 `compression_llm_providers` 和 `compression_llm_active_provider` 读取当前已填的 Provider，转换为 v2。
+- 如果旧配置中只有一个有效 Provider，就只迁移这一项，不补空槽位。
+- 保存后只写入 v2，不再双写旧 `compression_llm_providers` 和 `compression_llm_active_provider`。
+- 迁移时必须保留当前已填写的 URL、API Key、Model、Provider 名称，不能因为换存储结构丢失现有配置。
+- 旧 key 可以留在 prefs 中不主动删除，但后续运行逻辑不再依赖旧 key。
 
 ### MCP/CLI 边界
 
@@ -133,9 +135,9 @@ MCP/CLI 不返回明文 API Key，也不允许修改 API Key。
   "providers": [
     {
       "id": "stable-id",
-      "name": "OpenRouter",
-      "api_url": "https://openrouter.ai/api/v1",
-      "model": "anthropic/claude-sonnet-4",
+      "name": "My Provider",
+      "api_url": "https://example.com/v1",
+      "model": "model-name",
       "api_key_configured": true,
       "active": true
     }
@@ -158,36 +160,165 @@ MCP/CLI 不返回明文 API Key，也不允许修改 API Key。
 
 ### 机械压缩
 
-机械压缩继续由 Rust 实现具体操作，不开放运行时规则 DSL。本阶段将硬编码参数和开关提取为可编辑设置。
+机械压缩继续由 Rust 实现具体操作，不开放运行时规则 DSL。本阶段不是只提取几个 head/tail 参数，而是把现有硬编码判断整理成内置规则组。用户和 Agent 可以启用/停用规则组，并编辑每组的关键参数；如果需要新增一种全新操作，仍然通过修改 Rust operation 实现。
 
-建议字段：
+机械规则组参考旧设计文档，第一版内置：
 
-- `mechanical_generic_output_min_chars`：普通 Output 超过该长度才裁剪。
-- `mechanical_generic_output_head_chars`：普通 Output 头部保留字符数。
-- `mechanical_generic_output_tail_chars`：普通 Output 尾部保留字符数。
-- `mechanical_low_value_success_max_chars`：短成功输出丢弃阈值。
-- `mechanical_low_value_write_stdin_max_chars`：短 `write_stdin` 输出丢弃阈值。
-- `mechanical_patch_special_enabled`：是否启用 patch 特殊处理。
-- `mechanical_patch_head_chars`：patch 输出头部保留字符数。
-- `mechanical_patch_tail_chars`：patch 输出尾部保留字符数。
-- `mechanical_codegraph_special_enabled`：是否启用 CodeGraph 特殊处理。
-- `mechanical_skill_special_enabled`：是否启用 skill 输出特殊处理。
-- `mechanical_skill_head_chars`：skill 输出无标题时头部保留字符数。
-- `mechanical_skill_tail_chars`：skill 输出无标题时尾部保留字符数。
-- `mechanical_jev_candidate_min_chars`：机械裁剪后标记 Jev 候选的最小 Output 字符数。
+- `empty_output_rule`：删除空 output、空轮询、短成功输出。
+- `error_protection_rule`：识别错误、失败、panic、traceback、非 0 exit code、编译/测试失败，保留更长证据。
+- `patch_rule`：识别 apply_patch、diff、文件修改证据，保留 patch header 和关键 hunks。
+- `source_listing_rule`：处理大段源码、行号源码片段、AST/符号/调用链输出；CodeGraph 是该规则的特例而不是唯一对象。
+- `search_output_rule`：处理 rg/grep/find/search 命中和 truncated notice。
+- `listing_output_rule`：处理 sessions/projects/files/table/list 等列表类输出。
+- `instruction_and_tool_spec_rule`：处理 SKILL.md、MCP tools/list、inputSchema、系统说明、README、CLI help、OpenAPI/schema/tool manifest。
+- `generic_large_output_rule`：兜底大 Output 裁剪。
 
-字段值需要在 `wake-core` 中定义默认值、校验范围和 public settings 输出，GUI/MCP/CLI 使用同一套定义。
+每个规则组提供统一的可编辑形态：
+
+```json
+{
+  "enabled": true,
+  "min_output_chars": 3000,
+  "head_chars": 700,
+  "tail_chars": 500,
+  "max_lines": 40,
+  "keep_error_lines": true,
+  "keep_path_lines": true,
+  "mark_jev_candidate": true
+}
+```
+
+不同规则组只暴露自己需要的字段。例如 `empty_output_rule` 暴露短输出删除阈值，`source_listing_rule` 暴露保留文件/符号/状态行的开关，`instruction_and_tool_spec_rule` 暴露保留标题层级和工具名列表的上限。
+
+建议 public settings 结构：
+
+```json
+{
+  "mechanical": {
+    "empty_output_rule": {
+      "enabled": true,
+      "success_output_max_chars": 260,
+      "write_stdin_max_chars": 220
+    },
+    "error_protection_rule": {
+      "enabled": true,
+      "head_chars": 2400,
+      "tail_chars": 1200
+    },
+    "patch_rule": {
+      "enabled": true,
+      "head_chars": 2400,
+      "tail_chars": 1200
+    },
+    "source_listing_rule": {
+      "enabled": true,
+      "max_lines": 60,
+      "keep_status_lines": true,
+      "keep_file_headers": true
+    },
+    "search_output_rule": {
+      "enabled": true,
+      "max_matches": 80,
+      "keep_truncated_notice": true
+    },
+    "listing_output_rule": {
+      "enabled": true,
+      "max_items": 80,
+      "keep_anomaly_items": true
+    },
+    "instruction_and_tool_spec_rule": {
+      "enabled": true,
+      "max_headings": 40,
+      "keep_required_fields": true
+    },
+    "generic_large_output_rule": {
+      "enabled": true,
+      "min_output_chars": 3000,
+      "head_chars": 700,
+      "tail_chars": 500,
+      "mark_jev_candidate": true
+    }
+  }
+}
+```
+
+规则执行顺序由 Rust 固定为默认安全顺序，避免用户在 B 阶段通过运行时配置制造不可预测的叠加行为。规则命中后默认第一条命中返回；只有通用统计和 Jev 候选标记可以作为附加结果记录。
 
 ### Jev 判断策略
 
 Jev 连接信息仍在 `压缩服务` 页面；Jev 判断策略进入 `压缩策略` 页面。
 
+Jev 的关键设计变更：Jev 不再只负责“是否恢复全文”。Jev 的核心目标是帮助压缩，而不是把内容变大。Jev 输出信息价值评分和保留等级，Rust 根据等级决定删除、stub、保留机械裁剪、抽取证据、扩展片段或近全文保留。
+
 建议字段：
 
 - `jev_request_char_limit`：单次 Jev 请求最大字符数。
-- `jev_keep_full_threshold`：评分达到该阈值时恢复全文。
+- `jev_candidate_min_chars`：超过该长度的机械候选才送 Jev。
 - `jev_prompt_template`：Jev 判断提示词。
 - `jev_fallback_on_error`：Jev 失败时的降级行为。
+- `jev_score_levels`：评分等级到压缩动作的映射。
+
+默认评分等级：
+
+```json
+{
+  "jev_score_levels": [
+    {
+      "id": "discard",
+      "label": "删除",
+      "max_score": 0.25,
+      "action": "discard"
+    },
+    {
+      "id": "stub",
+      "label": "极简占位",
+      "max_score": 0.45,
+      "action": "stub"
+    },
+    {
+      "id": "mechanical",
+      "label": "机械裁剪",
+      "max_score": 0.60,
+      "action": "use_mechanical"
+    },
+    {
+      "id": "evidence",
+      "label": "关键证据",
+      "max_score": 0.78,
+      "action": "evidence"
+    },
+    {
+      "id": "expanded",
+      "label": "扩展片段",
+      "max_score": 0.92,
+      "action": "expanded"
+    },
+    {
+      "id": "verbatim",
+      "label": "近全文",
+      "max_score": 1.0,
+      "action": "verbatim"
+    }
+  ]
+}
+```
+
+字段含义：
+
+- `max_score` 表示该等级覆盖的最高分，按数组顺序匹配。
+- `action=discard`：比机械结果还低价值，输出中删除该 detail 或只保留删除报告。
+- `action=stub`：只保留标题、工具名、字符数、Jev 理由。
+- `action=use_mechanical`：保留机械裁剪结果。
+- `action=evidence`：保留 Jev/Rust 抽取的关键证据行或关键片段。
+- `action=expanded`：保留更长 head/tail 和相关片段。
+- `action=verbatim`：预算允许时保留原文或接近全文。
+
+第一版可以允许编辑等级阈值、标签和 action，但 action 必须来自固定白名单。是否允许增删等级有两种方案：
+
+1. 固定 6 个等级，只允许改阈值和 action，GUI 简单、诊断稳定。
+2. 允许增删等级，但必须覆盖 `0.0..=1.0`，按 `max_score` 升序校验。
+
+推荐第一版采用固定 6 个等级。这样已经解决“几个评级、多少评分对应什么压缩动作”的关键问题，同时不会变成完整规则 DSL。
 
 `jev_fallback_on_error` 第一版建议只支持：
 
@@ -195,6 +326,16 @@ Jev 连接信息仍在 `压缩服务` 页面；Jev 判断策略进入 `压缩策
 - `fail`：Jev 失败时压缩失败并返回结构化错误。
 
 默认保持当前行为：Jev 失败不阻断 LLM 压缩，即 `use_mechanical`。
+
+LLM 关闭时默认输出：
+
+```text
+mechanical_report
+jev_report
+mechanical_or_jev_compressed_markdown
+```
+
+其中 Jev 只按等级压缩候选块，不再简单恢复全文。Jev report 记录每个候选的 score、level、action、reason 和节省/增加字符数。
 
 ### LLM 提示词策略
 
@@ -313,10 +454,10 @@ API Key 规则不变：
 
 ## 数据迁移与兼容
 
-1. 现有策略 key 继续读取。
-2. 新增字段不存在时使用 `wake-core` 默认值。
-3. LLM Provider v2 不存在时，从旧固定 Provider 配置转换。
-4. 旧字段保留一段时间，不做破坏性删除。
+1. 现有策略 key 继续读取，新增字段不存在时使用 `wake-core` 默认值。
+2. LLM Provider v2 不存在时，从旧固定 Provider 配置转换当前有效项；转换后运行逻辑只使用 v2。
+3. 旧 Provider key 不再双写、不再作为运行期配置来源；可以留在 prefs 中不主动删除，但不是兼容目标。
+4. 迁移必须保留当前已填写的 URL、API Key、Model、Provider 名称。
 5. 文档派生 frontmatter 中记录 public settings 时，继续排除 API Key 明文。
 
 ## 错误与诊断
@@ -335,7 +476,8 @@ API Key 规则不变：
 - 删除 detail 数量。
 - 裁剪 Output 数量。
 - Jev 候选数量。
-- Jev 恢复全文数量。
+- Jev 各评分等级数量。
+- Jev 删除、stub、证据、扩展、近全文等动作数量。
 - LLM block 数量。
 - 使用的 active provider id/name/model。
 
@@ -361,11 +503,11 @@ API Key 规则不变：
 ## 实施顺序建议
 
 1. 提取 compression settings 默认值、校验和 public view。
-2. 实现 LLM Provider v2 模型和兼容读取。
+2. 实现 LLM Provider v2 模型和一次性迁移读取，保留当前 URL、API Key、Model。
 3. 拆分设置页为 `压缩服务` 与 `压缩策略`。
 4. 实现模型配置弹窗。
-5. 提取机械压缩参数并接入运行链路。
-6. 提取 Jev 判断策略并接入运行链路。
+5. 提取机械规则组设置并接入运行链路。
+6. 提取 Jev 评分等级和判断策略并接入运行链路。
 7. 提取 LLM 外层模板并接入 prompt 构造。
 8. 重构压缩服务模块边界。
 9. 更新 MCP Schema、CLI 文档、MCP 文档和 ContextOS skill。
