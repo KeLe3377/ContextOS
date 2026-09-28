@@ -1,4 +1,4 @@
-//! wake-mcp 的四个只读工具:定义(JSON Schema)与执行。输出全是 Markdown 文本,
+//! ContextOS MCP 的只读工具:定义(JSON Schema)与执行。输出全是 Markdown 文本,
 //! 给 LLM 直接读;结构化输出(structuredContent)不做。
 //!
 //! 错误分两类:参数形状不对是协议错误(`InvalidParams` → JSON-RPC -32602);
@@ -46,7 +46,7 @@ impl TranscriptCache {
     ) -> anyhow::Result<Arc<ParsedTranscript>> {
         let r = SessionFileRef::from_meta(meta);
         // SQLite 型会话的 `<db>#<id>` 虚拟路径 stat 不到,from_meta 退回索引里的
-        // 时间——源库变了、Wake 没重扫时键不会变。改用库文件与 -wal 的 mtime
+        // 时间——源库变了、ContextOS 没重扫时键不会变。改用库文件与 -wal 的 mtime
         // 作戳(sqlite_ro 行缓存同款判据),源库一写就失效
         let stamp = if std::path::Path::new(&r.file_path).exists() {
             r.mtime_ms
@@ -90,25 +90,57 @@ impl From<anyhow::Error> for ToolError {
 
 type ToolResult = Result<String, ToolError>;
 
-pub const SEARCH: &str = "wake_search";
-pub const LIST_SESSIONS: &str = "wake_list_sessions";
-pub const GET_SESSION: &str = "wake_get_session";
-pub const LIST_PROJECTS: &str = "wake_list_projects";
-pub const LIST_MEMORIES: &str = "wake_list_memories";
+pub const SEARCH: &str = "contextos_search";
+pub const LIST_SESSIONS: &str = "contextos_list_sessions";
+pub const GET_SESSION: &str = "contextos_get_session";
+pub const LIST_PROJECTS: &str = "contextos_list_projects";
+pub const LIST_MEMORIES: &str = "contextos_list_memories";
+pub use crate::services::control::{
+    COMPRESSION, DATA_SOURCES, MEMORIES, RELATIONS, SESSIONS, SETTINGS,
+};
+const LEGACY_SEARCH: &str = "wake_search";
+const LEGACY_LIST_SESSIONS: &str = "wake_list_sessions";
+const LEGACY_GET_SESSION: &str = "wake_get_session";
+const LEGACY_LIST_PROJECTS: &str = "wake_list_projects";
+const LEGACY_LIST_MEMORIES: &str = "wake_list_memories";
 /// 工具名的清单:自指回声过滤与 wake_lookups 记账(`adapters::wake_lookup_kind`)与
 /// definitions 的稳定性测试都读它,加一家改这里与 `definitions()` 两处即可
-pub const NAMES: [&str; 5] = [
+pub const NAMES: [&str; 11] = [
     SEARCH,
     LIST_SESSIONS,
     GET_SESSION,
     LIST_PROJECTS,
     LIST_MEMORIES,
+    SETTINGS,
+    SESSIONS,
+    RELATIONS,
+    COMPRESSION,
+    MEMORIES,
+    DATA_SOURCES,
+];
+pub const LOOKUP_NAMES: [&str; 16] = [
+    SEARCH,
+    LIST_SESSIONS,
+    GET_SESSION,
+    LIST_PROJECTS,
+    LIST_MEMORIES,
+    LEGACY_SEARCH,
+    LEGACY_LIST_SESSIONS,
+    LEGACY_GET_SESSION,
+    LEGACY_LIST_PROJECTS,
+    LEGACY_LIST_MEMORIES,
+    SETTINGS,
+    SESSIONS,
+    RELATIONS,
+    COMPRESSION,
+    MEMORIES,
+    DATA_SOURCES,
 ];
 
 const MAX_SEARCH_SESSIONS: i64 = 30;
 const MAX_LIST_SESSIONS: i64 = 100;
 const MAX_LIST_MEMORIES: i64 = 100;
-/// wake_search 末尾附带的记忆命中数
+/// contextos_search 末尾附带的记忆命中数
 const MEMORY_HITS_IN_SEARCH: i64 = 5;
 const MAX_LIST_PROJECTS: i64 = 200;
 const SNIPPETS_PER_SESSION: usize = 3;
@@ -122,10 +154,127 @@ fn read_only_annotations() -> Value {
     })
 }
 
+fn domain_annotations() -> Value {
+    json!({
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+    })
+}
+
+fn domain_definition(name: &str, title: &str, description: &str, operations: &[&str]) -> Value {
+    let mut properties = domain_properties(name);
+    properties.insert("operation".into(), json!({
+        "type": "string", "enum": operations,
+        "description": "Operation to execute in this ContextOS domain. Parameters used by other operations may be omitted."
+    }));
+    json!({
+        "name": name,
+        "title": title,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": ["operation"],
+            "additionalProperties": true
+        },
+        "annotations": domain_annotations()
+    })
+}
+
+fn domain_properties(name: &str) -> serde_json::Map<String, Value> {
+    let properties = match name {
+        SETTINGS => json!({
+            "section": {"type":"string","enum":["compression"],"default":"compression"},
+            "data": {
+                "type":"object",
+                "description":"Partial compression settings patch. Shape: {service:{...}, strategy:{mechanical:{...}, jev:{...}, llm:{...}}}. Objects are recursively merged; arrays are replaced. API keys are excluded and rejected.",
+                "properties":{
+                    "service":{
+                        "type":"object",
+                        "description":"LLM/Jev connection and runtime settings. API keys are not accepted through MCP/CLI.",
+                        "properties":{
+                            "llm_enabled":{"type":"boolean"},
+                            "llm_providers":{"type":"array","description":"OpenAI-compatible providers without api_key.","items":{"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"api_url":{"type":"string"},"model":{"type":"string"}},"additionalProperties":false}},
+                            "active_llm_provider_id":{"type":"string"},
+                            "llm_timeout_secs":{"type":"integer","minimum":30,"maximum":3600},
+                            "llm_input_limit_chars":{"type":"integer","minimum":1},
+                            "jev_enabled":{"type":"boolean"},
+                            "jev_api_url":{"type":"string"},
+                            "jev_timeout_secs":{"type":"integer","minimum":10,"maximum":1800}
+                        },
+                        "additionalProperties":false
+                    },
+                    "strategy":{
+                        "type":"object",
+                        "description":"Editable compression strategy parameters and prompt templates.",
+                        "properties":{
+                            "mechanical":{"type":"object","description":"Built-in mechanical rule groups: empty_output_rule, error_protection_rule, patch_rule, source_listing_rule, search_output_rule, listing_output_rule, instruction_and_tool_spec_rule, generic_large_output_rule.","additionalProperties":true},
+                            "jev":{"type":"object","description":"Jev candidate thresholds, scoring prompt, fallback, and score levels.","additionalProperties":true},
+                            "llm":{"type":"object","description":"LLM strategy sections, outer prompt templates, and temperature.","additionalProperties":true}
+                        },
+                        "additionalProperties":false
+                    }
+                },
+                "additionalProperties":true
+            },
+            "reset_defaults": {"type":"array","items":{"type":"string"},"description":"Explicit default reset paths, e.g. strategy.mechanical.empty_output_rule, strategy.jev.jev_score_levels, strategy.llm.llm_user_prompt_template."}
+        }),
+        SESSIONS => json!({
+            "key":{"type":"string","description":"ContextOS session key."},
+            "query":{"type":"string"}, "limit":{"type":"integer","minimum":1,"maximum":200},
+            "favorite":{"type":"boolean"}, "pinned":{"type":"boolean"},
+            "add_tags":{"type":"array","items":{"type":"string"},"description":"Built-in or custom non-empty tags."},
+            "remove_tags":{"type":"array","items":{"type":"string"}}
+        }),
+        RELATIONS => json!({
+            "key":{"type":"string","description":"Session key for list."},
+            "parent":{"type":"string"}, "child":{"type":"string"},
+            "relation":{"type":"string","description":"Existing or custom relationship name."},
+            "new_relation":{"type":"string","description":"New built-in or custom relationship name."}
+        }),
+        COMPRESSION => json!({
+            "session_key":{"type":"string","description":"Session for list_turns."},
+            "session_keys":{"type":"array","items":{"type":"string"},"description":"Complete sessions to compress together, whether related or unrelated."},
+            "session_inputs":{"type":"array","description":"Explicit per-session turn selection. Do not combine with session_keys.","items":{"type":"object","properties":{"session_key":{"type":"string"},"turn_numbers":{"type":"array","items":{"type":"integer","minimum":1}}},"required":["session_key"],"additionalProperties":false}},
+            "output":{"type":"string","description":"Output Markdown path."},
+            "overwrite":{"type":"boolean","default":false},
+            "jev_enabled":{"type":"boolean","description":"Per-run override."},
+            "llm_enabled":{"type":"boolean","description":"Per-run override."},
+            "generate_memory_candidates":{"type":"boolean","default":false},
+            "path":{"type":"string","description":"Derived document path."},
+            "content":{"type":"string"}, "content_hash":{"type":"string"}
+        }),
+        MEMORIES => json!({
+            "key":{"type":"string"}, "path":{"type":"string"},
+            "title":{"type":"string","description":"Legacy/simple create title."},
+            "content":{"type":"string"}, "content_hash":{"type":"string"},
+            "source_session_key":{"type":"string","description":"Optional source session metadata for create."},
+            "candidate":{"type":"object","description":"Complete candidate returned by compression.run. Preserves kind, scope, target, reason, trigger, boundary, next_action, related_paths, evidence, and confidence.","properties":{
+                "kind":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"},
+                "scope":{"type":"string"},"target":{"type":"string"},"reason":{"type":"string"},
+                "trigger":{"type":"string"},"boundary":{"type":"string"},"next_action":{"type":"string"},
+                "related_paths":{"type":"array","items":{"type":"string"}},"evidence":{"type":"string"},
+                "confidence":{"type":"string"}
+            },"additionalProperties":false}
+        }),
+        DATA_SOURCES => json!({
+            "kind":{"type":"string","enum":["sessions","memories"],"default":"sessions"},
+            "agent":{"type":"string","description":"Supported local agent id."},
+            "path":{"type":"string","description":"Absolute local source path."},
+            "source":{"type":"string","description":"Memory source id for set_enabled."},
+            "enabled":{"type":"boolean"}
+        }),
+        _ => json!({}),
+    };
+    properties.as_object().cloned().unwrap_or_default()
+}
+
 fn project_param() -> Value {
     json!({
         "type": "string",
-        "description": "Scope to one project. Pass an absolute path — your current working directory is ideal: Wake matches the enclosing indexed project, or every project below a parent directory — or a project name. Omit to cover all projects.",
+        "description": "Scope to one project. Pass an absolute path — your current working directory is ideal: ContextOS matches the enclosing indexed project, or every project below a parent directory — or a project name. Omit to cover all projects.",
     })
 }
 
@@ -150,7 +299,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": SEARCH,
             "title": "Search session history",
-            "description": "Full-text search across every indexed coding-agent session on this machine (session titles, user prompts, assistant replies, tool names and inputs). Use it when the user asks whether something was discussed, tried or solved before, or wants the conversation about a topic, an error message, a file or a decision — git history does not hold that. Terms are ANDed; CJK text and code substrings like `useEffect(` work. Returns matching sessions with up to three snippets each, plus a `wake://session/<key>#<seq>` reference per snippet that you can read with wake_get_session.",
+            "description": "Full-text search across every indexed coding-agent session on this machine (session titles, user prompts, assistant replies, tool names and inputs). Use it when the user asks whether something was discussed, tried or solved before, or wants the conversation about a topic, an error message, a file or a decision — git history does not hold that. Terms are ANDed; CJK text and code substrings like `useEffect(` work. Returns matching sessions with up to three snippets each, plus a `wake://session/<key>#<seq>` reference per snippet that you can read with contextos_get_session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -167,14 +316,14 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": LIST_SESSIONS,
             "title": "List recent sessions",
-            "description": "Most recently updated coding-agent sessions, optionally scoped to a project, to some agents, to a time window, or to starred sessions. Use it when the user asks what they or an agent worked on recently, wants to resume or continue earlier work, or refers to \"yesterday's session\", \"last time\", \"what Codex did here\" — pass the current working directory as `project`. It returns the session keys wake_get_session needs. Subagent sessions are folded into their parents; archived sessions are excluded.",
+            "description": "Most recently updated coding-agent sessions, optionally scoped to a project, to some agents, to a time window, or to starred sessions. Use it when the user asks what they or an agent worked on recently, wants to resume or continue earlier work, or refers to \"yesterday's session\", \"last time\", \"what Codex did here\" — pass the current working directory as `project`. It returns the session keys contextos_get_session needs. Subagent sessions are folded into their parents; archived sessions are excluded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": project_param(),
                     "agents": agents_param(),
                     "since": since_param(),
-                    "starred": { "type": "boolean", "default": false, "description": "Only sessions the user starred in Wake." },
+                    "starred": { "type": "boolean", "default": false, "description": "Only sessions the user starred in ContextOS." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIST_SESSIONS, "default": 20 },
                 },
             },
@@ -183,7 +332,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": GET_SESSION,
             "title": "Read a session transcript",
-            "description": "Read one session's transcript, parsed live from the agent's own files, as compact Markdown: user and assistant messages with `[seq N]` markers, tool calls folded to one line each, injected context omitted. Use it after wake_search or wake_list_sessions to see what actually happened — the reasoning, the decisions and the exact steps of an earlier session. Paginated: when the reply ends with a `from_seq` hint, call again with it to continue. Accepts a session key or a `wake://session/<key>#<seq>` reference (the seq becomes the starting point). Subagent transcripts (Claude Code sidechains, Cursor subagents) are listed at the end of the main transcript; pass one's id as `subagent` to read it. Also reads memory files: pass a `wake://memory/<key>` reference from wake_list_memories or wake_search to get that file.",
+            "description": "Read one session's transcript, parsed live from the agent's own files, as compact Markdown: user and assistant messages with `[seq N]` markers, tool calls folded to one line each, injected context omitted. Use it after contextos_search or contextos_list_sessions to see what actually happened — the reasoning, the decisions and the exact steps of an earlier session. Paginated: when the reply ends with a `from_seq` hint, call again with it to continue. Accepts a session key or a `wake://session/<key>#<seq>` reference (the seq becomes the starting point). Subagent transcripts (Claude Code sidechains, Cursor subagents) are listed at the end of the main transcript; pass one's id as `subagent` to read it. Also reads memory files: pass a `wake://memory/<key>` reference from contextos_list_memories or contextos_search to get that file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -216,7 +365,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": LIST_MEMORIES,
             "title": "List agent memory files",
-            "description": "The memory files coding agents keep for themselves on this machine — Claude Code's and ZCode's per-project auto-memory (MEMORY.md and its topic files), Codex's memories — plus the instruction files the user keeps for them (CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .kiro/steering, copilot-instructions.md), read-only, grouped by project, user memory (the notes that apply to every project) last. Use it when the user asks what an agent already knows or remembers about a project, or to reuse another agent's notes: decisions, conventions, gotchas. Each entry ends with a `wake://memory/<key>` reference; read one with wake_get_session.",
+            "description": "The memory files coding agents keep for themselves on this machine — Claude Code's and ZCode's per-project auto-memory (MEMORY.md and its topic files), Codex's memories — plus the instruction files the user keeps for them (CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .kiro/steering, copilot-instructions.md), read-only, grouped by project, user memory (the notes that apply to every project) last. Use it when the user asks what an agent already knows or remembers about a project, or to reuse another agent's notes: decisions, conventions, gotchas. Each entry ends with a `wake://memory/<key>` reference; read one with contextos_get_session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -227,21 +376,30 @@ pub fn definitions() -> Vec<Value> {
             },
             "annotations": read_only_annotations(),
         }),
+        domain_definition(SETTINGS, "Read or update business settings", "Read and update ContextOS business settings. API keys are never returned or accepted.", &["get", "update"]),
+        domain_definition(SESSIONS, "Manage sessions", "List, read, search, update metadata, or move one session tree to the OS trash. Original conversation messages are immutable.", &["list", "get", "search", "list_projects", "update_metadata", "trash", "cleanup_history"]),
+        domain_definition(RELATIONS, "Manage session relationships", "List relationships and create, update, or delete manual relationships. Adapter-discovered relationships are read-only.", &["list", "create", "update", "delete"]),
+        domain_definition(COMPRESSION, "Compress sessions and manage derived documents", "List a session's one-based turns, run full-session compression or select turns per session with session_inputs, then read, update, or move ContextOS-derived Markdown documents to the OS trash.", &["list_turns", "run", "get_document", "update_document", "trash_document"]),
+        domain_definition(MEMORIES, "Manage ContextOS memories", "List memories and create, read, update, or trash only memories owned by ContextOS.", &["list", "get", "create", "update", "trash"]),
+        domain_definition(DATA_SOURCES, "Manage local data sources", "List, add, enable, disable, remove, or reset local session and memory sources. Remote hosts are not supported.", &["list", "add", "set_enabled", "remove", "reset"]),
     ]
 }
 
 fn call(ctx: &ToolContext, name: &str, args: &Value) -> ToolResult {
     match name {
-        SEARCH => search(ctx, args),
-        LIST_SESSIONS => list_sessions(ctx, args),
-        GET_SESSION => get_session(ctx, args),
-        LIST_PROJECTS => list_projects(ctx, args),
-        LIST_MEMORIES => list_memories(ctx, args),
+        SEARCH | LEGACY_SEARCH => search(ctx, args),
+        LIST_SESSIONS | LEGACY_LIST_SESSIONS => list_sessions(ctx, args),
+        GET_SESSION | LEGACY_GET_SESSION => get_session(ctx, args),
+        LIST_PROJECTS | LEGACY_LIST_PROJECTS => list_projects(ctx, args),
+        LIST_MEMORIES | LEGACY_LIST_MEMORIES => list_memories(ctx, args),
+        SETTINGS | SESSIONS | RELATIONS | COMPRESSION | MEMORIES | DATA_SOURCES => Ok(
+            crate::services::control::invoke(ctx.store, ctx.adapters, name, args),
+        ),
         other => Err(ToolError::InvalidParams(format!("Unknown tool: {other}"))),
     }
 }
 
-/// 用当前时刻构造 ToolContext 并跑一次工具。**MCP server 与 wake-cli 共用这
+/// 用当前时刻构造 ToolContext 并跑一次工具。**MCP server 与 contextos-cli 共用这
 /// 一条**——now_ms 是两条路唯一可能各算各的东西(它只喂 parse_since),只留一
 /// 个构造点就没有漂移的余地
 pub fn invoke(
@@ -466,10 +624,10 @@ macro_rules! project_scope {
 fn index_note(store: &Store) -> String {
     match store.latest_activity() {
         Ok(Some(t)) => format!(
-            "Index covers activity up to {} (local time); Wake keeps it fresh while it is running.",
+            "Index covers activity up to {} (local time); ContextOS keeps it fresh while it is running.",
             fmt_time(Some(t))
         ),
-        Ok(None) => "The index is empty — launch Wake to build it.".to_string(),
+        Ok(None) => "The index is empty — launch ContextOS to build it.".to_string(),
         Err(e) => format!("Index freshness unknown: {e:#}"),
     }
 }
@@ -570,17 +728,17 @@ fn memory_ref(key: &str) -> String {
     format!("wake://memory/{key}")
 }
 
-/// `wake_get_session` 的 `key` 参数认的三种形态:裸会话 key、`wake://session/<key>#<seq>`
+/// `contextos_get_session` 的 `key` 参数认的三种形态:裸会话 key、`wake://session/<key>#<seq>`
 /// (seq 成为默认起点)、`wake://memory/<key>`(记忆文件,另一条读法)。写引用的
 /// `session_ref` / `memory_ref` 与读引用的 `parse` 放在一起,两边一起改。记忆 key
 /// 自身可含 `#`(SQLite 型虚拟路径 `<db>#<id>`),所以先认 scheme 再拆 seq
 #[derive(Debug, PartialEq, Eq)]
-enum WakeRef {
+enum ContextRef {
     Session { key: String, seq: Option<i64> },
     Memory { key: String },
 }
 
-impl WakeRef {
+impl ContextRef {
     fn parse(raw: &str) -> Self {
         let s = raw.trim();
         if let Some(key) = s.strip_prefix("wake://memory/") {
@@ -654,7 +812,7 @@ fn search(ctx: &ToolContext, args: &Value) -> ToolResult {
             out.push_str("Note: terms shorter than 3 characters use a substring scan; try a longer or more specific term.\n");
         }
         if memory.is_empty() {
-            out.push_str("Try fewer or different terms, drop the project/agent/since filters, or list sessions with wake_list_sessions.\n\n");
+            out.push_str("Try fewer or different terms, drop the project/agent/since filters, or list sessions with contextos_list_sessions.\n\n");
         }
         out.push_str(&memory);
         out.push_str(&index_note(ctx.store));
@@ -705,14 +863,14 @@ fn search(ctx: &ToolContext, args: &Value) -> ToolResult {
         out.push('\n');
     }
     out.push_str(
-        "Read a session with wake_get_session (pass the key, or a ref to start at that message).\n",
+        "Read a session with contextos_get_session (pass the key, or a ref to start at that message).\n",
     );
     out.push_str(&memory);
     out.push_str(&index_note(ctx.store));
     Ok(out)
 }
 
-/// wake_search 末尾附带的记忆命中:agent 自己写的记忆里提到这个词的几份,带
+/// contextos_search 末尾附带的记忆命中:agent 自己写的记忆里提到这个词的几份,带
 /// `wake://memory/…` 引用。整段前后各一个空行,调用方直接拼、不用管分隔;没有就是空串
 fn memory_hits_section(
     ctx: &ToolContext,
@@ -806,7 +964,7 @@ fn list_memories(ctx: &ToolContext, args: &Value) -> ToolResult {
     }
     if docs.is_empty() {
         out.push_str(&format!(
-            "No memory files{scope}. Claude Code writes them under ~/.claude/projects/<project>/memory/ once it has saved something about a project; Codex keeps its own under ~/.codex/memories/; ZCode under ~/.zcode/cli/memories/projects/; instruction files such as CLAUDE.md or AGENTS.md are listed from the project roots Wake has sessions for. Wake only lists what is there.\n\n"
+            "No memory files{scope}. Claude Code writes them under ~/.claude/projects/<project>/memory/ once it has saved something about a project; Codex keeps its own under ~/.codex/memories/; ZCode under ~/.zcode/cli/memories/projects/; instruction files such as CLAUDE.md or AGENTS.md are listed from the project roots ContextOS has sessions for. ContextOS only lists what is there.\n\n"
         ));
         out.push_str(&index_note(ctx.store));
         return Ok(out);
@@ -832,22 +990,22 @@ fn list_memories(ctx: &ToolContext, args: &Value) -> ToolResult {
             memory_ref(&d.key)
         ));
     }
-    out.push_str("\nRead one with wake_get_session using its wake://memory/… reference.\n");
+    out.push_str("\nRead one with contextos_get_session using its wake://memory/… reference.\n");
     out.push_str(&index_note(ctx.store));
     Ok(out)
 }
 
-/// `wake_get_session` 收到 `wake://memory/<key>` 引用时的读法:标题行 + 归属 + 来源
+/// `contextos_get_session` 收到 `wake://memory/<key>` 引用时的读法:标题行 + 归属 + 来源
 /// 路径,然后是正文。文件型现场读磁盘(agent 刚改过也能看到),读不到退库里那份;
 /// SQLite 型只有库里那份。同一个 `max_chars` 预算,超了截断并说明
-/// `wake_get_session` 读记忆时一页的字符上限(与会话页同数);`int_arg` 静默封顶
+/// `contextos_get_session` 读记忆时一页的字符上限(与会话页同数);`int_arg` 静默封顶
 const MAX_GET_CHARS: usize = 100_000;
 
 fn get_memory(ctx: &ToolContext, key: &str, args: &Value) -> ToolResult {
     let max_chars = int_arg(args, "max_chars", 20_000, 200, MAX_GET_CHARS as i64)? as usize;
     let Some(doc) = ctx.store.get_memory(key)? else {
         return Err(ToolError::Failed(format!(
-            "No memory file with key `{key}`; get a wake://memory/… reference from wake_list_memories or wake_search."
+            "No memory file with key `{key}`; get a wake://memory/… reference from contextos_list_memories or contextos_search."
         )));
     };
     let body = crate::adapters::memory_body(&doc);
@@ -914,6 +1072,7 @@ fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
         offset: 0,
         updated_since: since,
         project_paths: project.clone().unwrap_or_default(),
+        tags: Vec::new(),
         // "最近"就是最近:GUI 的置顶优先在这里会让 limit 先被旧置顶会话占掉
         ignore_pins: true,
     })?;
@@ -933,7 +1092,7 @@ fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
         out.push_str("- ");
         out.push_str(&session_line(s));
     }
-    out.push_str("\nRead one with wake_get_session using its key.\n");
+    out.push_str("\nRead one with contextos_get_session using its key.\n");
     out.push_str(&index_note(ctx.store));
     Ok(out)
 }
@@ -981,7 +1140,7 @@ fn list_projects(ctx: &ToolContext, args: &Value) -> ToolResult {
             fmt_time(Some(p.last_active))
         ));
     }
-    out.push_str("\nUse a path as `project` in wake_list_sessions or wake_search.\n");
+    out.push_str("\nUse a path as `project` in contextos_list_sessions or contextos_search.\n");
     out.push_str(&index_note(ctx.store));
     Ok(out)
 }
@@ -995,7 +1154,7 @@ fn find_session(store: &Store, key: &str) -> Result<Result<SessionMeta, String>,
     Ok(match candidates.as_slice() {
         [one] => Ok(one.clone()),
         [] => Err(format!(
-            "No session with key `{key}`. Keys look like `claude-code:<id>` (or `<agent>:<host>:<id>` for remote hosts); get one from wake_search or wake_list_sessions."
+            "No session with key `{key}`. Keys look like `claude-code:<id>` (or `<agent>:<host>:<id>` for remote hosts); get one from contextos_search or contextos_list_sessions."
         )),
         many => Err(format!(
             "`{key}` is ambiguous — {} sessions share that id:\n{}",
@@ -1015,7 +1174,7 @@ const MAX_SUBAGENTS_LISTED: usize = 30;
 const MAX_CHILDREN_LISTED: usize = 30;
 
 /// 挂在这条会话下面的子会话。它们是完整会话(各有 key、各自可分页读),
-/// 但 `wake_list_sessions` 只给根(roots_only),所以父会话是唯一的发现
+/// 但 `contextos_list_sessions` 只给根(roots_only),所以父会话是唯一的发现
 /// 入口——Codex 的 `spawn_agent` 子代理、Grok 的子会话都走这里。
 /// 与侧边的 subagent 转录不是一回事:那些没有自己的 key,按 id 读
 fn child_sessions(ctx: &ToolContext, parent_key: &str) -> Vec<SessionMeta> {
@@ -1036,6 +1195,7 @@ fn child_sessions(ctx: &ToolContext, parent_key: &str) -> Vec<SessionMeta> {
                 offset: 0,
                 updated_since: None,
                 project_paths: Vec::new(),
+                tags: Vec::new(),
                 ignore_pins: true,
             },
         )
@@ -1112,9 +1272,9 @@ fn get_session(ctx: &ToolContext, args: &Value) -> ToolResult {
     let raw_key = text_arg(args, "key")?
         .ok_or_else(|| ToolError::InvalidParams("`key` is required".into()))?;
     // 记忆引用走另一条读法;不另开工具,agent 拿到什么引用都交给同一个入口
-    let (key, ref_seq) = match WakeRef::parse(raw_key) {
-        WakeRef::Memory { key } => return get_memory(ctx, &key, args),
-        WakeRef::Session { key, seq } => (key, seq),
+    let (key, ref_seq) = match ContextRef::parse(raw_key) {
+        ContextRef::Memory { key } => return get_memory(ctx, &key, args),
+        ContextRef::Session { key, seq } => (key, seq),
     };
     let from_seq = int_arg(args, "from_seq", ref_seq.unwrap_or(0), 0, i64::MAX)?;
     let opts = CompactOptions {
@@ -1132,7 +1292,7 @@ fn get_session(ctx: &ToolContext, args: &Value) -> ToolResult {
     };
     let adapter = adapter_for(ctx.adapters, meta.agent, &meta.file_path).ok_or_else(|| {
         ToolError::Failed(format!(
-            "No adapter can read `{}` ({}) — its data location may be disabled in Wake's settings.",
+            "No adapter can read `{}` ({}) — its data location may be disabled in ContextOS settings.",
             meta.key,
             meta.agent.display_name()
         ))
@@ -1216,7 +1376,7 @@ fn get_session(ctx: &ToolContext, args: &Value) -> ToolResult {
     if !meta.host.is_empty() {
         facts.push(format!("host: @{}", meta.host));
     }
-    // 子会话给出回父会话的路:它自己不在 wake_list_sessions 的结果里,
+    // 子会话给出回父会话的路:它自己不在 contextos_list_sessions 的结果里,
     // 读者多半是顺着搜索命中落进来的,得知道上下文挂在哪
     if let Ok(Some(parent)) = ctx.store.parent_key_of(&meta.key) {
         facts.push(format!("parent: `{parent}`"));
@@ -1263,7 +1423,7 @@ fn get_session(ctx: &ToolContext, args: &Value) -> ToolResult {
     out.push_str(&facts.join(" · "));
     out.push_str("\n\n");
 
-    // 子会话页脚在空页上也得给:`wake_list_sessions` 只回根会话,父会话是
+    // 子会话页脚在空页上也得给:`contextos_list_sessions` 只回根会话,父会话是
     // 它们唯一的发现入口,而"这一页什么都没渲染"(整条都是 Meta、from_seq
     // 翻过了尾)与"没有子会话"是两回事
     let children = if sub_id.is_none() {
@@ -1361,27 +1521,27 @@ mod tests {
 
     #[test]
     fn key_arg_accepts_wake_refs() {
-        let session = |key: &str, seq: Option<i64>| WakeRef::Session {
+        let session = |key: &str, seq: Option<i64>| ContextRef::Session {
             key: key.to_string(),
             seq,
         };
         assert_eq!(
-            WakeRef::parse(&session_ref("claude-code:abc", 12)),
+            ContextRef::parse(&session_ref("claude-code:abc", 12)),
             session("claude-code:abc", Some(12))
         );
         assert_eq!(
-            WakeRef::parse("codex:devbox:0195-xyz"),
+            ContextRef::parse("codex:devbox:0195-xyz"),
             session("codex:devbox:0195-xyz", None)
         );
         assert_eq!(
-            WakeRef::parse(" claude-code:abc "),
+            ContextRef::parse(" claude-code:abc "),
             session("claude-code:abc", None)
         );
         // 记忆 key 自身带 `#`(SQLite 型虚拟路径)也不能被当成 seq 拆掉
         let memory_key = "codex:/home/me/.codex/memories_1.sqlite#t-0001";
         assert_eq!(
-            WakeRef::parse(&memory_ref(memory_key)),
-            WakeRef::Memory {
+            ContextRef::parse(&memory_ref(memory_key)),
+            ContextRef::Memory {
                 key: memory_key.to_string()
             }
         );
@@ -1411,9 +1571,9 @@ mod tests {
         let defs = definitions();
         let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
         assert_eq!(names, NAMES);
-        for d in &defs {
+        for (index, d) in defs.iter().enumerate() {
             assert_eq!(d["inputSchema"]["type"], "object");
-            assert_eq!(d["annotations"]["readOnlyHint"], true);
+            assert_eq!(d["annotations"]["readOnlyHint"], index < 5);
         }
     }
 }
