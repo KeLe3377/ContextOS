@@ -173,7 +173,242 @@ MCP/CLI 不返回明文 API Key，也不允许修改 API Key。
 - `instruction_and_tool_spec_rule`：处理 SKILL.md、MCP tools/list、inputSchema、系统说明、README、CLI help、OpenAPI/schema/tool manifest。
 - `generic_large_output_rule`：兜底大 Output 裁剪。
 
-每个规则组提供统一的可编辑形态：
+不同规则组只暴露自己需要的字段。GUI 页面中所有规则名称、字段名称、说明文字都使用中文；内部 JSON/MCP/CLI 字段继续使用稳定英文 key，便于 Agent 调用和文档检索。
+
+#### GUI 展示方式
+
+`压缩策略` 页面不直接铺开所有机械字段。页面只显示规则组列表，每组一行：
+
+```text
+空/低信息输出        已启用 · 成功输出 < 260 字符删除 · write_stdin < 220 字符删除    [编辑]
+错误/失败保护        已启用 · 头 2400 / 尾 1200 · 保留命令/退出码/失败行              [编辑]
+Patch/Diff 证据      已启用 · 头 2400 / 尾 1200 · 每文件最多 8 个 hunk               [编辑]
+源码/代码分析输出    已启用 · 最多 80 行 · 保留文件标题/影响范围/状态提示             [编辑]
+搜索输出             已启用 · 最多 80 条 · 保留截断提示和关键词命中                  [编辑]
+列表/表格输出        已启用 · 最多 80 项 · 保留总数和异常项                          [编辑]
+说明/工具规格        已启用 · 最多 40 个标题 · 保留必填字段/安全提示                 [编辑]
+通用大输出           已启用 · 超过 3000 字符裁剪 · 头 700 / 尾 500 · 送 Jev           [编辑]
+```
+
+点击 `编辑` 打开弹窗，弹窗标题和字段均为中文。弹窗底部提供：
+
+- `保存`
+- `恢复本组默认`
+- `取消`
+
+不在第一版提供规则顺序编辑、自定义条件、自定义 action 或正则输入。
+
+#### 空/低信息输出
+
+页面名称：`空/低信息输出`
+
+作用：删除明显没价值的工具输出，例如空 output、空轮询、短成功退出和短 `write_stdin`。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "drop_empty_output": true,
+  "success_output_max_chars": 260,
+  "write_stdin_max_chars": 220,
+  "keep_exit_code_line": true
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `删除空 Output`
+- `成功输出删除阈值`
+- `write_stdin 删除阈值`
+- `删除正文时保留退出码摘要`
+
+#### 错误/失败保护
+
+页面名称：`错误/失败保护`
+
+作用：识别错误、失败、panic、traceback、非 0 退出码、编译/测试失败，避免把排错证据裁掉。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "head_chars": 2400,
+  "tail_chars": 1200,
+  "keep_command": true,
+  "keep_exit_code": true,
+  "keep_failure_lines": true,
+  "failure_keywords": ["error", "failed", "panic", "traceback", "FAILED"]
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `头部保留字符数`
+- `尾部保留字符数`
+- `保留执行命令`
+- `保留退出码`
+- `保留失败关键词行`
+- `失败关键词`
+
+#### Patch/Diff 证据
+
+页面名称：`Patch/Diff 证据`
+
+作用：保留代码修改证据，但避免巨大 patch 原样进入压缩结果。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "head_chars": 2400,
+  "tail_chars": 1200,
+  "keep_file_headers": true,
+  "keep_hunk_headers": true,
+  "max_hunks_per_file": 8
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `头部保留字符数`
+- `尾部保留字符数`
+- `保留文件头`
+- `保留 Hunk 位置`
+- `每个文件最多保留 Hunk 数`
+
+#### 源码/代码分析输出
+
+页面名称：`源码/代码分析输出`
+
+作用：处理 CodeGraph、AST、符号索引、行号源码片段、调用链和 blast radius 等输出。CodeGraph 是该规则的特例，不再单独作为一个规则。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "max_lines": 80,
+  "keep_query_summary": true,
+  "keep_file_headers": true,
+  "keep_blast_radius": true,
+  "keep_staleness_warnings": true,
+  "head_chars": 900,
+  "tail_chars": 500
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `最多保留关键行数`
+- `保留查询摘要`
+- `保留文件/符号标题`
+- `保留影响范围`
+- `保留索引状态提示`
+- `兜底头部字符数`
+- `兜底尾部字符数`
+
+#### 搜索输出
+
+页面名称：`搜索输出`
+
+作用：处理 `rg`、`grep`、`find`、`search`、`path:line:` 命中和截断提示。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "max_matches": 80,
+  "head_matches": 40,
+  "tail_matches": 20,
+  "keep_truncated_notice": true,
+  "priority_keywords": ["error", "failed", "session", "path", "TODO"]
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `最多保留命中数`
+- `前部命中保留数`
+- `尾部命中保留数`
+- `保留截断提示`
+- `优先保留关键词`
+
+#### 列表/表格输出
+
+页面名称：`列表/表格输出`
+
+作用：处理会话列表、项目列表、文件列表、表格和多项条目输出。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "max_items": 80,
+  "head_items": 40,
+  "tail_items": 20,
+  "keep_count_summary": true,
+  "anomaly_keywords": ["error", "failed", "unknown", "stale", "archived"]
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `最多保留条目数`
+- `前部条目保留数`
+- `尾部条目保留数`
+- `保留总数摘要`
+- `异常条目关键词`
+
+#### 说明/工具规格
+
+页面名称：`说明/工具规格`
+
+作用：处理 SKILL.md、MCP tools/list、inputSchema、系统/开发者说明、README、CLI help、OpenAPI/schema/tool manifest。
+
+暴露字段：
+
+```json
+{
+  "enabled": true,
+  "max_headings": 40,
+  "max_tool_names": 80,
+  "keep_required_fields": true,
+  "keep_safety_hints": true,
+  "keep_command_examples": false,
+  "head_chars": 800,
+  "tail_chars": 500
+}
+```
+
+中文字段：
+
+- `启用规则`
+- `最多保留标题数`
+- `最多保留工具名数`
+- `保留必填字段`
+- `保留安全/权限提示`
+- `保留命令示例`
+- `兜底头部字符数`
+- `兜底尾部字符数`
+
+#### 通用大输出
+
+页面名称：`通用大输出`
+
+作用：其它规则未命中时的兜底裁剪。
+
+暴露字段：
 
 ```json
 {
@@ -181,14 +416,19 @@ MCP/CLI 不返回明文 API Key，也不允许修改 API Key。
   "min_output_chars": 3000,
   "head_chars": 700,
   "tail_chars": 500,
-  "max_lines": 40,
-  "keep_error_lines": true,
-  "keep_path_lines": true,
   "mark_jev_candidate": true
 }
 ```
 
-不同规则组只暴露自己需要的字段。例如 `empty_output_rule` 暴露短输出删除阈值，`source_listing_rule` 暴露保留文件/符号/状态行的开关，`instruction_and_tool_spec_rule` 暴露保留标题层级和工具名列表的上限。
+中文字段：
+
+- `启用规则`
+- `裁剪触发字符数`
+- `头部保留字符数`
+- `尾部保留字符数`
+- `标记为 Jev 候选`
+
+#### Public Settings 结构
 
 建议 public settings 结构：
 
@@ -197,39 +437,63 @@ MCP/CLI 不返回明文 API Key，也不允许修改 API Key。
   "mechanical": {
     "empty_output_rule": {
       "enabled": true,
+      "drop_empty_output": true,
       "success_output_max_chars": 260,
-      "write_stdin_max_chars": 220
+      "write_stdin_max_chars": 220,
+      "keep_exit_code_line": true
     },
     "error_protection_rule": {
       "enabled": true,
       "head_chars": 2400,
-      "tail_chars": 1200
+      "tail_chars": 1200,
+      "keep_command": true,
+      "keep_exit_code": true,
+      "keep_failure_lines": true,
+      "failure_keywords": ["error", "failed", "panic", "traceback", "FAILED"]
     },
     "patch_rule": {
       "enabled": true,
       "head_chars": 2400,
-      "tail_chars": 1200
+      "tail_chars": 1200,
+      "keep_file_headers": true,
+      "keep_hunk_headers": true,
+      "max_hunks_per_file": 8
     },
     "source_listing_rule": {
       "enabled": true,
-      "max_lines": 60,
-      "keep_status_lines": true,
-      "keep_file_headers": true
+      "max_lines": 80,
+      "keep_query_summary": true,
+      "keep_file_headers": true,
+      "keep_blast_radius": true,
+      "keep_staleness_warnings": true,
+      "head_chars": 900,
+      "tail_chars": 500
     },
     "search_output_rule": {
       "enabled": true,
       "max_matches": 80,
-      "keep_truncated_notice": true
+      "head_matches": 40,
+      "tail_matches": 20,
+      "keep_truncated_notice": true,
+      "priority_keywords": ["error", "failed", "session", "path", "TODO"]
     },
     "listing_output_rule": {
       "enabled": true,
       "max_items": 80,
-      "keep_anomaly_items": true
+      "head_items": 40,
+      "tail_items": 20,
+      "keep_count_summary": true,
+      "anomaly_keywords": ["error", "failed", "unknown", "stale", "archived"]
     },
     "instruction_and_tool_spec_rule": {
       "enabled": true,
       "max_headings": 40,
-      "keep_required_fields": true
+      "max_tool_names": 80,
+      "keep_required_fields": true,
+      "keep_safety_hints": true,
+      "keep_command_examples": false,
+      "head_chars": 800,
+      "tail_chars": 500
     },
     "generic_large_output_rule": {
       "enabled": true,
@@ -254,9 +518,57 @@ Jev 的关键设计变更：Jev 不再只负责“是否恢复全文”。Jev �
 
 - `jev_request_char_limit`：单次 Jev 请求最大字符数。
 - `jev_candidate_min_chars`：超过该长度的机械候选才送 Jev。
-- `jev_prompt_template`：Jev 判断提示词。
+- `jev_prompt_template`：Jev 评分提示词，必须配合评分等级解释每个分数段的含义。
 - `jev_fallback_on_error`：Jev 失败时的降级行为。
 - `jev_score_levels`：评分等级到压缩动作的映射。
+
+#### Jev 评分提示词编辑
+
+Jev 提示词不作为普通单行设置展示。`压缩策略` 页面只显示一行：
+
+```text
+Jev 评分提示词        已配置 · 6 个评分等级 · 删除/占位/机械/证据/扩展/近全文       [编辑]
+```
+
+点击 `编辑` 打开专门页面或大弹窗，标题为 `Jev 评分提示词`。页面包含三块：
+
+1. `评分提示词`
+   - 多行文本编辑器。
+   - 用来描述 Jev 应如何判断一个候选 Output 的信息价值。
+   - 必须说明评分范围、评分依据和输出格式。
+2. `评分等级`
+   - 表格展示固定 6 个等级：删除、极简占位、机械裁剪、关键证据、扩展片段、近全文。
+   - 每行可编辑最高分、中文说明和对应动作。
+   - 动作必须来自固定白名单。
+3. `示例`
+   - 展示 2 到 3 个典型评分例子，帮助用户理解“多少分对应什么处理”。
+   - 示例只是说明，不参与运行。
+
+默认提示词应内置评分要求，而不是只说“判断是否重要”。示例：
+
+```text
+你是 ContextOS 的工具输出信息价值评估器。你的任务不是决定是否恢复全文，
+而是判断该 Output 在压缩交接中应该保留到什么程度。
+
+请根据以下维度给出 0.0 到 1.0 的 score：
+- 是否包含用户目标、关键决定、未完成事项或恢复上下文。
+- 是否包含错误、失败、测试结果、编译结果、异常堆栈或修复证据。
+- 是否包含文件路径、代码修改、patch、命令输出、版本/环境信息。
+- 是否只是成功退出、空轮询、重复列表、长源码全文或完整说明文档。
+
+评分含义：
+- 0.00-0.25：删除。没有接手价值，或机械结果仍然偏冗余。
+- 0.25-0.45：极简占位。只需要标题、工具名、字符数和一句理由。
+- 0.45-0.60：机械裁剪。机械压缩结果已经足够。
+- 0.60-0.78：关键证据。需要保留错误行、路径、命令、结论或少量关键片段。
+- 0.78-0.92：扩展片段。需要更长 head/tail 或多个相关片段，但不需要全文。
+- 0.92-1.00：近全文。只有当全文本身就是关键证据且无法可靠摘要时使用。
+
+请返回 JSON：
+{"score":0.0,"reason":"简短理由","evidence_hints":["需要保留的关键词或片段"]}
+```
+
+评分等级表默认值：
 
 默认评分等级：
 
