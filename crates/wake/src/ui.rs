@@ -1,0 +1,323 @@
+//! ContextOS 界面尺度规范——六档字阶。
+//! 规则:所有 UI 字号必须引用本模块常量,禁止裸 px 数字与 rem 工具类
+//! (text_sm 等按 rem=14px 折算会产生 12.25px 这类幽灵值)。
+//! 颜色只用三级:foreground(主文字)/muted_foreground(辅助)/primary(强调)。
+use std::collections::HashSet;
+
+use gpui::{
+    div, px, AnyElement, App, Div, Global, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    Pixels, Styled, Window, WindowId,
+};
+use gpui_component::{
+    button::Button, dialog::Dialog, h_flex, ActiveTheme as _, Root, Sizable as _, WindowExt as _,
+};
+
+/// 产品展示名（About）——medium
+pub const FONT_DISPLAY: Pixels = px(28.);
+/// 上下文大标题(中栏头部)——semibold
+pub const FONT_TITLE: Pixels = px(22.);
+/// 区块标题(详情页会话标题)——semibold
+pub const FONT_HEADING: Pixels = px(16.);
+/// 界面正文(导航行/列表标题/按钮/输入);列表标题用 medium
+pub const FONT_BODY: Pixels = px(14.);
+/// 辅助说明(列表副行/元信息/占位/空态提示/侧栏子级行)
+pub const FONT_CAPTION: Pixels = px(12.);
+/// 标签(分组头/计数/快捷键徽标/状态栏);组头 semibold + 大写
+pub const FONT_LABEL: Pixels = px(11.);
+
+// ---- 对话区附档(详情逐消息渲染,经用户逐轮校准,与六档并存)----
+
+/// 用户气泡正文(比 FONT_BODY 收半档,气泡内更紧凑)
+pub const FONT_MSG_USER: Pixels = px(13.5);
+/// 助手平铺正文
+pub const FONT_MSG_BODY: Pixels = px(13.);
+/// thinking 摘要行(斜体)
+pub const FONT_MSG_THINKING: Pixels = px(11.5);
+
+// ---------------- 平台文案 ----------------
+// 同一处 UI 在不同平台叫不同名字/键(Finder vs File Explorer vs 文件管理器、
+// ⌘ vs Ctrl),文案走这里的函数,别在 render 里散落字面量。名词与 wake-core
+// terminal 的平台实现对应:macos=Finder,windows=资源管理器官方英文名
+// File Explorer。这里用 `#[cfg]` 而非别处惯用的 `cfg!` 表达式:展开物只是
+// `concat!` 出的字面量与同形函数体,没有会在另一平台上失配的类型。
+//
+// 两个宏的形状相同:给一个平台名词 → `concat!` 派生若干**整句** key(整句
+// 即英文文案本身),并直接 emit 取用函数。中间不留 const:那层只是把字面量
+// 从宏内递到宏外,而 `t()` 要到运行时才知道译文,常量存不下它。
+//
+// 整句而非「动词 + {名词}」是有意的——zh-Hans 包里三条 "Show in …" 各自带着
+// 平台正确的中文产品名(访达 / 文件资源管理器 / 文件管理器),名词替换式的
+// 设计产不出这个。
+
+/// 文件管理器的平台名(macos=Finder,windows=官方英文名 File Explorer)
+macro_rules! file_manager_copy {
+    ($app:literal) => {
+        /// 详情页 / 设置页的「在文件管理器中显示」
+        pub fn show_in_fm() -> &'static str {
+            crate::i18n::t(concat!("Show in ", $app))
+        }
+        /// 更多菜单里的同一动作(措辞不同,是两条 key)
+        pub fn reveal_in_fm() -> &'static str {
+            crate::i18n::t(concat!("Reveal in ", $app))
+        }
+    };
+}
+#[cfg(target_os = "macos")]
+file_manager_copy!("Finder");
+#[cfg(target_os = "windows")]
+file_manager_copy!("File Explorer");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+file_manager_copy!("File Manager");
+
+// 系统回收站的平台名词(macOS 与 freedesktop 都叫 Trash,Windows 是
+// Recycle Bin)与由它派生的删除文案。名词只写一次、整句由 concat!
+// 拼出:各处分别手写 cfg! 链的话,没有任何东西能拦住它们说不同的词
+// ——与 wake-core 各平台 trash_existing 的失败文案也得是同一个词。
+//
+// 确认框内容活在 **dialog builder 闭包**里、对话框开着时每帧重跑,`t()` 是
+// 一次哈希查表,和从前读常量一样不分配。
+macro_rules! trash_copy {
+    ($noun:literal, $body:literal) => {
+        /// 删除确认框主按钮 / 更多菜单项
+        pub fn move_to_trash() -> &'static str {
+            crate::i18n::t(concat!("Move to ", $noun))
+        }
+        // 删除成功的通知。单/复数两支都返回 **key** 而非译文:调用点用
+        // `i18n::tp` 按条数选支,选支这一步必须发生在查表之前
+        pub fn session_trashed_key() -> &'static str {
+            concat!("Session moved to ", $noun)
+        }
+        pub fn sessions_trashed_key() -> &'static str {
+            concat!("{} sessions moved to ", $noun)
+        }
+        /// 确认框正文里嵌的名词(冠词随名词变,故与 $noun 分开)
+        pub fn trash_body() -> &'static str {
+            crate::i18n::t($body)
+        }
+        /// 批量清理确认的恢复方式与空间回收条件。
+        pub fn cleanup_trash_hint() -> &'static str {
+            crate::i18n::t(concat!(
+                "You can restore files from ",
+                $body,
+                ". Space is freed after emptying it."
+            ))
+        }
+        /// 删除确认框正文首句
+        pub fn trash_confirm_body() -> &'static str {
+            crate::i18n::t(concat!(
+                "The session file will be moved to ",
+                $body,
+                ". You can restore it anytime:"
+            ))
+        }
+    };
+}
+#[cfg(target_os = "windows")]
+trash_copy!("Recycle Bin", "the Recycle Bin");
+#[cfg(not(target_os = "windows"))]
+trash_copy!("Trash", "Trash");
+
+/// ⌘K 面板的唯一绑定串——main.rs 的 bind_keys 与下方徽标同源,改键只动这里
+pub const SEARCH_KEYSTROKE: &str = "secondary-k";
+
+/// 搜索快捷键徽标,从真实绑定串派生("⌘K"/"Ctrl+K"——secondary→平台键
+/// 与显示形制都由 gpui/Kbd 持有,这里零平台知识)
+pub fn search_key_hint() -> &'static str {
+    use std::sync::OnceLock;
+    static HINT: OnceLock<String> = OnceLock::new();
+    HINT.get_or_init(|| {
+        let key = gpui::Keystroke::parse(SEARCH_KEYSTROKE).expect("SEARCH_KEYSTROKE parses");
+        gpui_component::kbd::Kbd::format(&key)
+    })
+}
+
+// ---------------- 间距与结构 ----------------
+// 间距刻度:4px 网格。新代码一律引用常量或显式 px();
+// 注意 gpui 的 rem 间距类有幽灵值(rem=14px 下 p_2p5=8.75px、p_3=10.5px,
+// 均不在网格上)——对齐敏感处禁止使用,存量逐步迁移。
+
+pub const SPACE_XS: Pixels = px(4.);
+pub const SPACE_SM: Pixels = px(8.);
+pub const SPACE_MD: Pixels = px(12.);
+pub const SPACE_LG: Pixels = px(16.);
+pub const SPACE_XL: Pixels = px(20.);
+pub const SPACE_XXL: Pixels = px(24.);
+
+/// 图标 / 品牌图与紧随其后的文字之间的间距——全应用只此一个值(侧栏行与组头、列表
+/// 元信息行、详情与阅读面头部及元信息行、⌘K 结果、Insights 榜单、Open In 菜单、状态行、
+/// 设置页与清理页的行)。用户 2026-09-22 定统一:原先 4 / 6 / 7 / 8 / 12 各处不一。
+/// 不在 4px 网格上是有意的——品牌 PNG 没有留白,8px 显得空、4px 又贴;lucide 线条图标
+/// 自带约 1.5px 留白,6px 几何间距视觉上约 7.5px。卡片级的 24px 头像不在此列
+pub const ICON_TEXT_GAP: Pixels = px(6.);
+
+/// 侧栏容器水平内边距(行的 hover/选中胶囊左右各留这么多)。
+pub const SIDEBAR_EDGE: Pixels = px(10.);
+
+// ---- 侧栏中轴:LEAD_AXIS = 26.75 ----
+// traffic light 实测左缘 20、直径 13.5,中心即 26.75。侧栏每一行的行首元素
+// (导航图标、品牌图、文件夹图标、组头的折叠 chevron)的**中心**都压在这条竖线上。
+// 注意:中心对齐与左缘对齐是同一个自由度,只能满足一个——选了中心,
+// 图标左缘就会落在 17.75,比红灯左缘还靠左 2.25,这是预期而非错位。
+// 两个内边距(LEAD_INSET / TITLE_INSET)是同一条轴推出来的,改一个必须重算另一个。
+
+/// 行首槽位:取最大前导元素(品牌图 18px)的尺寸;槽位内**居中**,
+/// 于是 14/15px 的小图标中心也落在轴上。
+pub const LEAD_BOX: Pixels = px(18.);
+/// 侧栏导航行的线条图标边长(品牌图占满 18px 槽位,线条图标比实心品牌图视觉轻,小一档
+/// 才平衡);组头的折叠 chevron 同一档,描边粗细才一致
+pub const NAV_ICON: Pixels = px(15.);
+/// 行左内边距 = 26.75(轴) − 9(槽位半宽) − 10(SIDEBAR_EDGE,容器那一半)
+pub const LEAD_INSET: Pixels = px(7.75);
+/// 分组项(agent/项目)相对轴的右缩进,表达从属。
+/// 压轴的只有主导航行与组头;分组项一律偏这么多。
+pub const SUB_INDENT: Pixels = px(12.);
+// 组头(Agents / Projects)没有自己的内边距常量:NAV_ICON 的 chevron 按自己的框居中压轴
+//(见 workbench.rs group_header);靠首字母字形宽度反推的 GROUP_HEAD_INSET 已删(2026-09-22)。
+/// 侧栏标题 "ContextOS" 的左内边距:与上方 traffic light 同法,让首字母 的字形中心落在轴上(换名不重调,留着这个约束本身)。
+/// 实测 16px semibold 的 W 宽 14.25、左承距 0.5,文字左缘需 19.65;
+/// 减去容器的 SIDEBAR_EDGE 得 9.15,取 9.0(2x 屏下 0.5px 以下的差会被光栅化吃掉)。
+pub const TITLE_INSET: Pixels = px(9.);
+/// 侧栏主导航行高(固定区:All Sessions/Starred;搜索框同高)
+pub const ROW_HEIGHT: Pixels = px(32.);
+/// 侧栏子级行高(分组展开项:agent/项目)——比主导航低一级,
+/// 配 FONT_CAPTION 形成侧栏纵向层级(macOS 原生侧栏惯例)
+pub const ROW_HEIGHT_SUB: Pixels = px(26.);
+
+/// 侧栏搜索入口与局部搜索输入共用的外壳；文字输入本身不再叠加组件默认边框。
+pub fn search_field_frame(cx: &App) -> Div {
+    let theme = cx.theme();
+    h_flex()
+        .h(ROW_HEIGHT)
+        .px(SIDEBAR_EDGE)
+        .gap(SPACE_SM)
+        .rounded(theme.radius)
+        .bg(theme.secondary)
+        .text_size(FONT_CAPTION)
+        .text_color(theme.muted_foreground)
+        .hover(|s| {
+            s.bg(theme.secondary_hover)
+                .text_colored(theme.foreground, FONT_CAPTION)
+        })
+}
+
+// ---------------- 圆角 ----------------
+// 四档见 DESIGN.md:面板 12 = `theme.radius_lg`,列表与侧栏选择 8 = `theme.radius`
+// (这两档走主题 token),其余三档无 token,在此定名以免散成魔法数字。
+/// 按钮圆角。**用户钉死 6px,勿改**
+pub const RADIUS_BUTTON: Pixels = px(6.);
+
+/// Page and dialog actions use fixed pixels; the library's rem-based Small
+/// preset becomes 21px at ContextOS's 14px rem size and crowds mixed-size footers.
+/// Normalize the inner label/icon/gap too: Button renders those in a nested
+/// element, so setting the outer text_size alone does not override its size preset.
+pub fn action_button(button: Button) -> Button {
+    button
+        .small()
+        .h(BUTTON_ACTION_H)
+        .px(SPACE_MD)
+        .text_size(FONT_CAPTION)
+        .rounded(RADIUS_BUTTON)
+}
+
+/// 快捷键标签
+pub const RADIUS_KBD: Pixels = px(5.);
+/// 小胶囊 badge(项目名 / model / source / 各处计数共用)
+pub const RADIUS_BADGE: Pixels = px(4.);
+/// 对话正文内联图片缩略图。
+pub const IMAGE_THUMB: Pixels = px(104.);
+pub const RADIUS_IMAGE: Pixels = px(10.);
+pub const IMAGE_SCRIM: f32 = 0.62;
+/// 数据可视化小色块(热力图、分布柱、图例)，统一保持方格读数感。
+pub const RADIUS_CELL: Pixels = px(2.);
+
+// ---------------- 组件度量派生 ----------------
+
+/// gpui-component `Size::Small` 按钮的水平内边距(px_3 @ rem14 = 10.5)。
+/// location 表单的"内容轴"对齐从它派生——组件升级或 rem 基准变更先核此值
+pub const BUTTON_SM_PX: Pixels = px(10.5);
+/// gpui-component `Size::Small` 按钮高度(h_6 = 24),手排胶囊钮取齐用
+pub const BUTTON_SM_H: Pixels = px(24.);
+/// 页面与确认框操作按钮的高度，避免与组件的 rem 尺寸混用。
+pub const BUTTON_ACTION_H: Pixels = px(32.);
+
+// ---------------- 交互态文字 ----------------
+
+/// gpui 陷阱兜底:`.hover()`/`.active()` 闭包的 text 样式对 base 是**整体替换**
+/// (`Style.text` 无 `#[refineable]`,refine 直接覆盖)——闭包里只改文字色会把
+/// base 的字号一并丢掉、回退窗口默认 14px。交互闭包内改文字色一律走本方法,
+/// 把该元素 base 的字号原样重申;禁止在 hover/active 里裸调 `text_color`
+/// (图标-only 元素除外:图标尺寸走 `with_size`,不受 text 替换影响)。
+pub trait TextColored: Styled + Sized {
+    fn text_colored(self, color: Hsla, size: Pixels) -> Self {
+        self.text_color(color).text_size(size)
+    }
+}
+
+impl<T: Styled + Sized> TextColored for T {}
+
+/// ContextOS 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
+pub const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
+
+// ---- 弹窗「点面板外关闭」补丁 ----
+//
+// gpui-component fd3bc2b 的 Dialog 把遮罩点击监听器挂在一个零高度的包装 div 上,永远
+// hover 不到,`overlay_closable` 形同虚设(上游 df1d07b2「Restore the overlay behind an
+// open dialog」已修;升级到含修复的版本后删掉本段,两个入口退化成 `window.open_dialog`
+// 与 Root 的两层 overlay)。
+//
+// 原理:在窗口根节点、`Root::render_dialog_layer` 之后再挂一层全窗透明 sentinel。dialog
+// 的宿主是 deferred、最后才画:遮罩是普通 hitbox 不挡鼠标,popup 是 occlude——于是鼠标
+// 落在 popup 之外时 sentinel 才 hovered,它的 mouse_down 就是「点在面板外」。该不该关由
+// 弹窗表态:经 `open_closable_dialog` 打开的弹窗每帧在 builder 里登记本窗口,
+// `overlay_layers` 渲染完 dialog 层(builder 就在里面跑)立刻消费这个登记来决定挂不挂
+// sentinel——AlertDialog、已关闭的弹窗没有登记,面板外点击不关。不像上游那样豁免标题栏
+// 高度:弹窗开着时整窗被它的 occlude 层挡住、标题栏本来就拖不动,而弹窗顶边只在窗口高度
+// 1/10 处,豁免带会把「框外上方」整段吞掉(2026-09-02 用户实测)。
+
+/// 本帧登记过「可点面板外关闭」弹窗的窗口,`overlay_layers` 消费即清
+#[derive(Default)]
+struct ClosableDialogs(HashSet<WindowId>);
+impl Global for ClosableDialogs {}
+
+/// 打开可点面板外关闭的普通弹窗(确认类用 gpui-component 的 `open_alert_dialog`);
+/// ContextOS 里不要再裸调 `window.open_dialog`
+pub fn open_closable_dialog<F>(window: &mut Window, cx: &mut App, build: F)
+where
+    F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
+{
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let id = window.window_handle().window_id();
+        cx.default_global::<ClosableDialogs>().0.insert(id);
+        build(dialog, window, cx)
+    });
+}
+
+/// 窗口根节点内容之后的三层 overlay:dialog、notification、点面板外关闭的 sentinel,
+/// 顺序即契约(sentinel 必须在 dialog 层之后,才能盖在它的 occlude 层上面)
+pub fn overlay_layers(window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    let dialogs = Root::render_dialog_layer(window, cx).map(IntoElement::into_any_element);
+    let notifications =
+        Root::render_notification_layer(window, cx).map(IntoElement::into_any_element);
+    let id = window.window_handle().window_id();
+    let sentinel = cx
+        .default_global::<ClosableDialogs>()
+        .0
+        .remove(&id)
+        .then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .on_any_mouse_down(|event, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    window.close_dialog(cx);
+                })
+                .into_any_element()
+        });
+    [dialogs, notifications, sentinel]
+        .into_iter()
+        .flatten()
+        .collect()
+}

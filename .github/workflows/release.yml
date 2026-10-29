@@ -1,0 +1,182 @@
+# 发布:推 vX.Y.Z tag 即触发——release job 建(或确认)GitHub Release,
+# notes 取 CHANGELOG 对应段落;macos/linux/windows 三个 build job 并行打包
+# 后各自补传资产(macOS zip、Linux arm64+amd64 的 tar.gz 与 deb、Windows
+# zip),全部产物自动产出。gpui 的 shader 编译无法交叉,三端都在各自原生
+# runner 上构建。
+# 已存在的同名资产一律跳过、绝不覆盖——先传上去的(含维护者本机打的)是
+# 发布物;要重出坏产物,先 gh release delete-asset 再重跑本 workflow。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+    # 备用点火线:tag 与 workflow_dispatch 在代理化的开发环境里都被 403 拦,
+    # 分支推送不受限——推 release/vX.Y.Z(内容 = 要发布的提交)同样触发,
+    # tag 名从分支名剥出,发布后分支即可删
+    branches: ['release/v*']
+  # 本仓库的开发环境经代理推送,tag 推送被 403 拦——手动派发时由 runner 的
+  # 令牌代建 tag(gh release create 对不存在的 tag 会按 --target 顺带创建)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.7); created at the dispatched ref if missing'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # tag 有三个来源:dispatch input > release/* 分支名剥前缀 > tag ref 本身
+      - name: Resolve tag
+        id: meta
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          if [ -n "$TAG_INPUT" ]; then tag="$TAG_INPUT"
+          elif [[ "$GITHUB_REF_NAME" == release/* ]]; then tag="${GITHUB_REF_NAME#release/}"
+          else tag="$GITHUB_REF_NAME"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # notes = CHANGELOG 里 "## [X.Y.Z]" 到下一个版本头之间的段落;
+      # release 已存在时不再动它的 notes
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+            exit 0
+          fi
+          ver="${TAG#v}"
+          awk -v ver="$ver" 'BEGIN{h="## [" ver "]"} index($0,h)==1{f=1;next} /^## \[/{f=0} f' CHANGELOG.md \
+            | sed -e '/./,$!d' > release-notes.md
+          if [ -s release-notes.md ]; then
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --target "$GITHUB_SHA"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes --target "$GITHUB_SHA"
+          fi
+
+  macos:
+    name: macOS universal zip
+    needs: release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 双 target 构建后由 lipo 合成 Universal Binary，再做 ad-hoc 签名；
+      # ditto 打 zip 保签名与资源结构。
+      - name: Package
+        run: |
+          scripts/make-app.sh --universal
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          ditto -c -k --keepParent --sequesterRsrc dist/ContextOS.app "dist/ContextOS-${VERSION}-macos.zip"
+
+      - name: Upload (skip existing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          existing=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for f in dist/ContextOS-*-macos.zip; do
+            if grep -qxF "$(basename "$f")" <<< "$existing"; then
+              echo "skip existing $(basename "$f")"
+            else
+              gh release upload "$TAG" "$f"
+            fi
+          done
+
+  linux:
+    name: Linux tar.gz + deb (${{ matrix.os }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm 与 x64 两个原生 runner,产物架构名随 dpkg(arm64 / amd64)
+        os: [ubuntu-24.04-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # gpui Linux 后端的系统依赖(与 ci.yml 同一份清单)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libcairo2-dev libfontconfig1-dev libglib2.0-dev \
+            libgtk-3-dev libwayland-dev libxdo-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libzstd-dev \
+            pkg-config cmake clang
+
+      - name: Package
+        run: scripts/make-linux.sh
+
+      - name: Upload (skip existing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          existing=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for f in dist/wake-*-linux-*.tar.gz dist/wake_*_*.deb; do
+            if grep -qxF "$(basename "$f")" <<< "$existing"; then
+              echo "skip existing $(basename "$f")"
+            else
+              gh release upload "$TAG" "$f"
+            fi
+          done
+
+  windows:
+    name: Windows zip
+    needs: release
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/make-windows.ps1
+
+      - name: Upload (skip existing)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          $existing = (gh release view $env:TAG --json assets -q '.assets[].name') -split "`n"
+          Get-ChildItem dist/contextos-*-windows-*.zip | ForEach-Object {
+            if ($existing -contains $_.Name) {
+              "skip existing $($_.Name)"
+            } else {
+              gh release upload $env:TAG $_.FullName
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }

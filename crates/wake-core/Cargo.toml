@@ -1,0 +1,68 @@
+[package]
+name = "wake-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+toml_edit = "0.22"
+toml = "0.8"
+rusqlite.workspace = true
+dirs.workspace = true
+walkdir.workspace = true
+ignore.workspace = true
+notify.workspace = true
+chrono.workspace = true
+zstd.workspace = true
+base64.workspace = true
+sha2 = "0.10"
+reqwest.workspace = true
+zip.workspace = true
+sysinfo = "0.31"
+tempfile = "3"
+
+# Linux 废纸篓:freedesktop Trash spec 的纯库实现
+# (macOS 走 Finder/osascript,行为已验证不动)
+[target.'cfg(target_os = "linux")'.dependencies]
+trash = "5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows 回收站(IFileOperation)。**必须** coinit_multithreaded:trash 默认
+# 的 apartmentthreaded 会在已是 MTA 的线程上让 CoInitializeEx 返回
+# RPC_E_CHANGED_MODE,而 trash 对此是 panic! 而非 Err——delete 跑在 gpui 的
+# background_spawn 上,其 Windows 派发器用 WinRT ThreadPool(worker 恒 MTA),
+# 于是"删除到回收站"必崩,且 panic 要穿过 extern "system" 的 WinRT 委托
+trash = { version = "5", default-features = false, features = ["coinit_multithreaded", "chrono"] }
+
+# Win32 原语:MessageBox 致命弹窗、CF_UNICODETEXT 剪贴板(clip.exe 按控制台
+# codepage 解码 stdin,非 ASCII 命令必乱,不走子进程管道)、进程创建旗标
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+
+[[bin]]
+name = "scan"
+path = "src/bin/scan.rs"
+
+# 只读 MCP server(stdio),随 Wake 一起打包、与主程序并排;见 src/mcp/
+[[bin]]
+name = "contextos-mcp"
+path = "src/bin/wake_mcp.rs"
+
+# 会话查询 CLI(只读),随 Wake 一起打包、与主程序并排;解析层见 src/cli.rs
+[[bin]]
+name = "contextos-cli"
+path = "src/bin/wake_cli.rs"

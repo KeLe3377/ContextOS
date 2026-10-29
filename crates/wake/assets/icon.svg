@@ -1,0 +1,51 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- 候选 B "Dawn":黎明日出(wake=醒来),水面波光倒影即航迹 -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="100" x2="0" y2="608" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0C1A34"/>
+      <stop offset="0.45" stop-color="#1F3C63"/>
+      <stop offset="0.75" stop-color="#8A5B5E"/>
+      <stop offset="0.92" stop-color="#E8935F"/>
+      <stop offset="1" stop-color="#FFB273"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="608" x2="0" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20406B"/>
+      <stop offset="1" stop-color="#0B1730"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFF0D0"/>
+      <stop offset="1" stop-color="#FFA95E"/>
+    </radialGradient>
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="185" ry="185"/>
+    </clipPath>
+    <clipPath id="skyclip">
+      <rect x="100" y="100" width="824" height="508"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="100" y="100" width="824" height="508" fill="url(#sky)"/>
+    <rect x="100" y="608" width="824" height="316" fill="url(#sea)"/>
+
+    <!-- 星 -->
+    <circle cx="300" cy="225" r="7" fill="#E8F0FF" fill-opacity="0.5"/>
+    <circle cx="702" cy="185" r="5" fill="#E8F0FF" fill-opacity="0.35"/>
+    <circle cx="592" cy="298" r="4" fill="#E8F0FF" fill-opacity="0.25"/>
+
+    <!-- 日出:光晕两层 + 本体半圆(clip 到天空) -->
+    <g clip-path="url(#skyclip)">
+      <circle cx="512" cy="608" r="210" fill="#FFAE6E" fill-opacity="0.20"/>
+      <circle cx="512" cy="608" r="150" fill="#FFC286" fill-opacity="0.22"/>
+      <circle cx="512" cy="608" r="105" fill="url(#sun)"/>
+    </g>
+
+    <!-- 水面波光:向下渐短渐隐的圆头横线(倒影航迹) -->
+    <g stroke="#FFB37E" stroke-linecap="round" fill="none">
+      <path d="M 362 668 L 662 668" stroke-width="26" stroke-opacity="0.8"/>
+      <path d="M 407 722 L 617 722" stroke-width="22" stroke-opacity="0.5"/>
+      <path d="M 442 772 L 582 772" stroke-width="18" stroke-opacity="0.3"/>
+      <path d="M 468 818 L 556 818" stroke-width="14" stroke-opacity="0.15"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test & build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # 格式门槛:rustfmt 漂移一次就红,不让它累积(2026-09-14 归零后加)
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Install Intel macOS target
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # gpui Linux 后端的系统依赖(Wayland/X11/字体/音频头文件)
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libcairo2-dev libfontconfig1-dev libglib2.0-dev \
+            libgtk-3-dev libwayland-dev libxdo-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libzstd-dev \
+            pkg-config cmake clang
+
+      # 数据层测试:adapter 解析契约 / seq 一致性 / db 往返 / 扫描终态
+      - name: Test wake-core
+        run: cargo test -p wake-core
+
+      # Exercise the real OS trash only with uniquely named synthetic fixtures.
+      # Normal local test runs do not touch the system trash.
+      - name: Test system trash round trip
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: cargo test -p wake-core --lib cleanup::tests::system_trash_cleanup_round_trip -- --ignored --exact
+
+      # UI crate 内不启动窗口的纯逻辑单测；联网测试标为 ignored
+      - name: Test app logic
+        run: cargo test -p wake
+
+      # GPUI 窗口层仍以三平台编译通过为门槛
+      - name: Build app
+        run: cargo build -p wake
+
+      - name: Build app for Intel macOS
+        if: runner.os == 'macOS'
+        run: cargo build -p wake --target x86_64-apple-darwin

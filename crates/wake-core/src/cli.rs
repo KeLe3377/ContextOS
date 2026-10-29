@@ -1,0 +1,1644 @@
+//! contextos-cli 的解析层:argv → 一次 MCP 工具调用。bin 只做 I/O 与退出码,有
+//! 判断的东西全在这里、可单测。文案恒英文(wake-core 不参与 i18n,别包 t())。
+//!
+//! **值一律原样当字符串塞进 JSON**:数字不解析、范围不裁剪、agent 名不认、
+//! since 文法不懂——`mcp::tools` 的 int_arg 认字符串、agents_arg 认逗号串,
+//! 校验与裁剪只此一家。同一个坏参数在 CLI 与 MCP 两条路上才会给出同一句话,
+//! 两条路的输出也才可能逐字节相同(tests/cli.rs 卡着)。
+//!
+//! COMMANDS 表与 `tools::definitions()` 必须双射,单测卡死:工具新增参数、
+//! 改名、改类型、加第五个工具,这个文件都会红。
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use crate::mcp::tools;
+use crate::models::AgentId;
+use crate::scanner::ScanProgress;
+use crate::services::terminal::sh_quote;
+
+// ---------------------------------------------------------------- 命令表
+
+/// 取值检查函数:出错时返回给用户看的整句
+pub type Validator = fn(&str) -> Result<(), String>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arity {
+    /// 取一个值,重复出现后来者覆盖
+    Value,
+    /// 可重复;最后以逗号串一次性写入(agents_arg 自己切分/trim/去重/校验)
+    Repeated,
+    /// 出现即 JSON true;**不出现就不写这个键**,让工具的默认值生效
+    Switch,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FlagSpec {
+    /// 含前导 `--`
+    pub long: &'static str,
+    /// MCP 工具的参数名,必须与 inputSchema 的 property 同名(单测卡)
+    pub key: &'static str,
+    pub arity: Arity,
+    /// 帮助里的值占位符;Switch 用 ""
+    pub placeholder: &'static str,
+    /// 帮助里的说明。**不写默认值/取值区间的数字**——那些由 definitions() 现渲染
+    pub help: &'static str,
+    /// 取值检查。**CLI 仅有的值语义只能长在这里**:别在 parse 里按 key 名写
+    /// `if`,那样这张表就不再是 CLI 表面的完整描述,加第二条时没有东西会红
+    pub validate: Option<Validator>,
+}
+
+impl FlagSpec {
+    const fn new(
+        long: &'static str,
+        key: &'static str,
+        arity: Arity,
+        placeholder: &'static str,
+        help: &'static str,
+    ) -> Self {
+        Self {
+            long,
+            key,
+            arity,
+            placeholder,
+            help,
+            validate: None,
+        }
+    }
+
+    const fn validated(mut self, v: Validator) -> Self {
+        self.validate = Some(v);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommandSpec {
+    pub name: &'static str,
+    /// 恒取 tools 的常量、不写字面量——常量改名即编译错
+    pub tool: &'static str,
+    /// `sessions` / `memories` 无 operation 时保留旧查询；带 operation 时切到领域工具。
+    pub domain_tool: Option<&'static str>,
+    /// 位置参数的 (JSON 键, 占位符);None = 不收位置参数
+    pub positional: Option<(&'static str, &'static str)>,
+    pub flags: &'static [FlagSpec],
+    pub summary: &'static str,
+}
+
+/// 不走 `mcp::tools` 的子命令:不收位置参数、不收旗标,因此也不参与
+/// COMMANDS 与 `tools::definitions()` 的双射
+#[derive(Debug)]
+struct PlainSpec {
+    name: &'static str,
+    /// **`Action` 就在表里**——所以 parse 不必在末尾按名字再认一遍,加一行
+    /// 忘了配 match 这种事从此不存在(那是运行时 panic、退 101,而这个 bin
+    /// 的两处显眼设计 args_os 与 cli::emit 都是为了永不退 101)
+    action: Action,
+    summary: &'static str,
+}
+
+/// 加一个子命令只在这里加一行
+const PLAIN: &[PlainSpec] = &[
+    PlainSpec {
+        name: "setup",
+        action: Action::Setup,
+        summary: "print this binary's path and how to point an agent at it",
+    },
+    PlainSpec {
+        name: "index",
+        action: Action::Index,
+        summary: "build the index once, when ContextOS has never run here",
+    },
+    PlainSpec {
+        name: "context",
+        action: Action::Context,
+        summary: "show recent project sessions for a session-start hook",
+    },
+    PlainSpec {
+        name: "refresh-context",
+        action: Action::RefreshContext,
+        summary: "refresh the index, then print project context for a session-start hook",
+    },
+];
+
+const F_PROJECT: FlagSpec = FlagSpec::new(
+    "--project",
+    "project",
+    Arity::Value,
+    "PATH",
+    "one project: an absolute path (use \"$PWD\") or a project name",
+)
+.validated(check_project);
+const F_AGENT: FlagSpec = FlagSpec::new(
+    "--agent",
+    "agents",
+    Arity::Repeated,
+    "ID",
+    "only this agent; repeat the flag or comma-separate",
+);
+const F_SINCE: FlagSpec = FlagSpec::new(
+    "--since",
+    "since",
+    Arity::Value,
+    "WHEN",
+    "only what was updated at or after WHEN",
+);
+const F_LIMIT: FlagSpec = FlagSpec::new(
+    "--limit",
+    "limit",
+    Arity::Value,
+    "N",
+    "maximum rows to return",
+);
+const F_STARRED: FlagSpec = FlagSpec::new(
+    "--starred",
+    "starred",
+    Arity::Switch,
+    "",
+    "only sessions starred in ContextOS",
+);
+const F_FROM: FlagSpec = FlagSpec::new(
+    "--from",
+    "from_seq",
+    Arity::Value,
+    "SEQ",
+    "start at this message seq (a wake://…#N reference sets it too)",
+);
+const F_MESSAGES: FlagSpec = FlagSpec::new(
+    "--messages",
+    "max_messages",
+    Arity::Value,
+    "N",
+    "messages per page",
+);
+const F_CHARS: FlagSpec = FlagSpec::new(
+    "--chars",
+    "max_chars",
+    Arity::Value,
+    "N",
+    "character budget for the page",
+);
+const F_MESSAGE_CHARS: FlagSpec = FlagSpec::new(
+    "--message-chars",
+    "max_message_chars",
+    Arity::Value,
+    "N",
+    "truncate each message to this many characters",
+);
+const F_MAX_CHARS: FlagSpec = FlagSpec::new(
+    "--max-chars",
+    "max_chars",
+    Arity::Value,
+    "N",
+    "maximum snapshot characters to print",
+);
+const F_TOOLS: FlagSpec = FlagSpec::new(
+    "--tools",
+    "include_tools",
+    Arity::Switch,
+    "",
+    "include tool inputs and outputs",
+);
+const F_THINKING: FlagSpec = FlagSpec::new(
+    "--thinking",
+    "include_thinking",
+    Arity::Switch,
+    "",
+    "include the assistant's thinking where the agent recorded it",
+);
+const F_SUBAGENT: FlagSpec = FlagSpec::new(
+    "--subagent",
+    "subagent",
+    Arity::Value,
+    "ID",
+    "read this subagent transcript instead of the main one (ids are listed at the end of the main transcript)",
+);
+
+const SEARCH_FLAGS: &[FlagSpec] = &[F_PROJECT, F_AGENT, F_SINCE, F_LIMIT];
+const SESSIONS_FLAGS: &[FlagSpec] = &[F_PROJECT, F_AGENT, F_SINCE, F_LIMIT, F_STARRED];
+const SHOW_FLAGS: &[FlagSpec] = &[
+    F_FROM,
+    F_MESSAGES,
+    F_CHARS,
+    F_MESSAGE_CHARS,
+    F_TOOLS,
+    F_THINKING,
+    F_SUBAGENT,
+];
+const WORKSPACE_CHANGES_FLAGS: &[FlagSpec] = &[F_PROJECT, F_SINCE, F_LIMIT];
+const WORKSPACE_CHANGE_FLAGS: &[FlagSpec] = &[F_MAX_CHARS];
+const PROJECTS_FLAGS: &[FlagSpec] = &[F_SINCE, F_LIMIT];
+const MEMORIES_FLAGS: &[FlagSpec] = &[F_PROJECT, F_AGENT, F_LIMIT];
+const LAYA_FLAGS: &[FlagSpec] = &[FlagSpec::new(
+    "--delete-models",
+    "delete_models",
+    Arity::Switch,
+    "",
+    "for uninstall, also remove the downloaded model cache",
+)];
+
+/// 子命令与 MCP 工具一一对应。加一家工具就在这里加一行,否则单测红
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "search",
+        tool: tools::SEARCH,
+        domain_tool: None,
+        positional: Some(("query", "QUERY")),
+        flags: SEARCH_FLAGS,
+        summary: "search transcripts across every indexed session",
+    },
+    CommandSpec {
+        name: "sessions",
+        tool: tools::LIST_SESSIONS,
+        domain_tool: Some(tools::SESSIONS),
+        positional: Some(("operation", "OPERATION")),
+        flags: SESSIONS_FLAGS,
+        summary: "list the most recently updated sessions",
+    },
+    CommandSpec {
+        name: "show",
+        tool: tools::GET_SESSION,
+        domain_tool: None,
+        positional: Some(("key", "KEY")),
+        flags: SHOW_FLAGS,
+        summary: "print one transcript as compact Markdown",
+    },
+    CommandSpec {
+        name: "projects",
+        tool: tools::LIST_PROJECTS,
+        domain_tool: None,
+        positional: None,
+        flags: PROJECTS_FLAGS,
+        summary: "list projects that have session history",
+    },
+    CommandSpec {
+        name: "memories",
+        tool: tools::LIST_MEMORIES,
+        domain_tool: Some(tools::MEMORIES),
+        positional: Some(("operation", "OPERATION")),
+        flags: MEMORIES_FLAGS,
+        summary: "list the memory files agents keep, grouped by project",
+    },
+    CommandSpec {
+        name: "workspace-changes",
+        tool: tools::LIST_WORKSPACE_CHANGES,
+        domain_tool: None,
+        positional: None,
+        flags: WORKSPACE_CHANGES_FLAGS,
+        summary: "list changes observed in monitored workspaces",
+    },
+    CommandSpec {
+        name: "workspace-change",
+        tool: tools::GET_WORKSPACE_CHANGE,
+        domain_tool: None,
+        positional: Some(("id", "ID")),
+        flags: WORKSPACE_CHANGE_FLAGS,
+        summary: "read one monitored workspace change and its snapshots",
+    },
+    CommandSpec {
+        name: "workspace-delete-change",
+        tool: tools::DELETE_WORKSPACE_CHANGE,
+        domain_tool: None,
+        positional: Some(("id", "ID")),
+        flags: &[],
+        summary: "delete one monitored workspace change and unreferenced snapshots",
+    },
+    CommandSpec {
+        name: "settings",
+        tool: tools::SETTINGS,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "read or update ContextOS business settings",
+    },
+    CommandSpec {
+        name: "relations",
+        tool: tools::RELATIONS,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "list or manage manual session relationships",
+    },
+    CommandSpec {
+        name: "compression",
+        tool: tools::COMPRESSION,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "compress sessions or manage derived documents",
+    },
+    CommandSpec {
+        name: "data-sources",
+        tool: tools::DATA_SOURCES,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "manage local session and memory sources",
+    },
+    CommandSpec {
+        name: "laya",
+        tool: tools::LAYA,
+        domain_tool: Some(tools::LAYA),
+        positional: Some(("operation", "OPERATION")),
+        flags: LAYA_FLAGS,
+        summary: "inspect or control the managed Laya runtime",
+    },
+];
+
+// ---------------------------------------------------------------- 类型
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    Help,
+    Version,
+    Setup,
+    /// 从零建一次索引。**只在索引不存在时**——已存在的库归 GUI 管
+    Index,
+    /// 新会话启动时输出当前项目最近会话及其压缩文档位置
+    Context,
+    /// SessionStart 专用:先增量刷新,再输出上下文
+    RefreshContext,
+    /// 一次工具调用。`args` **恒为 JSON object**——mcp/mod.rs 那道
+    /// `arguments` 形状检查在这条路上不可达,别再补一遍
+    Tool {
+        tool: &'static str,
+        args: Value,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Invocation {
+    /// `--db`;None = `db::default_db_path()`(由 bin 惰性求值)
+    pub db: Option<PathBuf>,
+    pub action: Action,
+}
+
+/// 已经是给人看的整句(小写开头、不带 `contextos-cli: ` 前缀)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliError {
+    pub message: String,
+    /// 命令级的错(没给命令 / 命令不认识 / 选项不认识 / 位置参数缺或多)附短
+    /// USAGE;"这个选项缺值"一类本身已完整,不附——MCP 直调的这处不对称
+    /// 是有意的,别顺手抹平
+    pub with_usage: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub stream: Stream,
+    pub text: String,
+    pub code: u8,
+}
+
+impl CliError {
+    pub fn report(&self) -> Report {
+        let mut text = format!("contextos-cli: {}", self.message);
+        if self.with_usage {
+            text.push_str("\n\n");
+            text.push_str(USAGE);
+        }
+        Report {
+            stream: Stream::Stderr,
+            text,
+            code: 2,
+        }
+    }
+}
+
+/// 结果 → 写哪条流、什么退出码。CLI **唯一**的这份映射:工具调用与 `index`
+/// 都从这里收场,别在 bin 里另写一个 `fail()`。三个变体全列、不写 `_`:
+/// ToolError 加变体时这里编译不过,正是要的
+pub fn report(result: Result<String, tools::ToolError>) -> Report {
+    match result {
+        Ok(text) => Report {
+            stream: Stream::Stdout,
+            text,
+            code: 0,
+        },
+        // 值不对就是命令行敲错了(--since/--limit/--agent 的值全交给 tools.rs
+        // 校验),与 "unknown option" 同一类,退 2。`contextos-mcp call` 把它压成 1
+        // 是因为那条路过 JSON-RPC 信封、分类由 payload 携带,退出码不是通道
+        Err(tools::ToolError::InvalidParams(m)) => Report {
+            stream: Stream::Stderr,
+            text: format!("contextos-cli: {m}"),
+            code: 2,
+        },
+        // Failed = 这份会话读不出来;Internal = 库在但查询炸了(索引损坏 /
+        // schema 漂移)。对用户是同一件事:跑起来了,然后失败
+        Err(tools::ToolError::Failed(m) | tools::ToolError::Internal(m)) => Report {
+            stream: Stream::Stderr,
+            text: format!("contextos-cli: {m}"),
+            code: 1,
+        },
+    }
+}
+
+/// 文本写出去:末尾没换行就补一个(search/sessions/projects 收在 index_note
+/// 上、无换行,get_session 自带),除此之外一个字节不加不减。**必须 flush**:
+/// BrokenPipe 常常只在 flush 时才浮出来,而 Stdout 的析构会把错误吞掉
+pub fn emit(text: &str, out: &mut impl Write) -> std::io::Result<()> {
+    out.write_all(text.as_bytes())?;
+    if !text.ends_with('\n') {
+        out.write_all(b"\n")?;
+    }
+    out.flush()
+}
+
+/// `contextos-cli index` 在终端上的进度行:同一行 `\r` 原地刷新,终态**只补一个换行**。
+/// 不在这里宣布 "Indexed …"——那句由 bin 用库里查出来的会话数在 stdout 说,进度
+/// 只知道文件数(墓碑/解析失败的文件也计 done),两个数字并排只会互相打架;而且
+/// 扫描收尾(parent_links / backfill)出错时 done 已经等于 total,先打一行成功再
+/// 跟一行错误是撒谎。总数未知的首帧只写 "Indexing…"。写到哪条流、写不写由调用方
+/// 定(bin 只在 stderr 是 TTY 时调);行只会变长(总数定了、done 单调增),不必补空格
+pub fn progress_line(p: &ScanProgress, out: &mut impl Write) -> std::io::Result<()> {
+    match (p.scanning, p.total) {
+        (true, 0) => write!(out, "\rIndexing…"),
+        (true, total) => write!(out, "\rIndexing {}/{total}…", p.done),
+        (false, _) => writeln!(out),
+    }
+}
+
+// ---------------------------------------------------------------- 解析
+
+fn err(message: String, with_usage: bool) -> CliError {
+    CliError {
+        message,
+        with_usage,
+    }
+}
+
+/// 缺值的错**不附 USAGE**(与 contextos-mcp 的 `--db needs a path` 同款)
+fn next_value(it: &mut std::slice::Iter<'_, String>, msg: &str) -> Result<String, CliError> {
+    it.next()
+        .cloned()
+        .ok_or_else(|| err(msg.to_string(), false))
+}
+
+/// 这个 long 归哪些命令(给 "只对 sessions 有效" / "要放在命令之后" 用)
+fn flag_owners(long: &str) -> Vec<&'static str> {
+    COMMANDS
+        .iter()
+        .filter(|c| c.flags.iter().any(|f| f.long == long))
+        .map(|c| c.name)
+        .collect()
+}
+
+/// 旗标放错地方或根本不认识——三句话一个出口,免得两处各写一遍 "unknown
+/// option" 然后各自漂
+fn misplaced(name: &str, in_command: bool) -> CliError {
+    let owners = flag_owners(name);
+    let msg = match (owners.is_empty(), in_command) {
+        (true, _) => format!("unknown option {name}"),
+        (false, false) => format!("{name} must come after the command"),
+        (false, true) => format!("{name} is only valid for `{}`", owners.join("` and `")),
+    };
+    err(msg, true)
+}
+
+/// CLI 仅有的取值检查(挂在 F_PROJECT 上,不是按 key 名的 if):`--project .`
+/// 在 tools 那边不算路径(见 context.rs 的 looks_like_path),会静默降级成项目
+/// 名匹配、报 "No indexed project matches `.`"。相对路径这边也解不对(符号链
+/// 接下 getcwd 与 $PWD 不是一回事),干脆直说,别猜
+fn check_project(v: &str) -> Result<(), String> {
+    let head = v.trim().split(std::path::is_separator).next().unwrap_or("");
+    if head == "." || head == ".." {
+        return Err("--project needs an absolute path or a project name; \
+                    pass --project \"$PWD\" for the current directory"
+            .into());
+    }
+    Ok(())
+}
+
+/// 解析途中已经认出的东西。三态一个枚举——`Option<&CommandSpec>` 加一个
+/// `setup: bool` 能拼出第四种不该存在的状态,于是每个分支都要自证不可达
+#[derive(Clone, Copy)]
+enum Seen {
+    Nothing,
+    /// PLAIN 表里的子命令。与下面一行同形:**存表行、不存名字**,下游就不必
+    /// 再认一遍(`&'static` 引用恒 Copy,`Action` 不 Copy 不碍事)
+    Plain(&'static PlainSpec),
+    Command(&'static CommandSpec),
+}
+
+/// argv(**不含** argv[0])→ 一次调用。纯函数:不读环境、不碰文件系统、不
+/// exit。contextos-mcp 在 parse_args 里直接 process::exit(0) 处理 --help /
+/// --version,那样这两条路没法单测,这里改成返回 Action
+pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
+    let mut db: Option<PathBuf> = None;
+    let mut input: Option<String> = None;
+    let mut seen = Seen::Nothing;
+    let mut map = Map::new();
+    let mut positional: Option<String> = None;
+    let mut only_positional = false; // `--` 之后
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        let s = a.as_str();
+        if !only_positional {
+            // 1) 全局:位置无关,与 contextos-mcp 同形。--db 后面那个词恒被吃掉
+            //    (`--db --help` 把 --help 当路径),行为与 contextos-mcp 一致
+            if s == "--db" {
+                db = Some(PathBuf::from(next_value(&mut it, "--db needs a path")?));
+                continue;
+            }
+            if let Some(v) = s.strip_prefix("--db=") {
+                db = Some(PathBuf::from(v));
+                continue;
+            }
+            if s == "--input" {
+                input = Some(next_value(&mut it, "--input needs a path or -")?);
+                continue;
+            }
+            if let Some(v) = s.strip_prefix("--input=") {
+                input = Some(v.to_string());
+                continue;
+            }
+            if s == "--help" || s == "-h" {
+                return Ok(Invocation {
+                    db,
+                    action: Action::Help,
+                });
+            }
+            if s == "--version" || s == "-V" {
+                return Ok(Invocation {
+                    db,
+                    action: Action::Version,
+                });
+            }
+            if s == "--" {
+                only_positional = true;
+                continue;
+            }
+            if s.starts_with('-') && s != "-" {
+                let (name, inline) = match s.split_once('=') {
+                    Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+                    _ => (s, None),
+                };
+                // 2) 子命令 flag。命令还没出现 ⇒ 位置写反了,直说
+                let cmd = match seen {
+                    Seen::Command(c) => c,
+                    Seen::Plain(p) => {
+                        return Err(err(
+                            format!("{} takes no options (got {name})", p.name),
+                            true,
+                        ))
+                    }
+                    Seen::Nothing => return Err(misplaced(name, false)),
+                };
+                let Some(f) = cmd.flags.iter().find(|f| f.long == name) else {
+                    return Err(misplaced(name, true));
+                };
+                let v = match (f.arity, inline) {
+                    (Arity::Switch, Some(_)) => {
+                        return Err(err(format!("{name} takes no value"), true))
+                    }
+                    (Arity::Switch, None) => {
+                        map.insert(f.key.to_string(), Value::Bool(true));
+                        continue;
+                    }
+                    (_, Some(v)) => v,
+                    (_, None) => next_value(&mut it, &format!("{name} needs a value"))?,
+                };
+                if let Some(check) = f.validate {
+                    check(&v).map_err(|m| err(m, false))?;
+                }
+                if f.arity == Arity::Repeated {
+                    // 就地拼成逗号串:agents_arg 自己切分/trim/去重/校验,
+                    // `--agent a --agent b` 与 `--agent a,b` 于是同义
+                    if let Some(Value::String(prev)) = map.get_mut(f.key) {
+                        prev.push(',');
+                        prev.push_str(&v);
+                        continue;
+                    }
+                }
+                // 原样当字符串传,校验与裁剪交给 mcp::tools
+                map.insert(f.key.to_string(), Value::String(v));
+                continue;
+            }
+        }
+        // 3) 位置参数:第一个是命令名
+        match seen {
+            Seen::Nothing => {
+                seen = match PLAIN.iter().find(|p| p.name == s) {
+                    Some(p) => Seen::Plain(p),
+                    None => Seen::Command(
+                        COMMANDS
+                            .iter()
+                            .find(|c| c.name == s)
+                            .ok_or_else(|| err(format!("unknown command {s}"), true))?,
+                    ),
+                }
+            }
+            Seen::Plain(p) => {
+                return Err(err(
+                    format!("{} takes no arguments (got `{s}`)", p.name),
+                    true,
+                ))
+            }
+            Seen::Command(cmd) => {
+                let Some((_, ph)) = cmd.positional else {
+                    return Err(err(
+                        format!("{} takes no arguments (got `{s}`)", cmd.name),
+                        true,
+                    ));
+                };
+                if positional.is_some() {
+                    return Err(err(
+                        format!(
+                            "{} takes one {ph} — quote it: contextos-cli {} \"…\"",
+                            cmd.name, cmd.name
+                        ),
+                        true,
+                    ));
+                }
+                positional = Some(a.clone());
+            }
+        }
+    }
+    let cmd = match seen {
+        Seen::Plain(p) => {
+            return Ok(Invocation {
+                db,
+                action: p.action.clone(),
+            })
+        }
+        Seen::Nothing => return Err(err("needs a command".into(), true)),
+        Seen::Command(c) => c,
+    };
+    let mut tool = cmd.tool;
+    if let Some((key, ph)) = cmd.positional {
+        match positional {
+            Some(v) => {
+                map.insert(key.to_string(), Value::String(v));
+                if let Some(domain) = cmd.domain_tool {
+                    tool = domain;
+                }
+            }
+            None if cmd.domain_tool.is_some() => {}
+            None => return Err(err(format!("{} needs a {ph}", cmd.name), true)),
+        }
+    }
+    if let Some(input) = input {
+        if !crate::services::control::NAMES.contains(&tool) {
+            return Err(err(
+                "--input is only valid for domain operations".into(),
+                true,
+            ));
+        }
+        map.insert("_input".into(), Value::String(input));
+    }
+    Ok(Invocation {
+        db,
+        action: Action::Tool {
+            tool,
+            args: Value::Object(map),
+        },
+    })
+}
+
+// ---------------------------------------------------------------- 帮助
+
+/// 短用法:命令级错误后附在 stderr。全文另有 `help()`——把 50 行参考手册贴在
+/// "`--limit` needs a value" 后面是骚扰,所以拆成两份(单测卡这份的行数)
+const USAGE: &str = "contextos-cli — query your ContextOS session index from the terminal
+
+USAGE:
+  contextos-cli search QUERY [OPTIONS]
+  contextos-cli sessions [OPTIONS]
+  contextos-cli show KEY [OPTIONS]
+  contextos-cli projects [OPTIONS]
+  contextos-cli <domain> OPERATION [--input FILE|-]
+  contextos-cli setup
+  contextos-cli context
+  contextos-cli refresh-context
+  contextos-cli --help | --version
+
+Run `contextos-cli --help` for every option.";
+
+const HELP_HEAD: &str = "contextos-cli — query your ContextOS session index from the terminal
+
+ContextOS indexes every coding-agent session on this machine (Claude Code, Codex,
+Cursor, Gemini CLI and more). Domain operations can update the explicitly exposed
+business data; original conversation messages remain immutable.
+
+USAGE:
+  contextos-cli <command> [ARGS] [OPTIONS]
+
+COMMANDS:";
+
+const HELP_GLOBALS: &str = "
+GLOBAL OPTIONS:
+  --db PATH           index database (default: ContextOS's own, e.g. ~/Library/Application Support/ContextOS/contextos.db)
+  --input FILE|-      merge a domain request JSON object from a file or stdin
+  --help, -h          print this help
+  --version, -V       print the version
+  --                  treat everything after it as arguments, not options
+";
+
+const HELP_WHEN: &str = "
+WHEN:
+  Relative: 30m, 24h, 7d, 2w. Absolute: 2026-09-01, \"2026-09-01 09:30\",
+  2026-09-01T09:30:00Z. Date-times without a zone are read in local time.
+  Values outside a flag's range are clamped, not rejected.
+";
+
+const HELP_TAIL: &str = "
+KEYS AND REFERENCES:
+  A session key is <agent>:<id>, or <agent>:<host>:<id> for a session mirrored
+  from a remote host. `sessions` and `search` print the key of every session
+  they list; `search` also prints a reference under each snippet:
+
+      ref: wake://session/claude-code:1b2c…#42
+
+  Pass a reference to `show` and the page starts at that message.
+
+EXAMPLES:
+  contextos-cli sessions --project \"$PWD\" --limit 5
+  contextos-cli search \"useEffect(\" --project \"$PWD\" --since 7d
+  contextos-cli search \"rate limiter\" --agent codex --agent claude-code
+  contextos-cli show 'wake://session/claude-code:1b2c…#42' --tools
+  contextos-cli context
+  contextos-cli refresh-context
+  contextos-cli search -- --dry-run     # a query that starts with a dash
+
+EXIT CODES:
+  0  it ran — including \"no matches\" and \"no such project\"
+  1  the operation ran but failed; domain commands print a JSON error envelope
+  2  the command line was wrong, or the index is missing / unreadable / too old
+
+Original conversation messages are immutable. Delete operations move supported files to
+the OS trash; permanent deletion and recovery are not exposed. Full reference: docs/cli.md";
+
+/// 命令块与选项块的说明列起始列
+const CMD_COL: usize = 36;
+const OPT_COL: usize = 22;
+
+/// 左列补空格到 width,左列过长时至少留两格
+fn row(left: String, right: &str, width: usize) -> String {
+    let pad = width.saturating_sub(left.chars().count()).max(2);
+    format!("{left}{}{right}\n", " ".repeat(pad))
+}
+
+/// 某个工具参数的默认值与取值区间,现从 `tools::definitions()` 的 schema 取。
+/// 帮助文本里最容易烂掉的就是这些数字,渲染出来它们至少不会与 schema 各说各
+/// 话(schema 与 int_arg 调用点仍是两份,那是 tools.rs 自己的事)
+fn limits_of(defs: &[Value], tool: &str, key: &str) -> String {
+    let Some(p) = defs
+        .iter()
+        .find(|d| d["name"] == tool)
+        .and_then(|d| d["inputSchema"]["properties"].get(key))
+    else {
+        return String::new();
+    };
+    let mut bits = Vec::new();
+    if let Some(v) = p.get("default").filter(|v| v.is_number()) {
+        bits.push(format!("default {v}"));
+    }
+    // 上下界成对才写:from_seq 只有 minimum 0,"at least 0" 是废话
+    if let (Some(lo), Some(hi)) = (p.get("minimum"), p.get("maximum")) {
+        bits.push(format!("{lo}–{hi}"));
+    }
+    if bits.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", bits.join(", "))
+    }
+}
+
+/// 逗号分隔、缩进两格、贪心折到 76 列
+fn wrapped(items: &[&str], width: usize) -> String {
+    let mut out = String::new();
+    let mut line = String::from("  ");
+    for (i, it) in items.iter().enumerate() {
+        let piece = if i + 1 == items.len() {
+            it.to_string()
+        } else {
+            format!("{it},")
+        };
+        let len = line.chars().count();
+        if len > 2 {
+            if len + 1 + piece.chars().count() > width {
+                out.push_str(&line);
+                out.push('\n');
+                line = String::from("  ");
+            } else {
+                line.push(' ');
+            }
+        }
+        line.push_str(&piece);
+    }
+    out.push_str(&line);
+    out
+}
+
+/// `--help` 的全文。命令块、各命令的选项块、默认值上限与 agent 名全部由
+/// COMMANDS 表与 `tools::definitions()` / `AgentId::ALL` 渲染,静态散文只剩
+/// 不含事实的那几段
+pub fn help() -> String {
+    let defs = tools::definitions();
+    let mut out = String::from(HELP_HEAD);
+    out.push('\n');
+    for c in COMMANDS {
+        let arg = c
+            .positional
+            .map(|(_, ph)| format!(" {ph}"))
+            .unwrap_or_default();
+        out.push_str(&row(
+            format!("  contextos-cli {}{arg}", c.name),
+            c.summary,
+            CMD_COL,
+        ));
+    }
+    for p in PLAIN {
+        out.push_str(&row(
+            format!("  contextos-cli {}", p.name),
+            p.summary,
+            CMD_COL,
+        ));
+    }
+    out.push_str(HELP_GLOBALS);
+    for c in COMMANDS {
+        out.push_str(&format!("\n{} OPTIONS:\n", c.name));
+        for f in c.flags {
+            let left = if f.placeholder.is_empty() {
+                format!("  {}", f.long)
+            } else {
+                format!("  {} {}", f.long, f.placeholder)
+            };
+            let help = format!("{}{}", f.help, limits_of(&defs, c.tool, f.key));
+            out.push_str(&row(left, &help, OPT_COL));
+        }
+    }
+    out.push_str(HELP_WHEN);
+    let ids: Vec<&str> = AgentId::ALL.iter().map(|a| a.as_str()).collect();
+    out.push_str(&format!(
+        "\nAGENT IDS:\n{}\n  Display names (\"Claude Code\") and a few aliases work too.\n",
+        wrapped(&ids, 76)
+    ));
+    out.push_str(HELP_TAIL);
+    out
+}
+
+// ---------------------------------------------------------------- setup
+
+/// 贴进 CLAUDE.md / AGENTS.md 的那段——给不想装 skill、只想在一个项目里用的
+/// 人。与 skills/wake/SKILL.md 说的是同一件事,那份更全(找二进制、翻页、
+/// 退出码);这里只留最短的一版
+const AGENT_MEMO: &str =
+    "Earlier sessions with every coding agent on this machine are searchable with
+contextos-cli. Reach for it when the user asks about an earlier conversation, a past
+decision, why something was done a certain way, where previous work stopped, or
+whether an error has been seen before — git history does not hold that.
+
+    contextos-cli sessions --project \"$PWD\" --limit 10
+    contextos-cli search \"<terms>\" --project \"$PWD\"
+    contextos-cli show <key>
+    contextos-cli memories --project \"$PWD\"
+
+`sessions` and `search` print a key for every session; `search` also prints a
+`wake://session/<key>#<seq>` reference that `show` accepts. `memories` lists the
+notes agents keep for themselves about the project, each with a `wake://memory/…`
+reference `show` accepts. Always pass --project \"$PWD\" — without it every
+project on the machine is in scope. Everything is read-only.";
+
+/// 一行装好 skill。当前 ContextOS 尚未绑定公开 GitHub 仓库,所以给本地仓库
+/// 安装命令;Settings → Connect 的 Skill 卡展示的就是它,与 `contextos-cli setup`
+/// 同一个来源。
+pub const SKILL_INSTALL: &str =
+    "mkdir -p ~/.claude/skills && cp -R skills/contextos ~/.claude/skills/contextos";
+
+/// 把 CLI 放进 PATH 的那一条**可粘命令**,给 GUI 的 Copy 按钮用。与
+/// `contextos-cli setup` 打印的是同一个来源。返回 None 的两种情况都不该给按钮:
+/// 已经装在 `…/bin` 里(deb / tar)、以及 Windows——那边 path_hint 给的是
+/// "把这个目录加进 PATH" 的说明,不是能粘进终端跑的东西
+pub fn path_command(cli_bin: &Path) -> Option<String> {
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    path_hint(cli_bin)
+}
+
+/// 详情页 "Copy handoff" 复制的那段话:粘进另一家 agent 的输入框,它就知道去 ContextOS 读
+/// 这段会话——装了 MCP 的按 key 调 contextos_get_session,只会 shell 的跑 contextos-cli。
+/// 如果会话有项目路径,同时给出工作区改动查询,让下一个 agent 能直接查看当前项目的
+/// 文件变化;这只查询 ContextOS 的历史观察,不会读取或修改工作区文件。
+pub fn handoff_text(
+    key: &str,
+    title: &str,
+    project_path: Option<&str>,
+    cli_bin: Option<&Path>,
+) -> String {
+    let title = crate::text::one_line(title, 120);
+    let cli = cli_bin
+        .map(|p| sh_quote(&p.to_string_lossy()))
+        .unwrap_or_else(|| "contextos-cli".to_string());
+    let opener = if title.is_empty() {
+        "Continue from an earlier coding-agent session indexed by ContextOS.".to_string()
+    } else {
+        format!("Continue from an earlier coding-agent session indexed by ContextOS: \"{title}\"")
+    };
+    let workspace = project_path
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            let quoted = sh_quote(path);
+            format!(
+                "Workspace changes for this project (if it is monitored):\n\
+                 Use the contextos_list_workspace_changes MCP tool with project=\"{path}\",\n\
+                 or run:\n{cli} workspace-changes --project {quoted}\n",
+                path = path,
+                cli = cli,
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{opener}\nSession key: {key}\n\
+         Read it with the contextos_get_session MCP tool (key above), or from a shell:\n\
+         {cli} show {key}\n\
+         {workspace}"
+    )
+}
+
+/// `contextos-cli setup` 要说的事实(由 bin 查好传进来,函数本身仍是纯的)
+pub struct SetupFacts<'a> {
+    pub cli_bin: &'a Path,
+    /// 同目录的 contextos-mcp(存在才给)
+    pub mcp_bin: Option<&'a Path>,
+    pub db: &'a Path,
+    /// 库打不开的原因(`{e:#}`);能打开是 None
+    pub db_error: Option<String>,
+}
+
+/// 已经在 `…/bin` 里的(deb / tar 装法)不必再叫人 symlink,那是噪音;
+/// current_exe 失败时只剩个裸文件名,parent 为空,更不该打印自指的 ln
+fn path_hint(bin: &Path) -> Option<String> {
+    let dir = bin.parent().filter(|d| !d.as_os_str().is_empty())?;
+    if dir.file_name().is_some_and(|n| n == "bin") {
+        return None;
+    }
+    if cfg!(target_os = "windows") {
+        return Some(format!("Add this folder to PATH:\n\n{}", dir.display()));
+    }
+    let quoted = sh_quote(&bin.to_string_lossy());
+    Some(if cfg!(target_os = "macos") {
+        // 出厂 macOS 的 /usr/local/bin 是 root:wheel,而且可能压根不存在——
+        // 不带 sudo 的 ln 在干净机器上必然 Permission denied
+        format!("sudo mkdir -p /usr/local/bin && sudo ln -sf {quoted} /usr/local/bin/contextos-cli")
+    } else {
+        format!("mkdir -p ~/.local/bin && ln -sf {quoted} ~/.local/bin/contextos-cli")
+    })
+}
+
+/// `## {标题} — {怎么用这段}` 与 `contextos-mcp setup` 同形,两个 bin 的输出读起来
+/// 才是一家人
+pub fn setup_text(f: &SetupFacts<'_>) -> String {
+    let mut out = format!(
+        "contextos-cli binary: {}\nIndex database: {}\n",
+        f.cli_bin.display(),
+        f.db.display()
+    );
+    if let Some(hint) = path_hint(f.cli_bin) {
+        out.push_str(&format!(
+            "\n## Put it on your PATH — Run in a terminal\n\n{hint}\n"
+        ));
+    }
+    out.push_str(&format!(
+        "\n## Teach an agent to use it — Paste into the project's CLAUDE.md or AGENTS.md\n\n{AGENT_MEMO}\n"
+    ));
+    out.push_str(&format!(
+        "\n## Install it once for every project — Run in a terminal\n\n{SKILL_INSTALL}\n\n\
+         That adds the same guidance as a skill, so you do not have to paste it per\n\
+         project. Manual install: copy `skills/contextos/` from the repository into\n\
+         `~/.claude/skills/contextos/`.\n"
+    ));
+    for snippet in session_start_snippets(f.cli_bin) {
+        out.push_str(&snippet_section(
+            snippet.client,
+            &snippet,
+            "Merge this into the client's existing SessionStart hooks. It prints nothing when the project has no indexed sessions.",
+        ));
+    }
+    // 片段按 agent 认,不按下标——那个顺序是 Connect 页的事;hint 也用它自己
+    // 带的,两个 bin 的 setup 输出才真的同形
+    if let Some(snippet) = f.mcp_bin.and_then(|mcp| {
+        crate::mcp::setup_snippets(mcp)
+            .into_iter()
+            .find(|s| s.agent == AgentId::ClaudeCode)
+    }) {
+        out.push_str(&format!(
+            "\n## Tool-calling clients: prefer MCP — {}\n\n{}\n\n\
+             `contextos-mcp setup` prints the same for Codex and Cursor.\n",
+            snippet.hint, snippet.text
+        ));
+    }
+    out.push_str("\nFull reference: docs/cli.md\n");
+    if let Some(e) = &f.db_error {
+        out.push_str(&format!("\nNote: {e}\n"));
+    }
+    out
+}
+
+pub fn session_start_snippets(cli_bin: &Path) -> Vec<crate::mcp::SetupSnippet> {
+    let command = if cfg!(target_os = "windows") {
+        let exe = cli_bin.to_string_lossy().replace('\'', "''");
+        format!("powershell.exe -NoProfile -Command \"& '{exe}' refresh-context 2>$null; exit 0\"")
+    } else {
+        format!(
+            "{} refresh-context 2>/dev/null || true",
+            sh_quote(&cli_bin.to_string_lossy())
+        )
+    };
+    let json_command = serde_json::to_string(&command).unwrap_or_default();
+    let toml_command = json_command.clone();
+    vec![
+        crate::mcp::SetupSnippet {
+            client: "Claude Code session hook",
+            agent: AgentId::ClaudeCode,
+            hint: "Merge into ~/.claude/settings.json",
+            copy_label: "Copy config",
+            text: format!(
+                "{{\n  \"hooks\": {{\n    \"SessionStart\": [\n      {{\n        \"matcher\": \"startup|clear\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {json_command} }}]\n      }}\n    ]\n  }}\n}}"
+            ),
+        },
+        crate::mcp::SetupSnippet {
+            client: "Codex session hook",
+            agent: AgentId::Codex,
+            hint: "Add to ~/.codex/config.toml, then approve in /hooks",
+            copy_label: "Copy config",
+            text: format!(
+                "[[hooks.SessionStart]]\nmatcher = \"startup|clear\"\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = {toml_command}\ntimeout = 30"
+            ),
+        },
+    ]
+}
+
+fn snippet_section(client: &str, snippet: &crate::mcp::SetupSnippet, note: &str) -> String {
+    format!(
+        "\n## {client} — {}\n\n```text\n{}\n```\n\n{}\n",
+        snippet.hint, snippet.text, note
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 故意不给 CLI 子命令的工具(现在没有)。加工具时要么进 COMMANDS,要么
+    /// 在这里写明白为什么不进
+    const NOT_IN_CLI: &[&str] = &[];
+
+    /// 贴进 CLAUDE.md 的那段是 agent 唯一常驻的说明:记忆这一面(子命令与引用形态)
+    /// 得点到名,否则只读这段的 agent 不知道有它(2026-09-21 review)
+    #[test]
+    fn agent_memo_mentions_memories() {
+        assert!(AGENT_MEMO.contains("contextos-cli memories --project"));
+        assert!(AGENT_MEMO.contains("wake://memory/"));
+    }
+
+    fn p(a: &[&str]) -> Result<Invocation, CliError> {
+        parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    fn args_of(a: &[&str]) -> Value {
+        match p(a).expect("parses").action {
+            Action::Tool { args, .. } => args,
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+    }
+
+    fn message(a: &[&str]) -> String {
+        p(a).expect_err("should not parse").message
+    }
+
+    /// Copy handoff 的文本:key 出现两次(给 MCP 的与给 shell 的),CLI 路径按
+    /// POSIX 引号,标题折成一行;没标题就不留空引号,找不到 CLI 退裸名
+    #[test]
+    fn handoff_text_names_both_ways_in() {
+        let text = handoff_text(
+            "claude-code:abc",
+            "Fix the\nscanner  again",
+            Some("/workspace/project"),
+            Some(Path::new(
+                "/Applications/ContextOS Dev.app/Contents/MacOS/contextos-cli",
+            )),
+        );
+        assert!(
+            text.starts_with(
+                "Continue from an earlier coding-agent session indexed by ContextOS: \"Fix the scanner again\"\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\nSession key: claude-code:abc\n"));
+        assert!(text.contains("contextos_get_session"));
+        assert!(text.contains("contextos_list_workspace_changes"));
+        assert!(text.contains(
+            "'/Applications/ContextOS Dev.app/Contents/MacOS/contextos-cli' workspace-changes --project /workspace/project"
+        ));
+        assert!(
+            text.contains(
+                "'/Applications/ContextOS Dev.app/Contents/MacOS/contextos-cli' show claude-code:abc\n"
+            ),
+            "{text}"
+        );
+
+        let bare = handoff_text("codex:1", "", None, None);
+        assert!(bare
+            .starts_with("Continue from an earlier coding-agent session indexed by ContextOS.\n"));
+        assert!(bare.ends_with("\ncontextos-cli show codex:1\n"), "{bare}");
+    }
+
+    /// 这个文件的看家测试:CLI 的旗标表与 MCP 工具的 inputSchema 必须双射。
+    /// 工具加参数、改名、改类型、加第五家,这里就红
+    #[test]
+    fn every_tool_parameter_has_exactly_one_flag() {
+        let defs = tools::definitions();
+        for d in &defs {
+            let name = d["name"].as_str().expect("tool has a name");
+            if NOT_IN_CLI.contains(&name) {
+                continue;
+            }
+            let cmd = COMMANDS.iter().find(|c| c.tool == name || c.domain_tool == Some(name)).unwrap_or_else(|| {
+                panic!("{name} has no contextos-cli subcommand; add one to COMMANDS or list it in NOT_IN_CLI")
+            });
+            let props = d["inputSchema"]["properties"]
+                .as_object()
+                .expect("inputSchema has properties");
+            let domain_mapping = cmd.domain_tool == Some(name);
+            let domain_schema = crate::services::control::NAMES.contains(&name);
+            let flags = if domain_mapping { &[][..] } else { cmd.flags };
+            let mut mine: Vec<&str> = if domain_mapping {
+                Vec::new()
+            } else {
+                flags.iter().map(|f| f.key).collect()
+            };
+            if domain_mapping || cmd.domain_tool.is_none() {
+                if let Some((key, _)) = cmd.positional {
+                    mine.push(key);
+                }
+            }
+            mine.sort_unstable();
+            // Domain commands deliberately carry their operation-specific fields in
+            // --input JSON. Only `operation` is a positional CLI argument; the MCP
+            // schema still documents every accepted field for Agent discovery.
+            let mut theirs: Vec<&str> = props
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !domain_schema || *key == "operation")
+                .collect();
+            theirs.sort_unstable();
+            assert_eq!(mine, theirs, "{name}: CLI 旗标与工具参数对不上");
+
+            // required 只能是位置参数——旗标是可选的
+            for r in d["inputSchema"]["required"].as_array().unwrap_or(&vec![]) {
+                let r = r.as_str().expect("required entries are strings");
+                assert_eq!(
+                    Some(r),
+                    cmd.positional.map(|(k, _)| k),
+                    "{name}: 必填参数 {r} 在 CLI 里不是位置参数"
+                );
+            }
+            for f in flags {
+                let ty = props[f.key]["type"].as_str().unwrap_or_default();
+                let ok = match f.arity {
+                    Arity::Switch => ty == "boolean",
+                    Arity::Repeated => ty == "array",
+                    Arity::Value => ty == "string" || ty == "integer" || ty == "number",
+                };
+                assert!(
+                    ok,
+                    "{name}.{}: arity {:?} 配不上 schema 的 {ty}",
+                    f.key, f.arity
+                );
+            }
+        }
+        for c in COMMANDS {
+            assert!(
+                defs.iter().any(|d| d["name"] == c.tool),
+                "COMMANDS 里的 {} 在 tools::definitions() 中不存在",
+                c.tool
+            );
+            if let Some(domain) = c.domain_tool {
+                assert!(defs.iter().any(|d| d["name"] == domain));
+            }
+        }
+    }
+
+    #[test]
+    fn flag_specs_are_consistent_across_commands() {
+        for c in COMMANDS {
+            for f in c.flags {
+                for other in COMMANDS.iter().flat_map(|c| c.flags) {
+                    if other.long == f.long {
+                        assert_eq!(other.key, f.key, "{} 在两处映到不同的键", f.long);
+                        assert_eq!(other.arity, f.arity, "{} 在两处 arity 不同", f.long);
+                        assert_eq!(other.help, f.help, "{} 在两处说明不同", f.long);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_duplicate_flag_or_command_names() {
+        let mut names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        names.extend(PLAIN.iter().map(|p| p.name));
+        names.sort_unstable();
+        let n = names.len();
+        names.dedup();
+        assert_eq!(n, names.len(), "命令重名");
+        for c in COMMANDS {
+            let mut longs: Vec<&str> = c.flags.iter().map(|f| f.long).collect();
+            longs.sort_unstable();
+            let n = longs.len();
+            longs.dedup();
+            assert_eq!(n, longs.len(), "{} 的旗标重名", c.name);
+        }
+    }
+
+    #[test]
+    fn argv_maps_to_the_mcp_arguments_object() {
+        assert_eq!(
+            args_of(&[
+                "search",
+                "qr login",
+                "--project",
+                "/w",
+                "--agent",
+                "codex",
+                "--limit",
+                "3"
+            ]),
+            json!({"query":"qr login","project":"/w","agents":"codex","limit":"3"})
+        );
+        assert_eq!(
+            args_of(&["show", "k", "--tools", "--from", "7"]),
+            json!({"key":"k","include_tools":true,"from_seq":"7"})
+        );
+        // 路由 + args 内容 + "args 恒为 object" 一次比完。后者意味着
+        // mcp/mod.rs 那道 `arguments` 形状检查在这条路上不可达,别再补一遍
+        assert_eq!(
+            p(&["projects"]).unwrap().action,
+            Action::Tool {
+                tool: tools::LIST_PROJECTS,
+                args: json!({})
+            }
+        );
+        assert_eq!(
+            p(&["sessions"]).unwrap().action,
+            Action::Tool {
+                tool: tools::LIST_SESSIONS,
+                args: json!({})
+            }
+        );
+    }
+
+    /// 整个设计压在这条上:数字不解析,交给 int_arg 去认字符串并裁剪
+    #[test]
+    fn numeric_values_stay_strings() {
+        for c in COMMANDS {
+            for f in c.flags.iter().filter(|f| f.arity == Arity::Value) {
+                let mut argv = vec![c.name];
+                if c.positional.is_some() {
+                    argv.push("x");
+                }
+                argv.push(f.long);
+                argv.push("7");
+                let v = args_of(&argv);
+                assert!(
+                    v[f.key].is_string(),
+                    "{} {} 应当原样传字符串",
+                    c.name,
+                    f.long
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn switches_are_json_booleans() {
+        assert_eq!(args_of(&["sessions", "--starred"])["starred"], json!(true));
+        assert_eq!(
+            args_of(&["show", "k", "--thinking"])["include_thinking"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn repeated_and_comma_separated_agents_become_one_string() {
+        let a = args_of(&["search", "x", "--agent", "codex", "--agent", "claude"]);
+        let b = args_of(&["search", "x", "--agent", "codex,claude"]);
+        assert_eq!(a["agents"], json!("codex,claude"));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn equals_form_and_global_flags_anywhere() {
+        assert_eq!(
+            args_of(&["sessions", "--limit=5"]),
+            args_of(&["sessions", "--limit", "5"])
+        );
+        for a in [vec!["--db=/x", "sessions"], vec!["sessions", "--db", "/x"]] {
+            assert_eq!(p(&a).unwrap().db, Some(PathBuf::from("/x")));
+        }
+    }
+
+    #[test]
+    fn double_dash_ends_option_parsing() {
+        assert_eq!(
+            args_of(&["search", "--", "--dry-run"])["query"],
+            json!("--dry-run")
+        );
+    }
+
+    #[test]
+    fn flags_are_rejected_by_name_when_they_belong_elsewhere() {
+        let m = message(&["search", "x", "--starred"]);
+        assert!(m.contains("only valid for `sessions`"), "{m}");
+        assert!(message(&["--limit", "5", "sessions"]).contains("must come after the command"));
+        assert!(message(&["projects", "--starred"]).contains("only valid for"));
+    }
+
+    /// 缺值的错不附 USAGE、形状错附——contextos-mcp 的这处不对称是有意的
+    #[test]
+    fn missing_values_and_unknown_options_are_parse_errors() {
+        assert!(!p(&["--db"]).unwrap_err().with_usage);
+        assert!(!p(&["sessions", "--limit"]).unwrap_err().with_usage);
+        assert!(p(&["sessions", "--nope"]).unwrap_err().with_usage);
+        assert!(message(&["sessions", "--nope"]).contains("unknown option"));
+        assert!(message(&["sessions", "--starred=false"]).contains("takes no value"));
+    }
+
+    #[test]
+    fn positional_count_errors() {
+        assert!(message(&["search"]).contains("needs a QUERY"));
+        assert!(message(&["search", "a", "b"]).contains("quote it"));
+        assert!(message(&["show"]).contains("needs a KEY"));
+        assert_eq!(args_of(&["sessions", "list"])["operation"], "list");
+        assert!(message(&["sessions", "list", "x"]).contains("quote it"));
+        assert!(message(&["setup", "x"]).contains("takes no arguments"));
+        assert!(message(&["index", "x"]).contains("takes no arguments"));
+        // PLAIN 命令不收旗标,包括全局之外的任何一个
+        assert!(message(&["index", "--limit", "5"]).contains("takes no options"));
+        assert!(message(&[]).contains("needs a command"));
+        assert!(message(&["nope"]).contains("unknown command"));
+    }
+
+    #[test]
+    fn relative_project_paths_are_refused_with_advice() {
+        for v in [".", "./x", "..", "../x"] {
+            assert!(
+                message(&["sessions", "--project", v]).contains("$PWD"),
+                "{v} 应当被拒并给出 $PWD 的写法"
+            );
+        }
+        for v in ["/abs", "~/x", "myname", ".hidden"] {
+            assert_eq!(
+                args_of(&["sessions", "--project", v])["project"],
+                json!(v),
+                "{v} 应当原样传下去"
+            );
+        }
+    }
+
+    #[test]
+    fn help_and_version_short_circuit() {
+        assert_eq!(p(&["--help", "--nonsense"]).unwrap().action, Action::Help);
+        assert_eq!(p(&["sessions", "-h"]).unwrap().action, Action::Help);
+        assert_eq!(p(&["-V"]).unwrap().action, Action::Version);
+        assert_eq!(p(&["setup"]).unwrap().action, Action::Setup);
+        assert_eq!(p(&["index"]).unwrap().action, Action::Index);
+        assert_eq!(p(&["context"]).unwrap().action, Action::Context);
+        assert_eq!(
+            p(&["refresh-context"]).unwrap().action,
+            Action::RefreshContext
+        );
+        assert_eq!(
+            p(&["laya", "uninstall", "--delete-models"]).unwrap().action,
+            Action::Tool {
+                tool: tools::LAYA,
+                args: json!({"operation":"uninstall", "delete_models":true}),
+            }
+        );
+        assert!(USAGE.lines().count() < 15, "USAGE 不该长回参考手册");
+        assert!(!USAGE.ends_with('\n'));
+    }
+
+    #[test]
+    fn help_lists_every_command_flag_and_agent() {
+        let h = help();
+        for c in COMMANDS {
+            assert!(h.contains(c.name), "help 缺命令 {}", c.name);
+            assert!(h.contains(c.summary));
+            for f in c.flags {
+                assert!(h.contains(f.long), "help 缺旗标 {}", f.long);
+            }
+        }
+        for p in PLAIN {
+            assert!(h.contains(p.name), "help 缺命令 {}", p.name);
+            assert!(h.contains(p.summary), "help 缺 {} 的说明", p.name);
+        }
+        for a in AgentId::ALL {
+            assert!(h.contains(a.as_str()), "help 缺 agent {}", a.as_str());
+        }
+        assert!(h.contains("wake://session/"));
+        assert!(h.contains("EXIT CODES:"));
+        // 默认值与取值区间现渲染,不是手写进散文里的
+        assert!(
+            h.contains("default 10, 1–30"),
+            "search --limit 的区间没渲染出来"
+        );
+        assert!(
+            h.contains("default 60, 1–200"),
+            "show --messages 的区间没渲染出来"
+        );
+        // 下界曾经不渲染,于是 `--chars 5` 被悄悄裁到 200 而 help 里一个字都没有
+        assert!(
+            h.contains("default 20000, 200–100000"),
+            "show --chars 的下界没渲染出来"
+        );
+        // AGENT IDS 必须落在 WHEN 与 KEYS 之间,不能被甩到文末
+        let (when, ids, keys) = (
+            h.find("\nWHEN:").expect("WHEN"),
+            h.find("\nAGENT IDS:").expect("AGENT IDS"),
+            h.find("\nKEYS AND REFERENCES:").expect("KEYS"),
+        );
+        assert!(when < ids && ids < keys, "help 的段落顺序错了");
+        assert!(!h.ends_with('\n'), "emit 负责补最后那个换行");
+    }
+
+    #[test]
+    fn report_splits_argument_errors_from_read_failures() {
+        let r = report(Ok("body".into()));
+        assert_eq!(
+            (r.stream, r.code, r.text.as_str()),
+            (Stream::Stdout, 0, "body")
+        );
+        let r = report(Err(tools::ToolError::InvalidParams("x".into())));
+        assert_eq!(
+            (r.stream, r.code, r.text.as_str()),
+            (Stream::Stderr, 2, "contextos-cli: x")
+        );
+        let r = report(Err(tools::ToolError::Failed("x".into())));
+        assert_eq!((r.stream, r.code), (Stream::Stderr, 1));
+        let r = report(Err(tools::ToolError::Internal("x".into())));
+        assert_eq!((r.stream, r.code), (Stream::Stderr, 1));
+        assert_eq!(
+            CliError {
+                message: "m".into(),
+                with_usage: false
+            }
+            .report()
+            .code,
+            2
+        );
+    }
+
+    #[test]
+    fn emit_adds_at_most_one_trailing_newline() {
+        for (input, want) in [("a", "a\n"), ("a\n", "a\n"), ("a\n\n", "a\n\n"), ("", "\n")] {
+            let mut buf: Vec<u8> = Vec::new();
+            emit(input, &mut buf).unwrap();
+            assert_eq!(String::from_utf8(buf).unwrap(), want, "input {input:?}");
+        }
+    }
+
+    /// 下游关掉管道要浮成 Err 让 bin 去分类,不能 panic。真管道不好测(fixture
+    /// 转录塞得进 64K 管道缓冲,子进程往往先写完),这里用假 writer 卡行为
+    #[test]
+    fn progress_line_updates_in_place_and_only_ends_the_line() {
+        let step = |scanning, done, total, error: Option<&str>| ScanProgress {
+            scanning,
+            done,
+            total,
+            error: error.map(str::to_string),
+        };
+        let mut out = Vec::new();
+        progress_line(&step(true, 0, 0, None), &mut out).unwrap();
+        progress_line(&step(true, 3, 10, None), &mut out).unwrap();
+        progress_line(&step(false, 10, 10, None), &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\rIndexing…\rIndexing 3/10…\n"
+        );
+        // 出错收场同样只是换行:错误由 cli::report 打,这里不抢着宣布任何结果
+        let mut out = Vec::new();
+        progress_line(&step(false, 4, 10, Some("boom")), &mut out).unwrap();
+        assert_eq!(out, b"\n");
+    }
+
+    #[test]
+    fn a_closed_pipe_surfaces_as_an_error_not_a_panic() {
+        struct FailWrite;
+        impl Write for FailWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct FailFlush;
+        impl Write for FailFlush {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+        }
+        assert_eq!(
+            emit("x", &mut FailWrite).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            emit("x\n", &mut FailFlush).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn setup_text_names_the_binary_and_the_gap() {
+        let cli_bin = PathBuf::from("/Apps/ContextOS.app/Contents/MacOS/contextos-cli");
+        let mcp_bin = PathBuf::from("/Apps/ContextOS.app/Contents/MacOS/contextos-mcp");
+        let db = PathBuf::from("/tmp/contextos.db");
+        let t = setup_text(&SetupFacts {
+            cli_bin: &cli_bin,
+            mcp_bin: Some(&mcp_bin),
+            db: &db,
+            db_error: None,
+        });
+        assert!(t.contains(&cli_bin.display().to_string()));
+        assert!(t.contains("/tmp/contextos.db"));
+        assert!(t.contains("docs/cli.md"));
+        assert!(t.contains("--project \"$PWD\""));
+        // setup 必须给出真正能跑的安装方式(阶段 1 那句"还没有 skill 包"的棘轮)
+        assert!(t.contains(SKILL_INSTALL), "{t}");
+        assert!(t.contains("~/.claude/skills/contextos/"), "{t}");
+        assert!(t.contains("claude mcp add"));
+        assert!(session_start_snippets(&cli_bin)
+            .iter()
+            .all(|snippet| snippet.text.contains("refresh-context")));
+
+        let t = setup_text(&SetupFacts {
+            cli_bin: &cli_bin,
+            mcp_bin: None,
+            db: &db,
+            db_error: Some("no ContextOS index at /tmp/contextos.db".into()),
+        });
+        assert!(
+            !t.contains("claude mcp add"),
+            "没有 contextos-mcp 就不该给 MCP 片段"
+        );
+        assert!(t
+            .trim_end()
+            .ends_with("Note: no ContextOS index at /tmp/contextos.db"));
+    }
+
+    #[test]
+    fn path_command_is_pasteable_or_absent() {
+        let bundled = PathBuf::from("/Apps/ContextOS.app/Contents/MacOS/contextos-cli");
+        if cfg!(target_os = "windows") {
+            // Windows 的 path_hint 是散文,绝不能进剪贴板
+            assert_eq!(path_command(&bundled), None);
+        } else {
+            let c = path_command(&bundled).expect("bundle 里要给命令");
+            assert!(c.contains("contextos-cli"), "{c}");
+            assert_eq!(c.lines().count(), 1, "要能一行粘进终端: {c}");
+        }
+        // 已经在 …/bin 里就不必说了
+        assert_eq!(path_command(Path::new("/usr/bin/contextos-cli")), None);
+        // current_exe 失败时的裸名兜底,没有目录可言
+        assert_eq!(path_command(Path::new("contextos-cli")), None);
+    }
+
+    #[test]
+    fn path_hint_quotes_spaces_and_skips_bin_dirs() {
+        assert_eq!(path_hint(Path::new("/usr/bin/contextos-cli")), None);
+        assert_eq!(
+            path_hint(Path::new("/home/me/.local/bin/contextos-cli")),
+            None
+        );
+        // current_exe 失败时的兜底裸名:没有目录可说,别给自指的 ln
+        assert_eq!(path_hint(Path::new("contextos-cli")), None);
+        let hint = path_hint(Path::new(
+            "/Apps/My ContextOS.app/Contents/MacOS/contextos-cli",
+        ))
+        .expect("bundle 里要给提示");
+        if cfg!(target_os = "windows") {
+            // Windows 没有 ln -s,给的是"把这个目录加进 PATH"
+            assert!(hint.contains("MacOS"), "{hint}");
+        } else {
+            assert!(
+                hint.contains("'/Apps/My ContextOS.app/Contents/MacOS/contextos-cli'"),
+                "{hint}"
+            );
+        }
+    }
+}
