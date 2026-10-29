@@ -1,6 +1,6 @@
 use super::parse_utils::*;
 use super::pi_format::{PiRender, PiRenderOptions};
-use super::sqlite_ro::{open_sqlite_ro, strip_virtual_path, virtual_path};
+use super::sqlite_ro::{db_cache_stamp, open_sqlite_ro, strip_virtual_path, virtual_path};
 use super::AgentAdapter;
 use crate::models::*;
 use anyhow::{anyhow, Result};
@@ -442,6 +442,7 @@ struct ClawParse {
     created_at: i64,
     last_ts: i64,
     messages: Vec<TranscriptMessage>,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     model: Option<String>,
     tokens_used: Option<i64>,
     /// session_info 的 name(用户/自动命名),标题首选
@@ -469,6 +470,7 @@ fn render(chain: Vec<Value>, decode_images: bool) -> ClawParse {
         created_at: 0,
         last_ts: 0,
         messages: Vec::new(),
+        usage_events: Vec::new(),
         model: None,
         tokens_used: None,
         name: None,
@@ -547,6 +549,7 @@ fn render(chain: Vec<Value>, decode_images: bool) -> ClawParse {
         }
     }
     p.messages = render.messages;
+    p.usage_events = render.usage_events;
     p.model = render.model;
     p.tokens_used = render.tokens_used;
     assign_seq(&mut p.messages);
@@ -558,12 +561,19 @@ impl AgentAdapter for OpenclawAdapter {
         AgentId::Openclaw
     }
 
+    fn begin_scan(&self) {
+        for cache in self.rows_cache.lock().unwrap().values() {
+            cache.invalidate();
+        }
+    }
+
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut out = Vec::new();
         for dir in self.agent_dirs() {
             let db = dir.join("agent").join(DB_NAME);
             if db.is_file() {
                 if let Some(rows) = self.rows(&db) {
+                    let source_stamp = db_cache_stamp(&db);
                     out.extend(
                         rows.into_iter()
                             .filter(|row| row.spawned_by.is_none() && row.event_count > 0)
@@ -571,7 +581,8 @@ impl AgentAdapter for OpenclawAdapter {
                                 agent: AgentId::Openclaw,
                                 native_id: row.session_id.clone(),
                                 file_path: virtual_path(&db, &row.session_id),
-                                mtime_ms: row.hint.updated_ms,
+                                // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                                mtime_ms: source_stamp,
                                 size: row.content_len,
                             }),
                     );
@@ -647,6 +658,7 @@ impl AgentAdapter for OpenclawAdapter {
             meta,
             mainline: p.messages,
             sidechains: Vec::new(),
+            usage_events: p.usage_events,
             unknown_line_count: p.unknown_lines,
         })
     }

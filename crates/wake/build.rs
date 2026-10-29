@@ -15,8 +15,11 @@ fn main() {
     }
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/icon.ico");
-    res.set("ProductName", "Wake");
-    res.set("FileDescription", "Wake — coding agent session manager");
+    res.set("ProductName", "ContextOS");
+    res.set(
+        "FileDescription",
+        "ContextOS — coding agent session manager",
+    );
     if let Err(e) = res.compile() {
         // 宿主即 Windows(= 真机构建,rc.exe 理应在)时硬失败:静默降级会让
         // make-windows.ps1 打出一个没图标、没版本信息的 exe 而无人察觉;

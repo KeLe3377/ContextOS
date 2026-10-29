@@ -250,12 +250,22 @@ fn apply_tool_update(
     images
 }
 
-fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMessage>, u32)> {
+fn parse_grok_updates(
+    path: &Path,
+    decode_images: bool,
+) -> Result<(
+    Vec<TranscriptMessage>,
+    u32,
+    i64,
+    Vec<crate::models::SessionUsageEvent>,
+)> {
     let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     let mut rp = Replay::new();
     let mut unknown = 0u32;
+    let mut tokens_used = 0i64;
+    let mut usage_events = Vec::new();
 
     for line in reader.lines() {
         let Ok(line) = line else {
@@ -270,6 +280,58 @@ fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<Transcrip
             continue;
         };
         let ts = row.get("timestamp").map(to_epoch_ms).unwrap_or(0);
+        if matches!(
+            row.get("method").and_then(Value::as_str),
+            Some("_x.ai/session/update" | "session/update")
+        ) {
+            if let Some(update) = row.pointer("/params/update") {
+                if update.get("sessionUpdate").and_then(Value::as_str) == Some("turn_completed") {
+                    if let Some(usage) = update.get("usage") {
+                        let total_for = |counters: &Value| {
+                            counters
+                                .get("inputTokens")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(0)
+                                .saturating_add(
+                                    counters
+                                        .get("outputTokens")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(0),
+                                )
+                        };
+                        let event_total = usage
+                            .get("modelUsage")
+                            .and_then(Value::as_object)
+                            .filter(|models| !models.is_empty())
+                            .map(|models| {
+                                models.values().fold(0i64, |sum, counters| {
+                                    sum.saturating_add(total_for(counters))
+                                })
+                            })
+                            .unwrap_or_else(|| total_for(usage));
+                        tokens_used = tokens_used.saturating_add(event_total);
+                        if let Some(models) = usage.get("modelUsage").and_then(Value::as_object) {
+                            for (model, counters) in models {
+                                let count = total_for(counters).max(0);
+                                if count > 0 {
+                                    usage_events.push(crate::models::SessionUsageEvent {
+                                        timestamp: (ts > 0).then_some(ts),
+                                        tokens_used: count,
+                                        model: Some(model.clone()),
+                                    });
+                                }
+                            }
+                        } else if event_total > 0 {
+                            usage_events.push(crate::models::SessionUsageEvent {
+                                timestamp: (ts > 0).then_some(ts),
+                                tokens_used: event_total,
+                                model: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         let Some(update) = row.get("params").and_then(|p| p.get("update")) else {
             unknown += 1;
             continue;
@@ -337,13 +399,14 @@ fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<Transcrip
     rp.flush();
     let mut messages = rp.messages;
     assign_seq(&mut messages);
-    Ok((messages, unknown))
+    Ok((messages, unknown, tokens_used, usage_events))
 }
 
 fn build_meta(
     r: &SessionFileRef,
     side: &Summary,
     messages: &[TranscriptMessage],
+    tokens_used: i64,
     grok_home: &Path,
     group: &GroupCtx,
 ) -> SessionMeta {
@@ -383,7 +446,7 @@ fn build_meta(
         size_bytes: r.size,
         git_branch: side.git_branch.clone(),
         model: side.model.clone(),
-        tokens_used: None,
+        tokens_used: (tokens_used > 0).then_some(tokens_used),
         archived: false,
         source: None,
         favorite: false,
@@ -456,19 +519,36 @@ impl AgentAdapter for GrokAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path), false)?;
+        let (messages, unknown, tokens_used, _) =
+            parse_grok_updates(Path::new(&r.file_path), false)?;
         let side = read_summary(Path::new(&r.file_path));
-        let meta = build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx());
+        let meta = build_meta(
+            r,
+            &side,
+            &messages,
+            tokens_used,
+            &self.grok_home,
+            &self.group_ctx(),
+        );
         Ok(ParsedSession::derive(meta, &messages, unknown))
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path), true)?;
+        let (messages, unknown, tokens_used, usage_events) =
+            parse_grok_updates(Path::new(&r.file_path), true)?;
         let side = read_summary(Path::new(&r.file_path));
         Ok(ParsedTranscript {
-            meta: build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx()),
+            meta: build_meta(
+                r,
+                &side,
+                &messages,
+                tokens_used,
+                &self.grok_home,
+                &self.group_ctx(),
+            ),
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events,
             unknown_line_count: unknown,
         })
     }

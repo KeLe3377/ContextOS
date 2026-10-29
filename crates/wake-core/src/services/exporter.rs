@@ -1,5 +1,6 @@
 use crate::adapters::AgentAdapter;
 use crate::models::*;
+use crate::services::compression_settings::MechanicalRetentionMode;
 use chrono::{Local, TimeZone};
 
 /// 本地时区 `YYYY-MM-DD HH:MM:SS`;0/None 为空串(导出与 wake-mcp 共用)
@@ -33,22 +34,143 @@ fn role_label(role: Role) -> String {
     format!("{emoji} {}", role.title())
 }
 
-fn render_message(m: &TranscriptMessage, out: &mut String) {
-    out.push_str(&format!(
-        "### {}{}\n\n",
-        role_label(m.role),
-        m.timestamp
-            .map(|t| format!(" · {}", fmt_time(Some(t))))
-            .unwrap_or_default()
-    ));
-    if m.kind == MessageKind::CompactSummary {
-        out.push_str(&format!("> {}\n\n", m.text));
+fn human_readable_assistant_body(text: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_patch = false;
+    let mut in_internal_fence = false;
+    let has_patch_trace = text.contains("*** End Patch")
+        || text.contains("diff --git")
+        || text.contains("apply_patch verification failed")
+        || text.contains("tools.apply_patch(");
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        if in_patch {
+            if trimmed.contains("*** End Patch") {
+                in_patch = false;
+            }
+            continue;
+        }
+        if trimmed.contains("*** Begin Patch") || trimmed.starts_with("diff --git ") {
+            in_patch = true;
+            continue;
+        }
+        if has_patch_trace
+            && (trimmed.starts_with('+')
+                || trimmed.starts_with('-')
+                || trimmed == "));"
+                || trimmed.starts_with("\\n\\n"))
+        {
+            continue;
+        }
+
+        if in_internal_fence {
+            if trimmed.starts_with("```") {
+                in_internal_fence = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("```")
+            && (trimmed.contains("apply_patch")
+                || trimmed.contains("diff")
+                || trimmed.contains("patch"))
+        {
+            in_internal_fence = true;
+            continue;
+        }
+
+        let internal_trace = trimmed.contains("text(await tools.apply_patch")
+            || trimmed.contains("tools.apply_patch(")
+            || trimmed.contains("apply_patch verification failed")
+            || trimmed.contains("*** End Patch")
+            || trimmed.starts_with("Script completed")
+            || trimmed.starts_with("Script failed")
+            || trimmed.starts_with("Script error:")
+            || (has_patch_trace
+                && (trimmed == "Output:" || trimmed == "<details>" || trimmed == "</details>"));
+        if internal_trace || trimmed.starts_with("@@") {
+            continue;
+        }
+
+        lines.push(line);
+    }
+
+    lines.join("\n").trim().to_string()
+}
+
+fn render_message(
+    m: &TranscriptMessage,
+    out: &mut String,
+    retention_mode: MechanicalRetentionMode,
+    tool_mode: MechanicalRetentionMode,
+    allow_jev_delete_assistant_body: bool,
+    allow_jev_delete_user_messages: bool,
+    jev_candidate_min_chars: usize,
+) {
+    if retention_mode != MechanicalRetentionMode::FullMechanical
+        && m.role == Role::System
+        && m.kind != MessageKind::CompactSummary
+    {
         return;
     }
-    if let Some(th) = &m.thinking {
+    if m.kind == MessageKind::CompactSummary {
+        let summary_text = if retention_mode != MechanicalRetentionMode::FullMechanical
+            && m.role == Role::Assistant
+        {
+            human_readable_assistant_body(&m.text)
+        } else {
+            m.text.clone()
+        };
         out.push_str(&format!(
-            "<details><summary>🧠 Thinking</summary>\n\n{th}\n\n</details>\n\n"
+            "### {}{}\n\n",
+            role_label(m.role),
+            m.timestamp
+                .map(|t| format!(" · {}", fmt_time(Some(t))))
+                .unwrap_or_default()
         ));
+        if !summary_text.is_empty() {
+            out.push_str(&format!("> {}\n\n", summary_text));
+        }
+        return;
+    }
+    let cleaned_text = if retention_mode != MechanicalRetentionMode::FullMechanical
+        && m.role == Role::Assistant
+        && m.images.is_empty()
+    {
+        Some(human_readable_assistant_body(&m.text))
+    } else {
+        None
+    };
+    let visible_text = cleaned_text.as_deref().unwrap_or(&m.text);
+    let body_candidate_role = match m.role {
+        Role::Assistant if allow_jev_delete_assistant_body => Some("assistant"),
+        Role::User if allow_jev_delete_user_messages => Some("user"),
+        _ => None,
+    };
+    let body_candidate = m.images.is_empty()
+        && jev_candidate_min_chars > 0
+        && visible_text.chars().count() >= jev_candidate_min_chars
+        && body_candidate_role.is_some();
+    if visible_text.is_empty()
+        && m.images.is_empty()
+        && tool_mode == MechanicalRetentionMode::BodyOnly
+    {
+        return;
+    }
+    let timestamp = m
+        .timestamp
+        .map(|t| format!(" · {}", fmt_time(Some(t))))
+        .unwrap_or_default();
+    if !body_candidate {
+        out.push_str(&format!("### {}{}\n\n", role_label(m.role), timestamp));
+    }
+    if retention_mode == MechanicalRetentionMode::FullMechanical {
+        if let Some(th) = &m.thinking {
+            out.push_str(&format!(
+                "<details><summary>🧠 Thinking</summary>\n\n{th}\n\n</details>\n\n"
+            ));
+        }
     }
     let mut cursor = 0usize;
     for image in &m.images {
@@ -68,24 +190,118 @@ fn render_message(m: &TranscriptMessage, out: &mut String) {
         ));
         cursor = offset;
     }
-    if cursor < m.text.len() {
-        out.push_str(&m.text[cursor..]);
-        out.push_str("\n\n");
-    }
-    for tc in &m.tool_calls {
-        out.push_str(&format!(
-            "<details><summary>🔧 {} — {}</summary>\n\n",
-            tc.name,
-            tc.input_preview.replace('<', "&lt;")
-        ));
-        if let Some(input) = &tc.input {
-            out.push_str(&format!("Input:\n\n```\n{input}\n```\n\n"));
+    if cursor < visible_text.len() {
+        let body = &visible_text[cursor..];
+        if body_candidate {
+            let role = body_candidate_role.unwrap_or("assistant");
+            out.push_str(&format!(
+                "<details><summary>jev-body-candidate:{role}{timestamp}</summary>\n\nBody:\n\n{body}\n\n</details>\n\n"
+            ));
+        } else {
+            out.push_str(body);
+            out.push_str("\n\n");
         }
-        if let Some(output) = &tc.output {
-            out.push_str(&format!("Output:\n\n```\n{output}\n```\n\n"));
-        }
-        out.push_str("</details>\n\n");
     }
+    match tool_mode {
+        MechanicalRetentionMode::FullMechanical => {
+            for tc in &m.tool_calls {
+                out.push_str(&format!(
+                    "<details><summary>🔧 {} — {}{}</summary>\n\n",
+                    tc.name,
+                    tc.input_preview.replace('<', "&lt;"),
+                    if tc.is_error { " · source-error" } else { "" }
+                ));
+                if let Some(input) = &tc.input {
+                    out.push_str(&format!("Input:\n\n```\n{input}\n```\n\n"));
+                }
+                if let Some(output) = &tc.output {
+                    out.push_str(&format!("Output:\n\n```\n{output}\n```\n\n"));
+                }
+                out.push_str("</details>\n\n");
+            }
+        }
+        MechanicalRetentionMode::BodyOnly => {}
+        MechanicalRetentionMode::BodyWithStructure => {
+            for tc in &m.tool_calls {
+                out.push_str(&format!(
+                    "<details><summary>🔧 {} — {}{}</summary>\n\n",
+                    tc.name,
+                    tc.input_preview.replace('<', "&lt;"),
+                    if tc.is_error { " · source-error" } else { "" }
+                ));
+                let output_summary = match &tc.output {
+                    Some(output) => format!("存在，{} 字符", output.chars().count()),
+                    None => "无".into(),
+                };
+                out.push_str(&format!(
+                    "结构摘要：Input 已省略；Output {}；源记录错误标记：{}。\n\n</details>\n\n",
+                    output_summary,
+                    if tc.is_error { "是" } else { "否" }
+                ));
+            }
+        }
+    }
+}
+
+/// Render complete transcript messages without session metadata. This is used when a caller
+/// needs to preserve message boundaries while composing a larger export in blocks.
+pub fn messages_to_markdown(messages: &[TranscriptMessage]) -> String {
+    messages_to_markdown_with_retention(messages, MechanicalRetentionMode::FullMechanical)
+}
+
+pub fn messages_to_markdown_with_retention(
+    messages: &[TranscriptMessage],
+    retention_mode: MechanicalRetentionMode,
+) -> String {
+    messages_to_markdown_with_modes(messages, retention_mode, retention_mode)
+}
+
+/// Export raw tool blocks while applying the selected mode's message-level filters.
+/// Compression uses this so Jev can inspect the mechanical candidate before retention.
+pub fn messages_to_markdown_for_compression(
+    messages: &[TranscriptMessage],
+    retention_mode: MechanicalRetentionMode,
+    allow_jev_delete_assistant_body: bool,
+    allow_jev_delete_user_messages: bool,
+    jev_candidate_min_chars: usize,
+) -> String {
+    let mut out = String::new();
+    for message in messages {
+        if message.kind != MessageKind::Meta {
+            render_message(
+                message,
+                &mut out,
+                retention_mode,
+                MechanicalRetentionMode::FullMechanical,
+                allow_jev_delete_assistant_body,
+                allow_jev_delete_user_messages,
+                jev_candidate_min_chars,
+            );
+        }
+    }
+    out
+}
+
+fn messages_to_markdown_with_modes(
+    messages: &[TranscriptMessage],
+    retention_mode: MechanicalRetentionMode,
+    tool_mode: MechanicalRetentionMode,
+) -> String {
+    let mut out = String::new();
+    for message in messages {
+        if message.kind != MessageKind::Meta {
+            render_message(
+                message,
+                &mut out,
+                retention_mode,
+                tool_mode,
+                false,
+                false,
+                usize::MAX,
+            );
+        }
+    }
+    out
 }
 
 pub fn to_markdown(
@@ -105,12 +321,7 @@ pub fn to_markdown(
         meta.message_count,
         fmt_tokens(meta.tokens_used),
     ));
-    for m in messages {
-        if m.kind == MessageKind::Meta {
-            continue;
-        }
-        render_message(m, &mut out);
-    }
+    out.push_str(&messages_to_markdown(messages));
     for (sc, msgs) in sidechains {
         if msgs.is_empty() {
             continue;
@@ -120,12 +331,7 @@ pub fn to_markdown(
             "---\n\n## ⑂ Subagent: {}\n\n",
             if label.is_empty() { &sc.id } else { &label }
         ));
-        for m in msgs {
-            if m.kind == MessageKind::Meta {
-                continue;
-            }
-            render_message(m, &mut out);
-        }
+        out.push_str(&messages_to_markdown(msgs));
     }
     out
 }
@@ -198,6 +404,184 @@ pub fn render_markdown(adapter: &dyn AgentAdapter, meta: &SessionMeta) -> anyhow
         })
         .collect();
     Ok(to_markdown(&t.meta, &t.mainline, &sidechains))
+}
+
+/// Export the human conversation while preserving the same session and sidechain boundaries
+/// as the full Markdown export. Thinking can be included explicitly; tool details remain hidden.
+pub fn render_conversation_markdown(
+    adapter: &dyn AgentAdapter,
+    meta: &SessionMeta,
+    include_thinking: bool,
+) -> anyhow::Result<String> {
+    let r = SessionFileRef::from_meta(meta);
+    let t = adapter.parse_transcript(&r)?;
+    let sidechains: Vec<(SidechainInfo, Vec<TranscriptMessage>)> = t
+        .sidechains
+        .iter()
+        .map(|sc| {
+            let msgs = adapter.load_sidechain(&r, &sc.id).unwrap_or_default();
+            (sc.clone(), msgs)
+        })
+        .collect();
+    let retention = if include_thinking {
+        MechanicalRetentionMode::FullMechanical
+    } else {
+        MechanicalRetentionMode::BodyOnly
+    };
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", t.meta.title));
+    out.push_str(&format!(
+        "> **Agent**: {} · **Project**: {}{} · **Time**: {} – {} · **Messages**: {} · **Tokens**: {}\n\n---\n\n",
+        t.meta.agent.display_name(),
+        if t.meta.project_path.is_empty() { "(unknown)" } else { &t.meta.project_path },
+        t.meta.git_branch.as_deref().map(|b| format!("({b})")).unwrap_or_default(),
+        fmt_time(Some(t.meta.created_at)),
+        fmt_time(Some(t.meta.updated_at)),
+        t.meta.message_count,
+        fmt_tokens(t.meta.tokens_used),
+    ));
+    out.push_str(&messages_to_markdown_with_modes(
+        &t.mainline,
+        retention,
+        MechanicalRetentionMode::BodyOnly,
+    ));
+    for (sc, msgs) in sidechains {
+        if msgs.is_empty() {
+            continue;
+        }
+        let label = sc.label();
+        out.push_str(&format!(
+            "---\n\n## ⑂ Subagent: {}\n\n",
+            if label.is_empty() { &sc.id } else { &label }
+        ));
+        out.push_str(&messages_to_markdown_with_modes(
+            &msgs,
+            retention,
+            MechanicalRetentionMode::BodyOnly,
+        ));
+    }
+    Ok(out)
+}
+
+/// Export only file-changing tool calls as a compact review document.
+/// The source transcript remains authoritative; this view is intentionally best-effort and
+/// skips change-like calls whose structured input does not identify a file.
+pub fn render_changed_files_markdown(
+    adapter: &dyn AgentAdapter,
+    meta: &SessionMeta,
+) -> anyhow::Result<String> {
+    let r = SessionFileRef::from_meta(meta);
+    let t = adapter.parse_transcript(&r)?;
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut collect = |messages: &[TranscriptMessage]| {
+        for message in messages {
+            for tool in &message.tool_calls {
+                let name = tool.name.to_ascii_lowercase();
+                let input = tool.input.as_deref().unwrap_or_default();
+                let output = tool.output.as_deref().unwrap_or_default();
+                let is_change = name.contains("edit")
+                    || name.contains("write")
+                    || name.contains("patch")
+                    || input.contains("*** Begin Patch")
+                    || input.contains("diff --git")
+                    || output.contains("*** Begin Patch")
+                    || output.contains("diff --git");
+                if !is_change {
+                    continue;
+                }
+                let parsed = serde_json::from_str::<serde_json::Value>(input).ok();
+                let path = parsed
+                    .as_ref()
+                    .and_then(find_file_path)
+                    .or_else(|| find_path_line(input));
+                let Some(path) = path else { continue };
+                let content = parsed
+                    .as_ref()
+                    .and_then(find_change_content)
+                    .unwrap_or_else(|| {
+                        if input.contains("*** Begin Patch") || input.contains("diff --git") {
+                            input.to_string()
+                        } else if !output.trim().is_empty() {
+                            output.to_string()
+                        } else {
+                            input.to_string()
+                        }
+                    });
+                entries.push((path, content));
+            }
+        }
+    };
+    collect(&t.mainline);
+    for sidechain in &t.sidechains {
+        let messages = adapter
+            .load_sidechain(&r, &sidechain.id)
+            .unwrap_or_default();
+        collect(&messages);
+    }
+
+    let mut out = format!("# {}\n\n", t.meta.title);
+    if entries.is_empty() {
+        out.push_str("未识别到带文件路径的改动工具调用。\n");
+        return Ok(out);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (path, content) in entries {
+        if !seen.insert((path.clone(), content.clone())) {
+            continue;
+        }
+        out.push_str(&format!("## {path}\n\n```\n{content}\n```\n\n"));
+    }
+    Ok(out)
+}
+
+fn find_file_path(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in ["file_path", "filepath", "path", "file", "filename"] {
+                if let Some(path) = map.get(key).and_then(serde_json::Value::as_str) {
+                    if !path.trim().is_empty() {
+                        return Some(path.to_string());
+                    }
+                }
+            }
+            map.values().find_map(find_file_path)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(find_file_path),
+        _ => None,
+    }
+}
+
+fn find_change_content(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in ["patch", "new_string", "content", "contents", "text"] {
+                if let Some(content) = map.get(key).and_then(serde_json::Value::as_str) {
+                    if !content.trim().is_empty() {
+                        return Some(content.to_string());
+                    }
+                }
+            }
+            map.values().find_map(find_change_content)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(find_change_content),
+        _ => None,
+    }
+}
+
+fn find_path_line(input: &str) -> Option<String> {
+    input.lines().find_map(|line| {
+        let trimmed = line.trim();
+        [
+            "*** Update File:",
+            "*** Add File:",
+            "*** Delete File:",
+            "diff --git ",
+        ]
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .map(|path| path.trim().trim_matches('"').to_string())
+        .filter(|path| !path.is_empty())
+    })
 }
 
 // ---------------------------------------------------------------- 精简渲染(wake-mcp)
@@ -477,6 +861,143 @@ mod compact_tests {
         assert!(page
             .text
             .contains("> [compacted summary] Conversation compacted"));
+    }
+
+    #[test]
+    fn message_fragment_keeps_full_content_without_a_session_header() {
+        let messages = transcript();
+
+        let markdown = messages_to_markdown(&messages[..3]);
+
+        assert!(markdown.contains("### 👤 User"));
+        assert!(markdown.contains("帮我实现二维码扫描登录"));
+        assert!(markdown.contains("### 🤖 Assistant"));
+        assert!(markdown.contains("ok, 3 lines changed"));
+        assert!(!markdown.contains("<system-reminder>injected</system-reminder>"));
+        assert!(!markdown.starts_with("# "));
+        assert!(!markdown.contains("**Agent**:"));
+    }
+
+    #[test]
+    fn body_candidates_are_only_wrapped_when_the_matching_permission_is_enabled() {
+        let messages = vec![msg(
+            1,
+            Role::User,
+            MessageKind::Text,
+            &"important user request ".repeat(8),
+        )];
+        let denied = messages_to_markdown_for_compression(
+            &messages,
+            MechanicalRetentionMode::BodyOnly,
+            false,
+            false,
+            10,
+        );
+        let allowed = messages_to_markdown_for_compression(
+            &messages,
+            MechanicalRetentionMode::BodyOnly,
+            false,
+            true,
+            10,
+        );
+        assert!(denied.contains("### 👤 User"));
+        assert!(!denied.contains("jev-body-candidate"));
+        assert!(!allowed.contains("### 👤 User"));
+        assert!(allowed.contains("jev-body-candidate:user"));
+    }
+
+    #[test]
+    fn body_only_filters_patch_and_tool_trace_from_assistant_text() {
+        let mut assistant = msg(
+            1,
+            Role::Assistant,
+            MessageKind::Text,
+            "先说明修改结果。\n*** Begin Patch\n@@\n- old\n+ new\n*** End Patch\ntext(await tools.apply_patch(patch))\nScript error: patch failed",
+        );
+        assistant.tool_calls.push(ToolCallView {
+            id: "t1".into(),
+            name: "apply_patch".into(),
+            input_preview: "patch".into(),
+            input: Some("patch".into()),
+            output: Some("patch failed".into()),
+            is_error: true,
+            sidechain_ref: None,
+        });
+
+        let markdown =
+            messages_to_markdown_with_retention(&[assistant], MechanicalRetentionMode::BodyOnly);
+
+        assert!(markdown.contains("先说明修改结果。"));
+        assert!(!markdown.contains("Begin Patch"));
+        assert!(!markdown.contains("apply_patch"));
+        assert!(!markdown.contains("Script error"));
+        assert!(!markdown.contains("patch failed"));
+    }
+
+    #[test]
+    fn body_only_keeps_regular_assistant_code_examples() {
+        let assistant = msg(
+            1,
+            Role::Assistant,
+            MessageKind::Text,
+            "示例代码：\n```rust\nlet answer = 42;\n```",
+        );
+
+        let markdown =
+            messages_to_markdown_with_retention(&[assistant], MechanicalRetentionMode::BodyOnly);
+
+        assert!(markdown.contains("示例代码："));
+        assert!(markdown.contains("let answer = 42;"));
+    }
+
+    #[test]
+    fn body_only_drops_assistant_messages_that_are_only_tool_trace() {
+        let assistant = msg(
+            1,
+            Role::Assistant,
+            MessageKind::Text,
+            "text(await tools.apply_patch(patch))\n*** Begin Patch\n+ change\n*** End Patch",
+        );
+
+        let markdown =
+            messages_to_markdown_with_retention(&[assistant], MechanicalRetentionMode::BodyOnly);
+
+        assert!(markdown.is_empty());
+    }
+
+    #[test]
+    fn body_only_filters_escaped_patch_end_and_standalone_script_trace() {
+        let assistant = msg(
+            1,
+            Role::Assistant,
+            MessageKind::Text,
+            "修改已完成。\n*** Begin Patch\n+ change\n*** End Patch\";\ntext(await tools.apply_patch(patch));\nScript completed\nOutput:",
+        );
+
+        let markdown =
+            messages_to_markdown_with_retention(&[assistant], MechanicalRetentionMode::BodyOnly);
+
+        assert!(markdown.contains("修改已完成。"));
+        assert!(!markdown.contains("End Patch"));
+        assert!(!markdown.contains("Script completed"));
+        assert!(!markdown.contains("Output:"));
+    }
+
+    #[test]
+    fn body_only_cleans_compact_assistant_summaries() {
+        let assistant = msg(
+            1,
+            Role::Assistant,
+            MessageKind::CompactSummary,
+            "已完成修改。\nScript completed\n*** End Patch\";",
+        );
+
+        let markdown =
+            messages_to_markdown_with_retention(&[assistant], MechanicalRetentionMode::BodyOnly);
+
+        assert!(markdown.contains("已完成修改。"));
+        assert!(!markdown.contains("Script completed"));
+        assert!(!markdown.contains("End Patch"));
     }
 
     #[test]

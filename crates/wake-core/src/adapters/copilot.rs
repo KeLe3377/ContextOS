@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 /// Copilot CLI:`~/.copilot/session-store.db` 全明文 SQLite。
 /// sessions(id,cwd,branch,summary) + turns(user_message,assistant_response)。
-/// 无每会话文件,SessionFileRef 用虚拟路径,mtime 取行内 updated_at、
-/// size 取 turns 正文总长,二者共同构成增量扫描的 dirty 判断。
+/// 无每会话文件,SessionFileRef 用虚拟路径,mtime 取库/WAL 指纹、size 取
+/// turns 正文总长;数据库未变化时可跳过未变化会话。
 pub struct CopilotAdapter {
     db: PathBuf,
     /// rows() 的全表聚合较贵,按 db mtime 缓存一轮扫描内的重复调用
@@ -197,10 +197,15 @@ impl AgentAdapter for CopilotAdapter {
         AgentId::Copilot
     }
 
+    fn begin_scan(&self) {
+        *self.rows_cache.lock().unwrap() = None;
+    }
+
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let Some(rows) = self.rows() else {
             return Ok(Vec::new());
         };
+        let source_stamp = self.db_mtime();
         Ok(rows
             .into_iter()
             .filter(|row| row.turn_count > 0)
@@ -208,7 +213,8 @@ impl AgentAdapter for CopilotAdapter {
                 agent: AgentId::Copilot,
                 native_id: row.id.clone(),
                 file_path: virtual_path(&self.db, &row.id),
-                mtime_ms: row.updated_ms,
+                // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                mtime_ms: source_stamp,
                 size: row.content_len,
             })
             .collect())
@@ -237,6 +243,7 @@ impl AgentAdapter for CopilotAdapter {
             meta,
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events: Vec::new(),
             unknown_line_count: 0,
         })
     }

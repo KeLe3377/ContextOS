@@ -14,6 +14,7 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
 walkdir = "2"
+ignore = "0.4"
 notify = "7"
 chrono = { version = "0.4", features = ["serde"] }
 zstd = "0.13"
@@ -21,6 +22,7 @@ semver = "1"
 reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.dev]
 # gpui 依赖树巨大,dev 依赖开优化让 UI 不卡

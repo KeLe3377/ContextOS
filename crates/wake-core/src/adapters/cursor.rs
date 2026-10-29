@@ -541,6 +541,7 @@ impl AgentAdapter for CursorAdapter {
             meta: build_meta(r, &parsed, self.project_path(r)),
             mainline: parsed.messages,
             sidechains,
+            usage_events: Vec::new(),
             unknown_line_count: parsed.unknown_lines,
         })
     }

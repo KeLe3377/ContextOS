@@ -1113,8 +1113,9 @@ pub fn expand_tilde(p: &str) -> String {
     }
 }
 
-/// Wake 自己的两个命令行二进制;在 shell 工具的 command 里以整词出现即视为在查 Wake
-const WAKE_BINARIES: [&str; 2] = ["wake-cli", "wake-mcp"];
+/// ContextOS 自己的命令行二进制;在 shell 工具的 command 里以整词出现即视为
+/// 在查 ContextOS。wake-* 是旧兼容入口,contextos-* 是正式入口。
+const WAKE_BINARIES: [&str; 4] = ["contextos-cli", "contextos-mcp", "wake-cli", "wake-mcp"];
 
 /// 这次工具调用是不是 agent 在查 Wake,是的话走的哪条接入、用的哪个工具(MCP 给契约
 /// 工具名,命令行给二进制名;None = 不是)。FTS 过滤只看 is_some,wake_lookups 表记账
@@ -1124,7 +1125,7 @@ const WAKE_BINARIES: [&str; 2] = ["wake-cli", "wake-mcp"];
 /// wake-cli / wake-mcp 以整词出现在 shell 工具的 **command 字段**里——Grep 的 pattern、
 /// Read 的路径提到 wake-cli 是在读代码,不是查询(Codex review 2026-09-14)
 fn wake_lookup_kind(tc: &ToolCallView) -> Option<(LookupChannel, &'static str)> {
-    if let Some(tool) = crate::mcp::tools::NAMES
+    if let Some(tool) = crate::mcp::tools::LOOKUP_NAMES
         .iter()
         .find(|t| ends_with_word(&tc.name, t))
     {

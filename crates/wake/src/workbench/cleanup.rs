@@ -159,7 +159,9 @@ fn unavailable_reason(reason: &str) -> &str {
         "No sessions could be restored. Review the errors below." => {
             t("No sessions could be restored. Review the errors below.")
         }
-        "Session has unrecognized content" => t("Wake cannot read part of this session's format."),
+        "Session has unrecognized content" => {
+            t("ContextOS cannot read part of this session's format.")
+        }
         "Session or files changed since review; refresh and review again"
         | "Source changed while checking"
         | "Session tree changed" => t("This session changed. Refresh the list and try again."),
@@ -976,7 +978,7 @@ impl Workbench {
                         } else if verify_restored_files
                             && batch.records.iter().any(|r| r.can_restore())
                         {
-                            Notification::info(t("Some sessions have been restored to Wake."))
+                            Notification::info(t("Some sessions have been restored to ContextOS."))
                         } else if verify_restored_files {
                             Notification::success(t("Sessions restored"))
                         } else {

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="Wake"
-APP_PROCESS="Wake"
+APP_NAME="ContextOS"
+APP_PROCESS="ContextOS"
 BUNDLE_ID="dev.corey.wake"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

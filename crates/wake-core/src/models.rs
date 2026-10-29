@@ -345,7 +345,16 @@ pub struct ParsedTranscript {
     pub meta: SessionMeta,
     pub mainline: Vec<TranscriptMessage>,
     pub sidechains: Vec<SidechainInfo>,
+    pub usage_events: Vec<SessionUsageEvent>,
     pub unknown_line_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionUsageEvent {
+    /// Request completion time, in epoch milliseconds.
+    pub timestamp: Option<i64>,
+    pub tokens_used: i64,
+    pub model: Option<String>,
 }
 
 /// FTS 索引单元(从解析后消息派生,seq 与详情页一致)
@@ -419,6 +428,12 @@ pub struct SessionFilter {
     /// 新增筛选字段要同时教会 db.rs `push_session_filters` 与 workbench 的两面
     /// 镜子(`same_session_query` / `session_matches_filter`)
     pub project_paths: Vec<String>,
+    /// ContextOS 自有会话标签并集;空 = 不限。
+    pub tags: Vec<String>,
+    /// 模型名并集;空 = 不限。Insights 的 Models 榜单下钻用,与 agents /
+    /// project_paths 同为"并集"语义(单选给一个元素)。匹配的是 sessions.model
+    /// 本身——会话中途换过模型的,这里的口径与列表详情页显示的一致
+    pub models: Vec<String>,
     /// true = 排序不把置顶提前(wake-mcp 的"最近会话"要的是真按时间;GUI 列表
     /// 保持置顶优先,默认 false)
     pub ignore_pins: bool,
@@ -430,6 +445,9 @@ pub enum SortKey {
     Updated,
     Created,
     Messages,
+    /// 按会话 token 用量(含子会话聚合,与消息数同形制)。没报 token 的会话
+    /// 当 0 排——"从高到低"正好让它们沉底,而不是混进前排
+    Tokens,
 }
 
 #[derive(Debug, Clone)]
@@ -448,6 +466,50 @@ pub struct SearchHit {
     pub role: String,
     pub snippet: String,
     pub timestamp: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressionDocumentRecord {
+    pub path: String,
+    pub root_path: String,
+    pub scope: String,
+    pub project_path: String,
+    pub title: String,
+    pub body: String,
+    pub sources: Vec<String>,
+    pub modified_at: i64,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompressionRelationMatch {
+    pub seed_path: String,
+    pub source_session_key: String,
+    pub related_session_key: String,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressionSearchHit {
+    pub path: String,
+    pub scope: String,
+    pub project_path: String,
+    pub title: String,
+    pub snippet: String,
+    pub sources: Vec<String>,
+    pub modified_at: i64,
+    pub score: f64,
+    pub direct_match: bool,
+    pub related_by: Vec<CompressionRelationMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressionSearchResult {
+    pub hits: Vec<CompressionSearchHit>,
+    pub indexed_documents: usize,
+    pub degraded: bool,
+    pub direct_hits: usize,
+    pub relation_hits: usize,
 }
 
 /// 全文搜索的筛选面(`Store::search_with`)。`Store::search(q, agents, project,
@@ -474,15 +536,29 @@ pub struct InsightsData {
     pub as_of: chrono::NaiveDate,
     pub sessions: i64,
     pub prompts: i64,
-    /// SUM(tokens_used);多数 adapter 无 token 数据,0 = 不展示
+    /// 用量榜单口径:逐会话优先取独立扫描值,没有扫描值时回退会话元数据
     pub tokens: i64,
+    /// 独立扫描源文件得到的用量,不与会话记录相加
+    pub scanned_tokens: i64,
+    /// Agent 会话元数据自报的用量,仅作对照
+    pub session_tokens: i64,
     pub project_count: i64,
     /// 最早会话 created_at(ms);0 = 库内无有效时间
     pub first_ts: i64,
     /// 截至 as_of 的连续活跃天数(今天尚无活动时从昨天起算,GitHub 惯例)
     pub current_streak: i64,
     pub longest_streak: i64,
+    /// 当前范围内至少有一条主线用户发言的活跃日数。
+    pub range_active_days: i64,
     pub daily: Vec<(chrono::NaiveDate, i64)>,
+    /// 热力图逐日 Token 用量，来自有可靠发生时间的请求事件。
+    pub daily_tokens: Vec<(chrono::NaiveDate, i64)>,
+    /// 当前查询范围内按本地时段分桶的请求 Token。
+    pub hourly_tokens: [i64; 24],
+    pub weekday_tokens: [i64; 7],
+    pub monthly_tokens: [i64; 12],
+    /// 趋势图窗口内每周的请求 Token。
+    pub weekly_tokens: Vec<i64>,
     /// 本地时段分布(0–23 时)
     pub hourly: [i64; 24],
     /// 星期分布,周一起始(与热力图同序)
@@ -520,6 +596,25 @@ pub struct WindowStats {
     pub active_days: i64,
 }
 
+/// 热力图点击选中的某天所在周期的细分分布(`Store::period_breakdown` 一次
+/// 算好,三个联动视图共用同一份):当天逐时 / 所在周逐日 / 所在月逐日。
+/// 三个数组都从月窗口的同一查询落桶,月末日序用 `day` 反推,不存冗余字段
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeriodBreakdown {
+    /// 选中日(查询入参,UI 用来核对快照是否过期)。Default 给 Unix 纪元,
+    /// 只会出现在测试构造里
+    pub day: chrono::NaiveDate,
+    /// 当天 0–23 时(本地时)
+    pub day_hours: [i64; 24],
+    pub day_hour_tokens: [i64; 24],
+    /// 所在周逐日,周一起始(与 weekday 分布同序)
+    pub week_days: [i64; 7],
+    pub week_day_tokens: [i64; 7],
+    /// 所在月逐日(下标 0 = 1 号,长度随渲染层按月取)
+    pub month_days: [i64; 31],
+    pub month_day_tokens: [i64; 31],
+}
+
 /// 趋势图的一条序列:`weekly` 长 TREND_WEEKS,末项是 as_of 所在周,向前逐周
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrendSeries {
@@ -537,9 +632,9 @@ impl TrendSeries {
 pub const TREND_WEEKS: usize = 53;
 
 impl InsightsData {
-    /// 活跃天数 = daily 长度(派生不另存,免第二个写入点失步)
+    /// 当前范围内至少有一条主线用户发言的活跃日数。
     pub fn active_days(&self) -> i64 {
-        self.daily.len() as i64
+        self.range_active_days
     }
 
     pub fn busiest_day(&self) -> Option<(chrono::NaiveDate, i64)> {
@@ -625,10 +720,19 @@ pub fn trend_week_index(as_of: chrono::NaiveDate, day: chrono::NaiveDate) -> Opt
 /// token(而非用了 0),UI 按此语义隐藏而不是画空条
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageTally {
+    /// 该组的过滤值(agent_id / project_path / 模型名),榜单行点击下钻到
+    /// 会话列表用它——display 与 group 分开(db.rs 的 usage())之后 name 不再
+    /// 可当 key 用(项目按 path 分组、按名展示)
+    pub key: String,
     pub name: String,
     pub sessions: i64,
     pub prompts: i64,
+    /// 独立扫描优先,缺少扫描记录时回退会话记录
     pub tokens: i64,
+    /// 仅独立扫描来源的用量
+    pub scanned_tokens: i64,
+    /// 仅会话元数据中的自报用量
+    pub session_tokens: i64,
 }
 
 /// agent 查 Wake 的一次调用(解析时从工具调用里认出,落 wake_lookups 表)。

@@ -2,8 +2,8 @@
 //! memories)的只读浏览。侧栏底部入口,整页目的地——与 Insights 同形制:替换中栏与
 //! 阅读区、与导航行互斥(`Workbench::page`)。左列按项目分组的文件列表,右侧阅读面
 //! 渲染 Markdown。数据来自 memories 表(scanner 每轮扫描收尾刷新),正文阅读时先读
-//! 磁盘、读不到用库里那份。只看不改:动作只有 Reveal 与 Copy path——写别家的记忆
-//! 是别家的事(用户 2026-09-17 定:整页目的地、只读;MCP 面另有 wake_list_memories)
+//! 磁盘、读不到用库里那份。文件型记忆允许就地编辑;SQLite/线程级虚拟记忆仍只读,
+//! 以免把派生摘要写回上游 agent 的内部库。
 
 use super::*;
 use wake_core::adapters::memory_body;
@@ -26,12 +26,20 @@ struct LoadedMemory {
     source_path: String,
 }
 
+#[derive(Clone)]
+struct PendingMemoryAppend {
+    source_key: String,
+    title: String,
+    body: String,
+}
+
 /// 侧栏导航的筛选(单选互斥,与会话侧栏同一模型:再点当前项回到 All)
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MemoryNav {
     All,
     /// All Memory 下的 User memory 行(会话侧栏 Starred 的同位):只列用户记忆
     User,
+    Kind(&'static str),
     Agent(AgentId),
     /// 空串是没归属的一组(侧栏的 Unknown project 行)
     Project(String),
@@ -52,6 +60,7 @@ pub(super) struct MemoryState {
     /// 侧栏导航的计数(All Memory / User memory / Agents / Projects),与 docs 同一次
     /// 查询刷新
     counts: MemoryCounts,
+    kind_counts: Vec<(&'static str, i64)>,
     nav: MemoryNav,
     /// 筛选刚换过(进页归零、点了导航行):下一次重载必须查(扫描进行中也不按住)并把
     /// 列表拉回顶部、不恢复旧滚动位置
@@ -64,6 +73,10 @@ pub(super) struct MemoryState {
     /// 有 `syncing` 守着就不会重叠,不必再攥着句柄
     pub(super) syncing: bool,
     sync_pending: bool,
+    editing_key: Option<String>,
+    edit_textarea: Option<Entity<TextareaState>>,
+    saving_edit: bool,
+    pending_append: Option<PendingMemoryAppend>,
 }
 
 impl Default for MemoryState {
@@ -76,12 +89,17 @@ impl Default for MemoryState {
             selected: None,
             loaded: None,
             counts: MemoryCounts::default(),
+            kind_counts: Vec::new(),
             nav: MemoryNav::All,
             scope_changed: false,
             load_task: None,
             body_task: None,
             syncing: false,
             sync_pending: false,
+            editing_key: None,
+            edit_textarea: None,
+            saving_edit: false,
+            pending_append: None,
         }
     }
 }
@@ -188,12 +206,17 @@ impl Workbench {
         // 侧栏的 "Unknown project" 行是 `Project("")`:筛的是没归属的一组,不是路径为空串
         // 的项目。项目行只列项目记忆——用户记忆有自己的 User memory 行(用户 2026-09-22
         // 定);MCP 问一个项目仍连用户记忆一起给(`UserMemories` 的默认值 Alongside)
+        let kind_filter = match &self.memory.nav {
+            MemoryNav::Kind(kind) => Some(*kind),
+            _ => None,
+        };
         let filter = match &self.memory.nav {
             MemoryNav::All => MemoryFilter::default(),
             MemoryNav::User => MemoryFilter {
                 user: UserMemories::Only,
                 ..Default::default()
             },
+            MemoryNav::Kind(_) => MemoryFilter::default(),
             MemoryNav::Agent(agent) => MemoryFilter {
                 agents: vec![*agent],
                 ..Default::default()
@@ -210,15 +233,26 @@ impl Workbench {
             },
         };
         let task = cx.background_spawn(async move {
-            let docs = store.list_memories(&filter)?;
+            let all_docs = store.list_memories(&MemoryFilter::default())?;
+            let kind_counts = memory_kind_counts(&all_docs);
+            let mut docs = if kind_filter.is_some() {
+                all_docs
+            } else {
+                store.list_memories(&filter)?
+            };
+            if let Some(kind) = kind_filter {
+                docs.retain(|doc| memory_kind_of(doc) == Some(kind));
+            }
+            dedupe_memory_docs(&mut docs);
             let counts = store.memory_counts()?;
-            anyhow::Ok((docs, counts))
+            anyhow::Ok((docs, counts, kind_counts))
         });
         self.memory.load_task = Some(cx.spawn(async move |this, cx| {
             let loaded = task.await;
             this.update(cx, |this, cx| {
-                if let Ok((mut docs, counts)) = loaded {
+                if let Ok((mut docs, counts, kind_counts)) = loaded {
                     this.memory.counts = counts;
+                    this.memory.kind_counts = kind_counts;
                     // 用户记忆对每个项目都成立、没有"发生时间"的意义,像会话列表的 Pinned
                     // 那样单独一组置顶;其余按更新时间倒序进时间桶
                     docs.sort_by(|a, b| {
@@ -291,6 +325,9 @@ impl Workbench {
         };
         self.memory.selected = Some(key.clone());
         self.memory.loaded = None;
+        self.memory.editing_key = None;
+        self.memory.edit_textarea = None;
+        self.memory.saving_edit = false;
         // 列表行不带正文,选中时按 key 另取一行;正文与来源路径都在后台算:两者都要
         // stat(虚拟路径解析、现场读文件),自定义 location 挂在慢盘上时不能卡 UI 线程
         let store = self.store.clone();
@@ -325,6 +362,282 @@ impl Workbench {
             .ok();
         }));
         cx.notify();
+    }
+
+    fn begin_memory_edit(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(loaded) = self.memory.loaded.as_ref() else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(24)
+                .default_value(loaded.body.to_string())
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        self.memory.editing_key = Some(key);
+        self.memory.edit_textarea = Some(input);
+        self.memory.saving_edit = false;
+        cx.notify();
+    }
+
+    fn cancel_memory_edit(&mut self, cx: &mut Context<Self>) {
+        self.memory.editing_key = None;
+        self.memory.edit_textarea = None;
+        self.memory.saving_edit = false;
+        cx.notify();
+    }
+
+    fn save_memory_edit(
+        &mut self,
+        key: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.memory.saving_edit {
+            return;
+        }
+        let Some(input) = self.memory.edit_textarea.clone() else {
+            return;
+        };
+        let body = input.read(cx).value().to_string();
+        self.memory.saving_edit = true;
+        cx.notify();
+        let task = cx.background_spawn({
+            let path = path.clone();
+            let body = body.clone();
+            async move {
+                std::fs::write(&path, body.as_bytes())?;
+                anyhow::Ok(body)
+            }
+        });
+        let window = window.window_handle();
+        self.memory.body_task = Some(cx.spawn(async move |this, cx| {
+            let saved = task.await;
+            this.update(cx, |this, cx| {
+                this.memory.saving_edit = false;
+                match saved {
+                    Ok(body) => {
+                        if this.memory.selected.as_deref() == Some(key.as_str()) {
+                            if let Some(loaded) = this.memory.loaded.as_mut() {
+                                loaded.body = body.into();
+                            }
+                            this.memory.editing_key = None;
+                            this.memory.edit_textarea = None;
+                        }
+                        this.sync_memories_quietly(cx);
+                        cx.update_window(window, |_, window, cx| {
+                            window.push_notification(Notification::success(t("Memory saved")), cx)
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        cx.update_window(window, |_, window, cx| {
+                            window.push_notification(
+                                Notification::error(crate::tf!(
+                                    "Could not save memory: {}",
+                                    format!("{e:#}")
+                                )),
+                                cx,
+                            )
+                        })
+                        .ok();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn delete_memory_file(
+        &mut self,
+        key: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            let key = key.clone();
+            let path = path.clone();
+            let entity = entity.clone();
+            dialog
+                .title(
+                    div()
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("删除这条记忆？"),
+                )
+                .width(px(480.))
+                .confirm()
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .cancel_text("取消")
+                        .ok_text(crate::ui::move_to_trash())
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
+                .child(
+                    v_flex()
+                        .gap(SPACE_SM)
+                        .text_size(FONT_BODY)
+                        .child(crate::ui::trash_confirm_body())
+                        .child(
+                            div()
+                                .px(SPACE_SM)
+                                .py(SPACE_XS)
+                                .rounded(theme.radius)
+                                .bg(theme.muted)
+                                .text_size(FONT_CAPTION)
+                                .font_family(theme.mono_font_family.clone())
+                                .child(path.clone()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.move_memory_file_to_trash(key.clone(), path.clone(), window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn move_memory_file_to_trash(
+        &mut self,
+        key: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let task = cx.background_spawn(async move { terminal::trash_paths(&[path]) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    window.push_notification(Notification::success("记忆已移入回收站"), cx);
+                    if this.memory.selected.as_deref() == Some(key.as_str()) {
+                        this.memory.selected = None;
+                        this.memory.loaded = None;
+                    }
+                    this.refresh_memories(window, cx);
+                }
+                Err(error) => window.push_notification(
+                    Notification::error(crate::tf!("删除记忆失败：{}", format!("{error:#}"))),
+                    cx,
+                ),
+            })
+        })
+        .detach();
+    }
+
+    fn start_append_memory_to_document(
+        &mut self,
+        doc: &MemoryDoc,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(loaded) = self.memory.loaded.as_ref() else {
+            window.push_notification(Notification::warning("记忆正文还在加载，请稍后再试"), cx);
+            return;
+        };
+        self.memory.pending_append = Some(PendingMemoryAppend {
+            source_key: doc.key.clone(),
+            title: doc.title.clone(),
+            body: loaded.body.to_string(),
+        });
+        window.push_notification(Notification::info("请选择左侧要追加到的目标文档"), cx);
+        cx.notify();
+    }
+
+    fn confirm_append_memory_to_target(
+        &mut self,
+        target_key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.memory.pending_append.clone() else {
+            self.select_memory(target_key, cx);
+            return;
+        };
+        let Some(target) = self
+            .memory
+            .docs
+            .iter()
+            .find(|doc| doc.key == target_key)
+            .cloned()
+        else {
+            return;
+        };
+        if target.key == pending.source_key {
+            window.push_notification(Notification::warning("请选择另一份目标文档"), cx);
+            return;
+        }
+        let path = memory_display_path(&target);
+        if !memory_can_edit(&target, &path) {
+            window.push_notification(Notification::warning("这份记忆不能直接写入"), cx);
+            return;
+        }
+        let title = pending.title.clone();
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
+            let field_inset = BUTTON_SM_PX;
+            let target_path = path.clone();
+            let pending = pending.clone();
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("追加到当前文档"),
+                )
+                .width(px(560.))
+                .confirm()
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .cancel_text("取消")
+                        .ok_text("确认追加"),
+                )
+                .child(
+                    v_flex()
+                        .px(field_inset)
+                        .gap(SPACE_SM)
+                        .child(format!("将“{}”追加到：", title))
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .text_color(_cx.theme().muted_foreground)
+                                .child(target_path.clone()),
+                        ),
+                )
+                .on_ok({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        let result = append_memory_to_file(&target_path, &pending);
+                        entity.update(cx, |this, cx| {
+                            this.memory.pending_append = None;
+                            match result {
+                                Ok(()) => {
+                                    window.push_notification(
+                                        Notification::success("已追加到文档末尾"),
+                                        cx,
+                                    );
+                                    this.refresh_memories(window, cx);
+                                }
+                                Err(error) => window.push_notification(
+                                    Notification::error(crate::tf!(
+                                        "追加失败：{}",
+                                        format!("{error:#}")
+                                    )),
+                                    cx,
+                                ),
+                            }
+                        });
+                        true
+                    }
+                })
+        });
     }
 
     /// 会话页同一形制(用户 2026-09-21:整页宽的页头压着两栏"看着很奇怪"):左列 =
@@ -400,6 +713,7 @@ impl Workbench {
         match &self.memory.nav {
             MemoryNav::All => t("All Memory").to_string(),
             MemoryNav::User => t("User memory").to_string(),
+            MemoryNav::Kind(kind) => (*kind).to_string(),
             MemoryNav::Agent(agent) => agent.display_name().to_string(),
             MemoryNav::Project(path) if path.is_empty() => t("Unknown project").to_string(),
             MemoryNav::Project(path) => self
@@ -485,8 +799,14 @@ impl Workbench {
                             .when(!selected, |row| {
                                 row.hover(|style| style.bg(theme.list_hover))
                             })
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.select_memory(key.clone(), cx)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.memory.pending_append.is_some()
+                                    && this.memory.selected.as_deref() != Some(key.as_str())
+                                {
+                                    this.confirm_append_memory_to_target(key.clone(), window, cx);
+                                } else {
+                                    this.select_memory(key.clone(), cx);
+                                }
                             }))
                             .child(
                                 div()
@@ -523,6 +843,10 @@ impl Workbench {
                                         theme.muted_foreground,
                                     ))
                                     .children(memory_badges(d, &theme))
+                                    .children(memory_kind_of(d).map(|kind| {
+                                        badge(kind, theme.info.opacity(0.14), theme.info)
+                                            .into_any_element()
+                                    }))
                                     .child(div().flex_1())
                                     .child(
                                         div()
@@ -589,26 +913,119 @@ impl Workbench {
             ),
         ];
         lead.extend(memory_badges(doc, &theme));
-        let actions: Vec<AnyElement> = vec![
-            Button::new("memory-reveal")
+        let editable = memory_can_edit(doc, &source_path);
+        let deletable = memory_can_delete(doc, &source_path);
+        let editing = self.memory.editing_key.as_deref() == Some(doc.key.as_str())
+            && self.memory.edit_textarea.is_some();
+        let mut actions: Vec<AnyElement> = Vec::new();
+        if editing {
+            let key = doc.key.clone();
+            let save_path = source_path.clone();
+            actions.push(
+                Button::new(format!("memory-save-{}", doc.key))
+                    .ghost()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(icon("icons/check.svg").with_size(px(16.)))
+                    .tooltip(t("Save"))
+                    .disabled(self.memory.saving_edit)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.save_memory_edit(key.clone(), save_path.clone(), window, cx);
+                    }))
+                    .into_any_element(),
+            );
+            actions.push(
+                Button::new(format!("memory-cancel-edit-{}", doc.key))
+                    .ghost()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(icon("icons/close.svg").with_size(px(16.)))
+                    .tooltip(t("Cancel"))
+                    .disabled(self.memory.saving_edit)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.cancel_memory_edit(cx);
+                    }))
+                    .into_any_element(),
+            );
+        } else if editable {
+            let key = doc.key.clone();
+            actions.push(
+                Button::new(format!("memory-edit-{}", doc.key))
+                    .ghost()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(icon("icons/file-text.svg").with_size(px(16.)))
+                    .tooltip(t("Edit"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_memory_edit(key.clone(), window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !editing && deletable {
+            let key = doc.key.clone();
+            let delete_path = source_path.clone();
+            actions.push(
+                Button::new(format!("memory-delete-{}", doc.key))
+                    .ghost()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(icon("icons/trash-2.svg").with_size(px(16.)))
+                    .tooltip("删除")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.delete_memory_file(key.clone(), delete_path.clone(), window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !editing {
+            if self.memory.pending_append.is_some() {
+                actions.push(
+                    Button::new("memory-append-cancel")
+                        .ghost()
+                        .rounded(RADIUS_BUTTON)
+                        .icon(icon("icons/close.svg").with_size(px(16.)))
+                        .tooltip("取消同步选择")
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.memory.pending_append = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            } else if memory_can_edit(doc, &source_path) {
+                let doc_for_append = doc.clone();
+                actions.push(
+                    Button::new(format!("memory-sync-doc-{}", doc.key))
+                        .ghost()
+                        .rounded(RADIUS_BUTTON)
+                        .icon(icon("icons/link.svg").with_size(px(16.)))
+                        .tooltip("同步到文档")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.start_append_memory_to_document(&doc_for_append, window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        actions.extend(vec![
+            Button::new(format!("memory-reveal-{}", doc.key))
                 .ghost()
                 .rounded(RADIUS_BUTTON)
                 .icon(icon("icons/folder.svg").with_size(px(16.)))
                 .tooltip(reveal_in_fm())
-                .on_click(move |_, _, _| {
+                .on_click(move |_, window, cx| {
                     terminal::reveal_in_file_manager(&reveal_path);
+                    window
+                        .push_notification(Notification::success(t("Opened in file manager")), cx);
                 })
                 .into_any_element(),
-            Button::new("memory-copy-path")
+            Button::new(format!("memory-copy-path-{}", doc.key))
                 .ghost()
                 .rounded(RADIUS_BUTTON)
                 .icon(icon("icons/copy.svg").with_size(px(16.)))
                 .tooltip(t("Copy path"))
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                    window.push_notification(Notification::success(t("Memory path copied")), cx);
                 })
                 .into_any_element(),
-        ];
+        ]);
         let meta_rows: Vec<AnyElement> = vec![
             h_flex()
                 .min_w_0()
@@ -651,17 +1068,49 @@ impl Workbench {
             &theme,
         );
         let content: AnyElement = match &self.memory.loaded {
-            Some(loaded) => markdown_body(
-                format!("memory-{}", doc.key).into(),
-                loaded.body.clone(),
-                &doc.host,
-                &link_base,
-                FONT_MSG_BODY,
-                gpui::rems(0.5),
-                dark,
-                cx,
-            )
-            .into_any_element(),
+            Some(loaded) if editing => {
+                let Some(input) = self.memory.edit_textarea.as_ref() else {
+                    return div().into_any_element();
+                };
+                let editor_height =
+                    px(((loaded.body.lines().count().max(24) + 2) as f32 * 13. * 1.45).max(560.));
+                Textarea::new(input)
+                    .w_full()
+                    .h(editor_height)
+                    .appearance(false)
+                    .bordered(false)
+                    .text_size(FONT_MSG_BODY)
+                    .line_height(relative(1.45))
+                    .into_any_element()
+            }
+            Some(loaded) => {
+                let readonly_note = (!editable).then(|| {
+                    div()
+                        .mb(SPACE_MD)
+                        .p(SPACE_MD)
+                        .rounded(theme.radius)
+                        .bg(theme.muted)
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.muted_foreground)
+                        .child(t(
+                            "This memory is read-only because it is not a local file.",
+                        ))
+                });
+                v_flex()
+                    .w_full()
+                    .children(readonly_note)
+                    .child(markdown_body(
+                        format!("memory-{}", doc.key).into(),
+                        loaded.body.clone(),
+                        &doc.host,
+                        &link_base,
+                        FONT_MSG_BODY,
+                        gpui::rems(0.5),
+                        dark,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
             None => div()
                 .w_full()
                 .flex()
@@ -747,6 +1196,48 @@ impl Workbench {
                         cx,
                     )),
             )
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .px(SIDEBAR_EDGE)
+                    .pb(SPACE_XS)
+                    .gap(SPACE_XS)
+                    .child(group_header(
+                        "memory-kinds-header",
+                        "类型",
+                        false,
+                        cx.listener(|_, _, _window, _cx| {}),
+                        cx,
+                    ))
+                    .children(memory_kind_options().into_iter().map(
+                        |(kind, label, _icon_path)| {
+                            let count = self
+                                .memory
+                                .kind_counts
+                                .iter()
+                                .find(|(k, _)| *k == kind)
+                                .map(|(_, count)| *count)
+                                .unwrap_or(0);
+                            sidebar_row(
+                                format!("memory-kind-{kind}"),
+                                RowLead::None,
+                                label,
+                                (count > 0).then_some(count),
+                                matches!(nav, MemoryNav::Kind(sel) if *sel == kind),
+                                RowLevel::Sub,
+                                cx.listener(move |this, _, _window, cx| {
+                                    let next = if this.memory.nav == MemoryNav::Kind(kind) {
+                                        MemoryNav::All
+                                    } else {
+                                        MemoryNav::Kind(kind)
+                                    };
+                                    this.set_memory_scope(next, cx);
+                                }),
+                                cx,
+                            )
+                        },
+                    )),
+            )
             .child(self.sidebar_groups(
                 "memory-sidebar-scroll",
                 counts.agents.iter().map(|(agent, count)| {
@@ -801,6 +1292,81 @@ fn memory_rows(docs: &[MemoryDoc], today: NaiveDate, pin_user: bool) -> Vec<Memo
     rows
 }
 
+fn memory_kind_options() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        ("决定", "决定", "icons/check-circle.svg"),
+        ("规则", "规则", "icons/list-checks.svg"),
+        ("未完成", "未完成", "icons/circle-dot.svg"),
+        ("项目事实", "项目事实", "icons/info.svg"),
+        ("恢复提示", "恢复提示", "icons/rotate-ccw.svg"),
+    ]
+}
+
+fn memory_kind_of(doc: &MemoryDoc) -> Option<&'static str> {
+    let path = doc.path.replace('\\', "/");
+    if let Some(kind) = memory_kind_options()
+        .into_iter()
+        .find_map(|(kind, _, _)| path.contains(&format!("/{kind}/")).then_some(kind))
+    {
+        return Some(kind);
+    }
+    let body = if doc.body.trim().is_empty() {
+        std::fs::read_to_string(&doc.path).unwrap_or_default()
+    } else {
+        doc.body.clone()
+    };
+    memory_kind_options().into_iter().find_map(|(kind, _, _)| {
+        let yaml = format!("contextos_kind: {kind}");
+        let bullet = format!("- 类型：{kind}");
+        (body.contains(&yaml) || body.contains(&bullet)).then_some(kind)
+    })
+}
+
+fn memory_kind_counts(docs: &[MemoryDoc]) -> Vec<(&'static str, i64)> {
+    memory_kind_options()
+        .into_iter()
+        .map(|(kind, _, _)| {
+            (
+                kind,
+                docs.iter()
+                    .filter(|doc| memory_kind_of(doc) == Some(kind))
+                    .count() as i64,
+            )
+        })
+        .collect()
+}
+
+fn append_memory_to_file(path: &str, pending: &PendingMemoryAppend) -> anyhow::Result<()> {
+    let mut existing = std::fs::read_to_string(path).unwrap_or_default();
+    if !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str("\n");
+    existing.push_str(&format!("## ContextOS 记忆：{}\n\n", pending.title));
+    existing.push_str(&pending.body);
+    if !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    std::fs::write(path, existing)?;
+    Ok(())
+}
+
+fn normalized_memory_path_key(doc: &MemoryDoc) -> String {
+    if doc.scope == MemoryScope::Thread || doc.path.contains('#') {
+        return format!("thread:{}", doc.key);
+    }
+    let raw = doc.path.replace('\\', "/");
+    std::fs::canonicalize(&doc.path)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or(raw)
+        .to_lowercase()
+}
+
+fn dedupe_memory_docs(docs: &mut Vec<MemoryDoc>) {
+    let mut seen = std::collections::HashSet::new();
+    docs.retain(|doc| seen.insert(normalized_memory_path_key(doc)));
+}
+
 /// 一份文档落在哪个组头下:用户记忆 = "User memory"(`pin_user`),其余按更新时间进
 /// 会话列表的时间桶
 fn memory_section_label(d: &MemoryDoc, today: NaiveDate, pin_user: bool) -> SharedString {
@@ -821,6 +1387,18 @@ fn memory_display_path(d: &MemoryDoc) -> String {
     } else {
         d.path.clone()
     }
+}
+
+fn memory_can_edit(d: &MemoryDoc, source_path: &str) -> bool {
+    d.host.is_empty()
+        && d.scope != MemoryScope::Thread
+        && d.path == source_path
+        && !source_path.contains('#')
+        && std::path::Path::new(source_path).is_file()
+}
+
+fn memory_can_delete(d: &MemoryDoc, source_path: &str) -> bool {
+    memory_can_edit(d, source_path)
 }
 
 /// 组头 / 归属徽章的文案:项目名;用户级记忆一组、没有项目的一组

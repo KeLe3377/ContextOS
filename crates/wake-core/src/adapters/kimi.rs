@@ -281,6 +281,7 @@ impl AgentAdapter for KimiAdapter {
             meta: build_meta(r, &state, &self.cwd_for(&r.native_id), &messages),
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events: Vec::new(),
             unknown_line_count: unknown,
         })
     }

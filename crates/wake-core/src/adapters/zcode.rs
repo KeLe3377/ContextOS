@@ -142,6 +142,7 @@ struct Parsed {
     messages: Vec<TranscriptMessage>,
     unknown: u32,
     tokens: i64,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
 }
 
 impl ZcodeAdapter {
@@ -236,7 +237,12 @@ impl ZcodeAdapter {
         &self,
         r: &SessionFileRef,
         decode_images: bool,
-    ) -> Result<(SessionMeta, Vec<TranscriptMessage>, u32)> {
+    ) -> Result<(
+        SessionMeta,
+        Vec<TranscriptMessage>,
+        u32,
+        Vec<crate::models::SessionUsageEvent>,
+    )> {
         let _image_budget = transcript_image_decode_budget(decode_images);
         if Path::new(strip_virtual_path(&r.file_path)) != self.db.as_path() {
             return Err(anyhow!("zcode database is outside adapter roots"));
@@ -249,7 +255,7 @@ impl ZcodeAdapter {
             .ok_or_else(|| anyhow!("zcode session {} not in db", r.native_id))?;
         let parsed = parse_messages(&ro, &r.native_id, decode_images, &schema.order())?;
         let meta = build_meta(r, &row, &parsed);
-        Ok((meta, parsed.messages, parsed.unknown))
+        Ok((meta, parsed.messages, parsed.unknown, parsed.usage_events))
     }
 }
 
@@ -405,13 +411,23 @@ fn parse_messages(
     order: &V1Order,
 ) -> Result<Parsed> {
     let mut tokens = 0i64;
+    let mut usage_events = Vec::new();
     let (messages, unknown) =
         parse_v1_messages(ro, sid, decode_images, order, |md, role, message| {
             if role == Role::Assistant {
-                tokens += md
+                let count = md
                     .pointer("/tokens/total")
                     .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    .max(0);
+                tokens = tokens.saturating_add(count);
+                if count > 0 {
+                    usage_events.push(crate::models::SessionUsageEvent {
+                        timestamp: message.as_ref().and_then(|message| message.timestamp),
+                        tokens_used: count,
+                        model: optional_string(md.get("modelId")),
+                    });
+                }
             }
             let Some(m) = message else { return };
             if role == Role::Assistant {
@@ -432,12 +448,18 @@ fn parse_messages(
         messages,
         unknown,
         tokens,
+        usage_events,
     })
 }
 
 impl AgentAdapter for ZcodeAdapter {
     fn agent(&self) -> AgentId {
         AgentId::Zcode
+    }
+
+    fn begin_scan(&self) {
+        self.rows_cache.invalidate();
+        self.hidden_cache.invalidate();
     }
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
@@ -452,6 +474,7 @@ impl AgentAdapter for ZcodeAdapter {
             None => Vec::new(),
         };
         let hidden = self.hidden();
+        let source_stamp = db_cache_stamp(&self.db);
         Ok(rows
             .into_iter()
             .filter(|row| row.content_len > 0 && !hidden.contains(&row.id))
@@ -459,23 +482,25 @@ impl AgentAdapter for ZcodeAdapter {
                 agent: AgentId::Zcode,
                 file_path: virtual_path(&self.db, &row.id),
                 native_id: row.id,
-                mtime_ms: row.updated_ms,
+                // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                mtime_ms: source_stamp,
                 size: row.content_len,
             })
             .collect())
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (meta, messages, unknown) = self.parse(r, false)?;
+        let (meta, messages, unknown, _) = self.parse(r, false)?;
         Ok(ParsedSession::derive(meta, &messages, unknown))
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (meta, messages, unknown) = self.parse(r, true)?;
+        let (meta, messages, unknown, usage_events) = self.parse(r, true)?;
         Ok(ParsedTranscript {
             meta,
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events,
             unknown_line_count: unknown,
         })
     }

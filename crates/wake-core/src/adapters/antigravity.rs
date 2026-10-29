@@ -1,5 +1,5 @@
 use super::parse_utils::*;
-use super::sqlite_ro::{open_sqlite_ro, virtual_path};
+use super::sqlite_ro::{db_cache_stamp, open_sqlite_ro, virtual_path};
 use super::AgentAdapter;
 use crate::models::*;
 use anyhow::{anyhow, Result};
@@ -165,17 +165,23 @@ impl AgentAdapter for AntigravityAdapter {
         AgentId::Antigravity
     }
 
+    fn begin_scan(&self) {
+        self.rows_cache.invalidate();
+    }
+
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let Some(rows) = self.rows() else {
             return Ok(Vec::new());
         };
+        let source_stamp = db_cache_stamp(&self.db);
         Ok(rows
             .into_iter()
             .map(|row| SessionFileRef {
                 agent: AgentId::Antigravity,
                 native_id: row.id.clone(),
                 file_path: virtual_path(&self.db, &row.id),
-                mtime_ms: row.modified_ms,
+                // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                mtime_ms: source_stamp,
                 // 正文不可读,标题/preview 长度即内容指纹(dirty 判断用)
                 size: (row.title.len() + row.preview.len()) as i64,
             })
@@ -205,6 +211,7 @@ impl AgentAdapter for AntigravityAdapter {
             meta,
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events: Vec::new(),
             unknown_line_count: 0,
         })
     }

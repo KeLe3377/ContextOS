@@ -1083,6 +1083,7 @@ mod tests {
                 meta: p.meta,
                 mainline: vec![],
                 sidechains: vec![],
+                usage_events: vec![],
                 unknown_line_count: p.unknown_line_count,
             })
         }

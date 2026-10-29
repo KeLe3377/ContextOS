@@ -6,9 +6,15 @@ use serde_json::{json, Map, Value};
 
 use crate::db::Store;
 use crate::services::compression::{self, RunOverrides, DEFAULT_LLM_INPUT_LIMIT_CHARS};
+use crate::services::laya_runtime::LayaRuntimeMode;
 
 pub const PROVIDERS_V2_KEY: &str = "compression_llm_providers_v2";
 pub const ACTIVE_PROVIDER_ID_KEY: &str = "compression_llm_active_provider_id";
+pub const DECISION_PROVIDER_KEY: &str = "compression_decision_provider";
+pub const DECISION_MODEL_KEY: &str = "compression_decision_model";
+pub const LAYA_RUNTIME_MODE_KEY: &str = "compression_laya_runtime_mode";
+pub const EXTERNAL_LAYA_API_URL_KEY: &str = "compression_external_laya_api_url";
+const EXTERNAL_LAYA_API_KEY_KEY: &str = "compression_external_laya_api_key";
 const MECHANICAL_KEY: &str = "compression_strategy_mechanical_v1";
 const JEV_STRATEGY_KEY: &str = "compression_strategy_jev_v1";
 const LLM_PROMPT_KEY: &str = "compression_strategy_llm_prompt_v1";
@@ -32,6 +38,49 @@ pub struct LlmProviderPublic {
     pub active: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionModelProvider {
+    #[default]
+    Jev,
+    Laya,
+}
+
+impl DecisionModelProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jev => "jev",
+            Self::Laya => "laya",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Jev => "Jev",
+            Self::Laya => "Laya",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "jev" => Some(Self::Jev),
+            "laya" => Some(Self::Laya),
+            _ => None,
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Jev => "jev-latest",
+            Self::Laya => "laya-multilingual",
+        }
+    }
+
+    pub fn requires_api_key(self) -> bool {
+        matches!(self, Self::Jev)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompressionServiceSettings {
     pub llm_enabled: bool,
@@ -40,6 +89,11 @@ pub struct CompressionServiceSettings {
     pub llm_timeout_secs: u64,
     pub llm_input_limit_chars: usize,
     pub jev_enabled: bool,
+    pub decision_provider: DecisionModelProvider,
+    pub decision_model: String,
+    pub laya_runtime_mode: LayaRuntimeMode,
+    pub external_laya_api_url: String,
+    pub external_laya_api_key: String,
     pub jev_api_url: String,
     pub jev_api_key: String,
     pub jev_timeout_secs: u64,
@@ -53,6 +107,11 @@ pub struct CompressionServicePublic {
     pub llm_timeout_secs: u64,
     pub llm_input_limit_chars: usize,
     pub jev_enabled: bool,
+    pub decision_provider: DecisionModelProvider,
+    pub decision_model: String,
+    pub laya_runtime_mode: LayaRuntimeMode,
+    pub external_laya_api_url: String,
+    pub external_laya_api_key_configured: bool,
     pub jev_api_url: String,
     pub jev_api_key_configured: bool,
     pub jev_timeout_secs: u64,
@@ -85,11 +144,17 @@ pub struct RuntimeCompressionSettings {
 
 impl RuntimeCompressionSettings {
     pub fn mode(&self) -> &'static str {
-        match (self.service.jev_enabled, self.service.llm_enabled) {
-            (false, false) => "mechanical",
-            (true, false) => "mechanical+jev",
-            (false, true) => "mechanical+llm",
-            (true, true) => "mechanical+jev+llm",
+        match (
+            self.service.jev_enabled,
+            self.service.llm_enabled,
+            self.service.decision_provider,
+        ) {
+            (false, false, _) => "mechanical",
+            (false, true, _) => "mechanical+llm",
+            (true, false, DecisionModelProvider::Jev) => "mechanical+jev",
+            (true, true, DecisionModelProvider::Jev) => "mechanical+jev+llm",
+            (true, false, DecisionModelProvider::Laya) => "mechanical+laya",
+            (true, true, DecisionModelProvider::Laya) => "mechanical+laya+llm",
         }
     }
 
@@ -102,11 +167,24 @@ impl RuntimeCompressionSettings {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.service.jev_enabled
-            && (self.service.jev_api_url.trim().is_empty()
-                || self.service.jev_api_key.trim().is_empty())
-        {
-            bail!("Jev is enabled but its API URL or key is not configured");
+        if self.service.jev_enabled {
+            let provider = self.service.decision_provider;
+            let connection_missing = match provider {
+                DecisionModelProvider::Jev => {
+                    self.service.jev_api_url.trim().is_empty()
+                        || self.service.jev_api_key.trim().is_empty()
+                }
+                DecisionModelProvider::Laya => {
+                    self.service.laya_runtime_mode == LayaRuntimeMode::External
+                        && self.service.external_laya_api_url.trim().is_empty()
+                }
+            };
+            if connection_missing || self.service.decision_model.trim().is_empty() {
+                bail!(
+                    "{} is enabled but its API URL, model, or required API key is not configured",
+                    provider.display_name()
+                );
+            }
         }
         if self.service.llm_enabled {
             let Some(provider) = self.active_provider() else {
@@ -126,6 +204,16 @@ impl RuntimeCompressionSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MechanicalStrategySettings {
+    #[serde(default)]
+    pub retention_mode: MechanicalRetentionMode,
+    #[serde(default)]
+    pub allow_jev_delete_assistant_body: bool,
+    #[serde(default)]
+    pub allow_jev_delete_user_messages: bool,
+    #[serde(default = "default_expanded_max_chars")]
+    pub expanded_max_chars: usize,
+    #[serde(default = "default_evidence_max_chars")]
+    pub evidence_max_chars: usize,
     pub empty_output_rule: EmptyOutputRule,
     pub error_protection_rule: ErrorProtectionRule,
     pub patch_rule: PatchRule,
@@ -134,6 +222,41 @@ pub struct MechanicalStrategySettings {
     pub listing_output_rule: ListingOutputRule,
     pub instruction_and_tool_spec_rule: InstructionAndToolSpecRule,
     pub generic_large_output_rule: GenericLargeOutputRule,
+}
+
+fn default_expanded_max_chars() -> usize {
+    6_000
+}
+
+fn default_evidence_max_chars() -> usize {
+    2_000
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MechanicalRetentionMode {
+    #[default]
+    FullMechanical,
+    BodyOnly,
+    BodyWithStructure,
+}
+
+impl MechanicalRetentionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FullMechanical => "full_mechanical",
+            Self::BodyOnly => "body_only",
+            Self::BodyWithStructure => "body_with_structure",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FullMechanical => "完整机械裁剪",
+            Self::BodyOnly => "正文",
+            Self::BodyWithStructure => "正文 + 结构摘要",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -225,7 +348,17 @@ pub struct JevStrategySettings {
     pub jev_candidate_min_chars: usize,
     pub jev_prompt_template: String,
     pub jev_fallback_on_error: JevFallback,
+    #[serde(default)]
+    pub scoring_mode: DecisionScoringMode,
     pub jev_score_levels: Vec<JevScoreLevel>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionScoringMode {
+    Absolute,
+    #[default]
+    Relative,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +402,10 @@ pub struct LlmPromptSettings {
     pub llm_temperature: f64,
 }
 
-pub fn load_runtime_settings(store: &Store, overrides: &RunOverrides) -> RuntimeCompressionSettings {
+pub fn load_runtime_settings(
+    store: &Store,
+    overrides: &RunOverrides,
+) -> RuntimeCompressionSettings {
     let mut settings = load_settings(store);
     if let Some(enabled) = overrides.jev_enabled {
         settings.service.jev_enabled = enabled;
@@ -288,7 +424,9 @@ pub fn load_settings(store: &Store) -> FullCompressionSettings {
         service: load_service_settings(store),
         strategy: CompressionStrategySettings {
             mechanical: load_json_pref(store, MECHANICAL_KEY).unwrap_or_else(default_mechanical),
-            jev: load_json_pref(store, JEV_STRATEGY_KEY).unwrap_or_else(default_jev_strategy),
+            jev: load_json_pref(store, JEV_STRATEGY_KEY)
+                .map(migrate_jev_strategy)
+                .unwrap_or_else(default_jev_strategy),
             llm: load_llm_prompt_settings(store),
         },
     }
@@ -340,6 +478,49 @@ fn load_service_settings(store: &Store) -> CompressionServiceSettings {
         .pref_get(ACTIVE_PROVIDER_ID_KEY)
         .filter(|id| providers.iter().any(|provider| provider.id == *id))
         .unwrap_or_else(|| providers.first().map(|p| p.id.clone()).unwrap_or_default());
+    let decision_provider = store
+        .pref_get(DECISION_PROVIDER_KEY)
+        .as_deref()
+        .and_then(DecisionModelProvider::parse)
+        .unwrap_or_default();
+    let decision_model = store
+        .pref_get(DECISION_MODEL_KEY)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| decision_provider.default_model().into());
+    let legacy_url = store.pref_get("jev_api_url").unwrap_or_default();
+    let legacy_key = store.pref_get("jev_api_key").unwrap_or_default();
+    let saved_laya_runtime_mode = store.pref_get(LAYA_RUNTIME_MODE_KEY);
+    let legacy_laya_config = saved_laya_runtime_mode.is_none()
+        && decision_provider == DecisionModelProvider::Laya
+        && !legacy_url.trim().is_empty();
+    let laya_runtime_mode = saved_laya_runtime_mode
+        .as_deref()
+        .and_then(LayaRuntimeMode::parse)
+        .unwrap_or_else(|| {
+            if legacy_laya_config {
+                LayaRuntimeMode::External
+            } else {
+                LayaRuntimeMode::Managed
+            }
+        });
+    let external_laya_api_url = store
+        .pref_get(EXTERNAL_LAYA_API_URL_KEY)
+        .unwrap_or_else(|| {
+            if legacy_laya_config {
+                legacy_url.clone()
+            } else {
+                String::new()
+            }
+        });
+    let external_laya_api_key = store
+        .pref_get(EXTERNAL_LAYA_API_KEY_KEY)
+        .unwrap_or_else(|| {
+            if legacy_laya_config {
+                legacy_key.clone()
+            } else {
+                String::new()
+            }
+        });
     CompressionServiceSettings {
         llm_enabled: pref_bool(store, "compression_llm_enabled", true),
         llm_providers: providers,
@@ -352,8 +533,13 @@ fn load_service_settings(store: &Store) -> CompressionServiceSettings {
         )
         .max(1) as usize,
         jev_enabled: pref_bool(store, "compression_jev_enabled", false),
-        jev_api_url: store.pref_get("jev_api_url").unwrap_or_default(),
-        jev_api_key: store.pref_get("jev_api_key").unwrap_or_default(),
+        decision_provider,
+        decision_model,
+        laya_runtime_mode,
+        external_laya_api_url,
+        external_laya_api_key,
+        jev_api_url: legacy_url,
+        jev_api_key: legacy_key,
         jev_timeout_secs: pref_u64(store, "jev_timeout_secs", 60).clamp(10, 1800),
     }
 }
@@ -372,8 +558,12 @@ fn load_providers_v2(store: &Store) -> Vec<LlmProviderConfig> {
         migrated.push(LlmProviderConfig {
             id: "default".into(),
             name: "Provider 1".into(),
-            api_url: store.pref_get("compression_llm_api_url").unwrap_or_default(),
-            api_key: store.pref_get("compression_llm_api_key").unwrap_or_default(),
+            api_url: store
+                .pref_get("compression_llm_api_url")
+                .unwrap_or_default(),
+            api_key: store
+                .pref_get("compression_llm_api_key")
+                .unwrap_or_default(),
             model: store
                 .pref_get("compression_llm_model")
                 .filter(|value| !value.trim().is_empty())
@@ -397,7 +587,8 @@ fn legacy_providers(store: &Store) -> Vec<LlmProviderConfig> {
         .iter()
         .enumerate()
         .filter_map(|(index, value)| {
-            let name = text_field(value, "name").unwrap_or_else(|| format!("Provider {}", index + 1));
+            let name =
+                text_field(value, "name").unwrap_or_else(|| format!("Provider {}", index + 1));
             let api_url = text_field(value, "api_url").unwrap_or_default();
             let api_key = text_field(value, "api_key").unwrap_or_default();
             let model = text_field(value, "model").unwrap_or_else(|| "gpt-4.1-mini".into());
@@ -417,10 +608,14 @@ fn legacy_providers(store: &Store) -> Vec<LlmProviderConfig> {
         .collect::<Vec<_>>();
     if let Some(first) = providers.first_mut() {
         if first.api_url.trim().is_empty() {
-            first.api_url = store.pref_get("compression_llm_api_url").unwrap_or_default();
+            first.api_url = store
+                .pref_get("compression_llm_api_url")
+                .unwrap_or_default();
         }
         if first.api_key.trim().is_empty() {
-            first.api_key = store.pref_get("compression_llm_api_key").unwrap_or_default();
+            first.api_key = store
+                .pref_get("compression_llm_api_key")
+                .unwrap_or_default();
         }
         if first.model.trim().is_empty() || first.model == "gpt-4.1-mini" {
             if let Some(model) = store
@@ -453,6 +648,11 @@ fn public_service(settings: &CompressionServiceSettings) -> CompressionServicePu
         llm_timeout_secs: settings.llm_timeout_secs,
         llm_input_limit_chars: settings.llm_input_limit_chars,
         jev_enabled: settings.jev_enabled,
+        decision_provider: settings.decision_provider,
+        decision_model: settings.decision_model.clone(),
+        laya_runtime_mode: settings.laya_runtime_mode,
+        external_laya_api_url: settings.external_laya_api_url.clone(),
+        external_laya_api_key_configured: !settings.external_laya_api_key.trim().is_empty(),
         jev_api_url: settings.jev_api_url.clone(),
         jev_api_key_configured: !settings.jev_api_key.trim().is_empty(),
         jev_timeout_secs: settings.jev_timeout_secs,
@@ -476,7 +676,11 @@ fn update_service(store: &Store, value: &Value) -> Result<()> {
             }
             "active_llm_provider_id" => {
                 let id = string_value(key, value)?;
-                if !service.llm_providers.iter().any(|provider| provider.id == id) {
+                if !service
+                    .llm_providers
+                    .iter()
+                    .any(|provider| provider.id == id)
+                {
                     bail!("`active_llm_provider_id` does not match a provider");
                 }
                 service.active_llm_provider_id = id;
@@ -488,11 +692,30 @@ fn update_service(store: &Store, value: &Value) -> Result<()> {
                 service.llm_input_limit_chars = usize_value(key, value)?.max(1);
             }
             "jev_enabled" => service.jev_enabled = bool_value(key, value)?,
+            "decision_provider" => {
+                let provider = string_value(key, value)?;
+                service.decision_provider =
+                    DecisionModelProvider::parse(&provider).ok_or_else(|| {
+                        anyhow::anyhow!("`decision_provider` must be `jev` or `laya`")
+                    })?;
+            }
+            "decision_model" => service.decision_model = string_value(key, value)?,
+            "laya_runtime_mode" => {
+                let mode = string_value(key, value)?;
+                service.laya_runtime_mode = LayaRuntimeMode::parse(&mode).ok_or_else(|| {
+                    anyhow::anyhow!("`laya_runtime_mode` must be `managed` or `external`")
+                })?;
+            }
+            "external_laya_api_url" => {
+                service.external_laya_api_url = string_value(key, value)?;
+            }
             "jev_api_url" => service.jev_api_url = string_value(key, value)?,
             "jev_timeout_secs" => {
                 service.jev_timeout_secs = u64_value(key, value)?.clamp(10, 1800);
             }
-            "jev_api_key" | "api_key" => bail!("API keys cannot be changed through MCP/CLI"),
+            "jev_api_key" | "external_laya_api_key" | "api_key" => {
+                bail!("API keys cannot be changed through MCP/CLI")
+            }
             _ => bail!("unknown compression service setting `{key}`"),
         }
     }
@@ -541,7 +764,17 @@ pub fn save_service_settings(
     };
     store.pref_set("compression_llm_enabled", bool_str(service.llm_enabled))?;
     store.pref_set("compression_jev_enabled", bool_str(service.jev_enabled))?;
-    store.pref_set("compression_llm_timeout_secs", &service.llm_timeout_secs.to_string())?;
+    store.pref_set(DECISION_PROVIDER_KEY, service.decision_provider.as_str())?;
+    store.pref_set(DECISION_MODEL_KEY, service.decision_model.trim())?;
+    store.pref_set(LAYA_RUNTIME_MODE_KEY, service.laya_runtime_mode.as_str())?;
+    store.pref_set(
+        EXTERNAL_LAYA_API_URL_KEY,
+        service.external_laya_api_url.trim(),
+    )?;
+    store.pref_set(
+        "compression_llm_timeout_secs",
+        &service.llm_timeout_secs.to_string(),
+    )?;
     store.pref_set(
         "compression_llm_input_limit_chars",
         &service.llm_input_limit_chars.to_string(),
@@ -550,6 +783,10 @@ pub fn save_service_settings(
     store.pref_set("jev_timeout_secs", &service.jev_timeout_secs.to_string())?;
     if write_api_keys {
         store.pref_set("jev_api_key", service.jev_api_key.trim())?;
+        store.pref_set(
+            EXTERNAL_LAYA_API_KEY_KEY,
+            service.external_laya_api_key.trim(),
+        )?;
     }
     store.pref_set(PROVIDERS_V2_KEY, &serde_json::to_string(&providers)?)?;
     store.pref_set(ACTIVE_PROVIDER_ID_KEY, &active)?;
@@ -582,6 +819,7 @@ fn update_strategy(store: &Store, value: &Value) -> Result<()> {
             "jev" => {
                 let current = serde_json::to_value(
                     load_json_pref::<JevStrategySettings>(store, JEV_STRATEGY_KEY)
+                        .map(migrate_jev_strategy)
                         .unwrap_or_else(default_jev_strategy),
                 )?;
                 let merged = merge_patch(current, value.clone())?;
@@ -611,8 +849,16 @@ fn update_legacy_flat(store: &Store, object: &Map<String, Value>) -> Result<()> 
     let mut llm_patch = Map::new();
     for (key, value) in object {
         match key.as_str() {
-            "llm_enabled" | "jev_enabled" | "llm_timeout_secs" | "llm_input_limit_chars"
-            | "jev_api_url" | "jev_timeout_secs" => {
+            "llm_enabled"
+            | "jev_enabled"
+            | "decision_provider"
+            | "decision_model"
+            | "laya_runtime_mode"
+            | "external_laya_api_url"
+            | "llm_timeout_secs"
+            | "llm_input_limit_chars"
+            | "jev_api_url"
+            | "jev_timeout_secs" => {
                 service_patch.insert(key.clone(), value.clone());
             }
             "llm_provider_index" => {
@@ -628,9 +874,7 @@ fn update_legacy_flat(store: &Store, object: &Map<String, Value>) -> Result<()> 
             "llm_provider_name" | "llm_api_url" | "llm_model" => {
                 let service = load_service_settings(store);
                 let mut providers = service.llm_providers.clone();
-                let active = service
-                    .active_llm_provider_id
-                    .clone();
+                let active = service.active_llm_provider_id.clone();
                 let Some(provider_index) = providers
                     .iter()
                     .position(|provider| provider.id == active)
@@ -674,6 +918,10 @@ fn is_legacy_flat_key(key: &str) -> bool {
         key,
         "llm_enabled"
             | "jev_enabled"
+            | "decision_provider"
+            | "decision_model"
+            | "laya_runtime_mode"
+            | "external_laya_api_url"
             | "llm_timeout_secs"
             | "llm_input_limit_chars"
             | "jev_api_url"
@@ -700,9 +948,10 @@ fn apply_resets(store: &Store, value: &Value) -> Result<()> {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("reset paths must be strings"))?;
         match path {
-            "strategy.mechanical" => {
-                store.pref_set(MECHANICAL_KEY, &serde_json::to_string(&default_mechanical())?)?
-            }
+            "strategy.mechanical" => store.pref_set(
+                MECHANICAL_KEY,
+                &serde_json::to_string(&default_mechanical())?,
+            )?,
             "strategy.mechanical.empty_output_rule" => reset_mechanical_rule(store, path)?,
             "strategy.mechanical.error_protection_rule" => reset_mechanical_rule(store, path)?,
             "strategy.mechanical.patch_rule" => reset_mechanical_rule(store, path)?,
@@ -713,9 +962,10 @@ fn apply_resets(store: &Store, value: &Value) -> Result<()> {
                 reset_mechanical_rule(store, path)?
             }
             "strategy.mechanical.generic_large_output_rule" => reset_mechanical_rule(store, path)?,
-            "strategy.jev" => {
-                store.pref_set(JEV_STRATEGY_KEY, &serde_json::to_string(&default_jev_strategy())?)?
-            }
+            "strategy.jev" => store.pref_set(
+                JEV_STRATEGY_KEY,
+                &serde_json::to_string(&default_jev_strategy())?,
+            )?,
             "strategy.jev.jev_score_levels" => reset_jev_field(store, "jev_score_levels")?,
             "strategy.jev.jev_prompt_template" => reset_jev_field(store, "jev_prompt_template")?,
             "strategy.llm" => save_llm_prompt_settings(store, &default_llm_prompt_settings())?,
@@ -757,8 +1007,9 @@ fn reset_mechanical_rule(store: &Store, path: &str) -> Result<()> {
 }
 
 fn reset_jev_field(store: &Store, field: &str) -> Result<()> {
-    let mut current =
-        load_json_pref::<JevStrategySettings>(store, JEV_STRATEGY_KEY).unwrap_or_else(default_jev_strategy);
+    let mut current = load_json_pref::<JevStrategySettings>(store, JEV_STRATEGY_KEY)
+        .map(migrate_jev_strategy)
+        .unwrap_or_else(default_jev_strategy);
     let defaults = default_jev_strategy();
     match field {
         "jev_score_levels" => current.jev_score_levels = defaults.jev_score_levels,
@@ -793,10 +1044,12 @@ fn load_llm_prompt_settings(store: &Store) -> LlmPromptSettings {
         .pref_get("compression_strategy_single")
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(compression::default_single_strategy);
-    settings.memory_generation_strategy = store
-        .pref_get("compression_strategy_memory_generation")
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(compression::default_memory_generation_strategy);
+    settings.memory_generation_strategy = compression::migrate_memory_generation_strategy(
+        store
+            .pref_get("compression_strategy_memory_generation")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(compression::default_memory_generation_strategy),
+    );
     settings.multi_strategy = store
         .pref_get("compression_strategy_multi")
         .filter(|value| !value.trim().is_empty())
@@ -814,7 +1067,10 @@ fn load_llm_prompt_settings(store: &Store) -> LlmPromptSettings {
 }
 
 fn save_llm_prompt_settings(store: &Store, settings: &LlmPromptSettings) -> Result<()> {
-    store.pref_set("compression_strategy_single", settings.single_strategy.trim())?;
+    store.pref_set(
+        "compression_strategy_single",
+        settings.single_strategy.trim(),
+    )?;
     store.pref_set(
         "compression_strategy_memory_generation",
         settings.memory_generation_strategy.trim(),
@@ -833,7 +1089,10 @@ fn save_llm_prompt_settings(store: &Store, settings: &LlmPromptSettings) -> Resu
             custom.insert(tag.clone(), Value::String(strategy.trim().to_string()));
         }
     }
-    store.pref_set("compression_strategy_tag_custom", &serde_json::to_string(&custom)?)?;
+    store.pref_set(
+        "compression_strategy_tag_custom",
+        &serde_json::to_string(&custom)?,
+    )?;
     let outer = LlmPromptSettings {
         single_strategy: String::new(),
         memory_generation_strategy: String::new(),
@@ -873,6 +1132,11 @@ fn load_tag_specific_strategies(store: &Store) -> HashMap<String, String> {
 
 fn default_mechanical() -> MechanicalStrategySettings {
     MechanicalStrategySettings {
+        retention_mode: MechanicalRetentionMode::FullMechanical,
+        allow_jev_delete_assistant_body: false,
+        allow_jev_delete_user_messages: false,
+        expanded_max_chars: default_expanded_max_chars(),
+        evidence_max_chars: default_evidence_max_chars(),
         empty_output_rule: EmptyOutputRule {
             enabled: true,
             drop_empty_output: true,
@@ -967,6 +1231,7 @@ fn default_jev_strategy() -> JevStrategySettings {
         jev_candidate_min_chars: 3_000,
         jev_prompt_template: default_jev_prompt_template(),
         jev_fallback_on_error: JevFallback::UseMechanical,
+        scoring_mode: DecisionScoringMode::Relative,
         jev_score_levels: vec![
             JevScoreLevel {
                 id: "discard".into(),
@@ -1009,7 +1274,15 @@ fn default_jev_strategy() -> JevStrategySettings {
 }
 
 fn default_jev_prompt_template() -> String {
-    "你是 ContextOS 的工具输出信息价值评估器。你的任务不是决定是否恢复全文，而是判断该 Output 在压缩交接中应该保留到什么程度。\n\n请根据以下维度给出 0.0 到 1.0 的 score：\n- 是否包含用户目标、关键决定、未完成事项或恢复上下文。\n- 是否包含错误、失败、测试结果、编译结果、异常堆栈或修复证据。\n- 是否包含文件路径、代码修改、patch、命令输出、版本/环境信息。\n- 是否只是成功退出、空轮询、重复列表、长源码全文或完整说明文档。\n\n请返回 JSON：{\"score\":0.0,\"reason\":\"简短理由\",\"evidence_hints\":[\"需要保留的关键词或片段\"]}".into()
+    "判断这段工具输出在压缩后的项目交接中应保留到什么程度。重点考虑：是否包含用户目标、关键决定、未完成事项、错误与修复证据、测试或编译结果、文件路径、代码修改、版本和环境信息；降低空轮询、重复列表、可重新生成的长源码或完整说明文档的等级。只评估当前候选，不推测其他候选是否重复或已被取代。".into()
+}
+
+fn migrate_jev_strategy(mut settings: JevStrategySettings) -> JevStrategySettings {
+    let legacy = "你是 ContextOS 的工具输出信息价值评估器。你的任务不是决定是否恢复全文，而是判断该 Output 在压缩交接中应该保留到什么程度。\n\n请根据以下维度给出 0.0 到 1.0 的 score：\n- 是否包含用户目标、关键决定、未完成事项或恢复上下文。\n- 是否包含错误、失败、测试结果、编译结果、异常堆栈或修复证据。\n- 是否包含文件路径、代码修改、patch、命令输出、版本/环境信息。\n- 是否只是成功退出、空轮询、重复列表、长源码全文或完整说明文档。\n\n请返回 JSON：{\"score\":0.0,\"reason\":\"简短理由\",\"evidence_hints\":[\"需要保留的关键词或片段\"]}";
+    if settings.jev_prompt_template.trim() == legacy {
+        settings.jev_prompt_template = default_jev_prompt_template();
+    }
+    settings
 }
 
 fn default_llm_prompt_settings() -> LlmPromptSettings {
@@ -1036,12 +1309,32 @@ fn default_llm_prompt_settings() -> LlmPromptSettings {
 }
 
 fn validate_mechanical(settings: &MechanicalStrategySettings) -> Result<()> {
-    ensure_positive(settings.error_protection_rule.head_chars, "error_protection_rule.head_chars")?;
-    ensure_positive(settings.error_protection_rule.tail_chars, "error_protection_rule.tail_chars")?;
-    ensure_positive(settings.patch_rule.max_hunks_per_file, "patch_rule.max_hunks_per_file")?;
-    ensure_positive(settings.source_listing_rule.max_lines, "source_listing_rule.max_lines")?;
-    ensure_positive(settings.search_output_rule.max_matches, "search_output_rule.max_matches")?;
-    ensure_positive(settings.listing_output_rule.max_items, "listing_output_rule.max_items")?;
+    ensure_positive(settings.expanded_max_chars, "expanded_max_chars")?;
+    ensure_positive(settings.evidence_max_chars, "evidence_max_chars")?;
+    ensure_positive(
+        settings.error_protection_rule.head_chars,
+        "error_protection_rule.head_chars",
+    )?;
+    ensure_positive(
+        settings.error_protection_rule.tail_chars,
+        "error_protection_rule.tail_chars",
+    )?;
+    ensure_positive(
+        settings.patch_rule.max_hunks_per_file,
+        "patch_rule.max_hunks_per_file",
+    )?;
+    ensure_positive(
+        settings.source_listing_rule.max_lines,
+        "source_listing_rule.max_lines",
+    )?;
+    ensure_positive(
+        settings.search_output_rule.max_matches,
+        "search_output_rule.max_matches",
+    )?;
+    ensure_positive(
+        settings.listing_output_rule.max_items,
+        "listing_output_rule.max_items",
+    )?;
     ensure_positive(
         settings.generic_large_output_rule.min_output_chars,
         "generic_large_output_rule.min_output_chars",
@@ -1163,7 +1456,10 @@ fn load_json_pref<T: for<'de> Deserialize<'de>>(store: &Store, key: &str) -> Opt
 }
 
 fn pref_bool(store: &Store, key: &str, default: bool) -> bool {
-    store.pref_get(key).map(|value| value == "true").unwrap_or(default)
+    store
+        .pref_get(key)
+        .map(|value| value == "true")
+        .unwrap_or(default)
 }
 
 fn pref_u64(store: &Store, key: &str, default: u64) -> u64 {
@@ -1204,8 +1500,7 @@ fn u64_value(name: &str, value: &Value) -> Result<u64> {
 }
 
 fn usize_value(name: &str, value: &Value) -> Result<usize> {
-    usize::try_from(u64_value(name, value)?)
-        .map_err(|_| anyhow::anyhow!("`{name}` is too large"))
+    usize::try_from(u64_value(name, value)?).map_err(|_| anyhow::anyhow!("`{name}` is too large"))
 }
 
 fn ensure_positive(value: usize, name: &str) -> Result<()> {
@@ -1216,7 +1511,11 @@ fn ensure_positive(value: usize, name: &str) -> Result<()> {
 }
 
 fn bool_str(value: bool) -> &'static str {
-    if value { "true" } else { "false" }
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 fn default_provider() -> LlmProviderConfig {
@@ -1268,4 +1567,85 @@ fn stable_provider_id(name: &str, index: usize) -> String {
         id = format!("provider-{}", index + 1);
     }
     id
+}
+
+#[cfg(test)]
+mod laya_runtime_mode_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("settings.db")).unwrap();
+        (temp, store)
+    }
+
+    #[test]
+    fn legacy_laya_url_migrates_to_external_behavior() {
+        let (_temp, store) = store();
+        store.pref_set(DECISION_PROVIDER_KEY, "laya").unwrap();
+        store
+            .pref_set("jev_api_url", "http://127.0.0.1:1337")
+            .unwrap();
+        let service = load_settings(&store).service;
+        assert_eq!(service.laya_runtime_mode, LayaRuntimeMode::External);
+        assert_eq!(service.external_laya_api_url, "http://127.0.0.1:1337");
+    }
+
+    #[test]
+    fn saved_laya_mode_does_not_reuse_jev_connection() {
+        let (_temp, store) = store();
+        store.pref_set(DECISION_PROVIDER_KEY, "laya").unwrap();
+        store.pref_set(LAYA_RUNTIME_MODE_KEY, "external").unwrap();
+        store
+            .pref_set("jev_api_url", "https://jev.example.test")
+            .unwrap();
+        store.pref_set("jev_api_key", "jev-secret").unwrap();
+
+        let service = load_settings(&store).service;
+
+        assert_eq!(service.laya_runtime_mode, LayaRuntimeMode::External);
+        assert!(service.external_laya_api_url.is_empty());
+        assert!(service.external_laya_api_key.is_empty());
+        assert_eq!(service.jev_api_url, "https://jev.example.test");
+        assert_eq!(service.jev_api_key, "jev-secret");
+    }
+
+    #[test]
+    fn url_less_laya_defaults_to_managed() {
+        let (_temp, store) = store();
+        store.pref_set(DECISION_PROVIDER_KEY, "laya").unwrap();
+        let service = load_settings(&store).service;
+        assert_eq!(service.laya_runtime_mode, LayaRuntimeMode::Managed);
+        assert!(service.external_laya_api_url.is_empty());
+    }
+
+    #[test]
+    fn structured_settings_expose_and_update_laya_provider_fields() {
+        let (_temp, store) = store();
+        update_settings(
+            &store,
+            Some(&json!({
+                "service": {
+                    "decision_provider": "laya",
+                    "decision_model": "laya-multilingual",
+                    "laya_runtime_mode": "managed"
+                }
+            })),
+            None,
+        )
+        .unwrap();
+
+        let public = public_settings(&store);
+        assert_eq!(
+            public.pointer("/service/decision_provider"),
+            Some(&json!("laya"))
+        );
+        assert_eq!(
+            public.pointer("/service/decision_model"),
+            Some(&json!("laya-multilingual"))
+        );
+        let service = load_settings(&store).service;
+        assert_eq!(service.decision_provider, DecisionModelProvider::Laya);
+        assert_eq!(service.decision_model, "laya-multilingual");
+    }
 }

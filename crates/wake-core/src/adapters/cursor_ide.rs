@@ -1,5 +1,5 @@
 use super::parse_utils::*;
-use super::sqlite_ro::{open_sqlite_ro, virtual_path};
+use super::sqlite_ro::{db_cache_stamp, open_sqlite_ro, virtual_path};
 use super::AgentAdapter;
 use crate::models::*;
 use anyhow::{anyhow, Result};
@@ -521,6 +521,11 @@ impl AgentAdapter for CursorIdeAdapter {
         AgentId::Cursor
     }
 
+    fn begin_scan(&self) {
+        self.rows_cache.invalidate();
+        self.links_cache.invalidate();
+    }
+
     /// 与 cursor.rs 同 key 的副本:CLI 源先、本源后(见文件头)
     fn dedup_rank(&self) -> u8 {
         1
@@ -530,13 +535,15 @@ impl AgentAdapter for CursorIdeAdapter {
         let Some(rows) = self.rows() else {
             return Ok(Vec::new());
         };
+        let source_stamp = db_cache_stamp(&self.db);
         Ok(rows
             .into_iter()
             .map(|row| SessionFileRef {
                 agent: AgentId::Cursor,
                 native_id: row.id.clone(),
                 file_path: virtual_path(&self.db, &row.id),
-                mtime_ms: row.updated_ms,
+                // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                mtime_ms: source_stamp,
                 // 正文在别的 KV 行里,枚举时不展开;气泡条数即内容指纹
                 //(会话续跑必然追加气泡),与 mtime 共同构成 dirty 判断
                 size: row.bubble_count,
@@ -570,6 +577,7 @@ impl AgentAdapter for CursorIdeAdapter {
             meta,
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events: Vec::new(),
             unknown_line_count: 0,
         })
     }

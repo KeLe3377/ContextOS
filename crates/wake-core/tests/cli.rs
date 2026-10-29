@@ -87,10 +87,10 @@ fn call(
 /// 唯一的 spawn 实现。不要 .env_clear():子进程的 roster 全靠继承
 /// WAKE_HOME/HOME
 fn cli_raw(args: &[&str]) -> (String, String, Option<i32>) {
-    let out = Command::new(env!("CARGO_BIN_EXE_wake-cli"))
+    let out = Command::new(env!("CARGO_BIN_EXE_contextos-cli"))
         .args(args)
         .output()
-        .expect("spawn wake-cli");
+        .expect("spawn contextos-cli");
     (
         String::from_utf8(out.stdout).expect("stdout is utf-8"),
         String::from_utf8(out.stderr).expect("stderr is utf-8"),
@@ -120,8 +120,16 @@ fn same(
     } else {
         format!("{text}\n")
     };
+    let expected_code = serde_json::from_str::<Value>(&want)
+        .ok()
+        .and_then(|value| value.get("ok").and_then(Value::as_bool))
+        .map_or(0, |ok| if ok { 0 } else { 1 });
     let (stdout, stderr, code) = cli_run(argv);
-    assert_eq!(code, Some(0), "argv {argv:?} 应当成功: {stderr}");
+    assert_eq!(
+        code,
+        Some(expected_code),
+        "argv {argv:?} 退出码应与领域结果一致: {stderr}"
+    );
     assert_eq!(stderr, "", "argv {argv:?} 跑通时 stderr 必须一个字节都没有");
     assert_eq!(stdout, want, "argv {argv:?} 必须原样吐工具文本");
 }
@@ -159,6 +167,11 @@ fn cases() -> Vec<(Vec<String>, &'static str, Value)> {
             argv(&["sessions", "--limit", "5"]),
             tools::LIST_SESSIONS,
             json!({"limit":5}),
+        ),
+        (
+            argv(&["sessions", "list"]),
+            tools::SESSIONS,
+            json!({"operation":"list"}),
         ),
         (
             argv(&[
@@ -231,6 +244,36 @@ fn cases() -> Vec<(Vec<String>, &'static str, Value)> {
             tools::LIST_MEMORIES,
             json!({"project":CLAUDE_PROJECT,"agents":["claude-code"],"limit":10}),
         ),
+        (
+            argv(&["memories", "list"]),
+            tools::MEMORIES,
+            json!({"operation":"list"}),
+        ),
+        (
+            argv(&["settings", "get"]),
+            tools::SETTINGS,
+            json!({"operation":"get"}),
+        ),
+        (
+            argv(&["relations", "list"]),
+            tools::RELATIONS,
+            json!({"operation":"list"}),
+        ),
+        (
+            argv(&["compression", "get_document"]),
+            tools::COMPRESSION,
+            json!({"operation":"get_document"}),
+        ),
+        (
+            argv(&["data-sources", "list"]),
+            tools::DATA_SOURCES,
+            json!({"operation":"list"}),
+        ),
+        (
+            argv(&["laya", "status"]),
+            tools::LAYA,
+            json!({"operation":"status"}),
+        ),
     ]
 }
 
@@ -256,6 +299,11 @@ fn every_command_and_flag_is_exercised_end_to_end() {
             .collect();
         assert!(!used.is_empty(), "命令 {} 没有端到端用例", c.name);
         for f in c.flags {
+            // --delete-models 只用于 uninstall，会删除模型缓存；它只做纯解析契约断言，
+            // 绝不放进会执行两遍的端到端用例表。
+            if f.long == "--delete-models" {
+                continue;
+            }
             assert!(
                 used.iter().any(|argv| argv.iter().any(|a| a == f.long)),
                 "{} 的 {} 没有端到端用例",
@@ -286,7 +334,6 @@ fn bad_arguments_exit_two_and_name_the_problem() {
             "only valid for `sessions`",
         ),
         (vec!["sessions", "--project", "."], "$PWD"),
-        (vec!["sessions", "myproj"], "takes no arguments"),
     ] {
         let (stdout, stderr, code) = cli_run(&argv);
         assert_eq!(code, Some(2), "argv {argv:?} 应当退 2: {stderr}");
@@ -295,7 +342,7 @@ fn bad_arguments_exit_two_and_name_the_problem() {
             stderr.contains(needle),
             "argv {argv:?} 的 stderr 应当提到 {needle:?},实际是 {stderr}"
         );
-        assert!(stderr.starts_with("wake-cli: "), "{stderr}");
+        assert!(stderr.starts_with("contextos-cli: "), "{stderr}");
     }
     // 缺命令走的是另一条:parse 直接给 "needs a command"
     let (_, stderr, code) = cli_run(&[]);
@@ -319,7 +366,7 @@ fn unreadable_session_exits_one() {
     let (stdout, stderr, code) = cli_run(&["show", "claude-code:nope"]);
     assert_eq!(code, Some(1));
     assert!(stdout.is_empty());
-    assert_eq!(stderr, format!("wake-cli: {want}\n"));
+    assert_eq!(stderr, format!("contextos-cli: {want}\n"));
 }
 
 /// 空结果不是错误:`wake-cli search x || fallback` 不能因为"这事没讨论过"就触发
@@ -387,7 +434,7 @@ fn missing_index_and_help_need_no_fixture_home() {
 
     let (stdout, _, code) = cli_raw(&["--version"]);
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, format!("wake-cli {}\n", env!("CARGO_PKG_VERSION")));
+    assert_eq!(stdout, format!("contextos-cli {}\n", env!("CARGO_PKG_VERSION")));
 }
 
 /// setup 不是工具调用,上面那张 cases 表结构上覆盖不到它
@@ -395,8 +442,8 @@ fn missing_index_and_help_need_no_fixture_home() {
 fn setup_reports_the_binary_and_never_fails() {
     let (stdout, stderr, code) = cli_run(&["setup"]);
     assert_eq!(code, Some(0), "{stderr}");
-    assert!(stdout.contains("wake-cli binary: "), "{stdout}");
-    assert!(stdout.contains(env!("CARGO_BIN_EXE_wake-cli")), "{stdout}");
+    assert!(stdout.contains("contextos-cli binary: "), "{stdout}");
+    assert!(stdout.contains(env!("CARGO_BIN_EXE_contextos-cli")), "{stdout}");
     assert!(stdout.contains("--project \"$PWD\""), "{stdout}");
     // 库缺失也照样退 0:"还没装好"正是跑 setup 的人的处境
     let tmp = tempfile::tempdir().unwrap();
@@ -417,16 +464,16 @@ fn non_utf8_arguments_exit_two_instead_of_panicking() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wake-cli"))
+    let out = Command::new(env!("CARGO_BIN_EXE_contextos-cli"))
         .arg("sessions")
         .arg("--project")
         .arg(OsStr::from_bytes(b"/tmp/caf\xe9"))
         .output()
-        .expect("spawn wake-cli");
+        .expect("spawn contextos-cli");
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.starts_with("wake-cli: argument is not valid UTF-8"),
+        stderr.starts_with("contextos-cli: argument is not valid UTF-8"),
         "{stderr}"
     );
 }
@@ -436,9 +483,9 @@ fn non_utf8_arguments_exit_two_instead_of_panicking() {
 #[test]
 fn the_skill_stays_in_sync_with_the_cli() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../skills/wake/SKILL.md")
+        .join("../../skills/contextos/SKILL.md")
         .canonicalize()
-        .expect("skills/wake/SKILL.md 必须存在——它是 `npx skills add` 装的东西");
+        .expect("skills/contextos/SKILL.md 必须存在");
     let md = std::fs::read_to_string(&path).expect("read SKILL.md");
 
     // frontmatter:name 与 description 是懒加载时常驻上下文的那两行。
@@ -453,7 +500,7 @@ fn the_skill_stays_in_sync_with_the_cli() {
     );
     let front: Vec<&str> = lines.by_ref().take_while(|l| *l != "---").collect();
     assert!(lines.next().is_some(), "frontmatter 要闭合,后面还要有正文");
-    assert!(front.contains(&"name: wake"), "frontmatter 缺 name");
+    assert!(front.contains(&"name: contextos"), "frontmatter 缺 name");
     let desc = front
         .iter()
         .find_map(|l| l.strip_prefix("description: "))
@@ -466,8 +513,8 @@ fn the_skill_stays_in_sync_with_the_cli() {
 
     for c in cli::COMMANDS {
         assert!(
-            md.contains(&format!("wake-cli {}", c.name)),
-            "SKILL.md 没有 `wake-cli {}` 的例子",
+            md.contains(&format!("contextos-cli {}", c.name)),
+            "SKILL.md 没有 `contextos-cli {}` 的例子",
             c.name
         );
     }
@@ -477,7 +524,10 @@ fn the_skill_stays_in_sync_with_the_cli() {
         "SKILL.md 要交代 --project 的约定"
     );
     assert!(md.contains("wake://session/"), "SKILL.md 要交代引用格式");
-    assert!(md.contains("read-only"), "SKILL.md 要声明只读");
+    assert!(
+        md.contains("original conversation messages are immutable"),
+        "SKILL.md 要声明原始会话不可编辑"
+    );
 }
 
 /// 一旦有人把 open_or_rebuild 摸进来,或者把 `index` 那道口子放宽到已存在的
@@ -499,7 +549,7 @@ fn the_cli_never_writes_an_index_that_exists() {
     }
     assert!(
         before == std::fs::read(db).unwrap(),
-        "wake-cli must never write an index that already exists"
+        "contextos-cli must never write an index that already exists"
     );
 }
 

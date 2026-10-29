@@ -10,6 +10,34 @@ fn temp_store() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+#[test]
+fn open_existing_writes_compatible_database_without_creating_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("existing.db");
+    {
+        let store = Store::open(&path).expect("create fixture store");
+        store.pref_set("fixture", "before").unwrap();
+    }
+
+    {
+        let store = Store::open_existing(&path).expect("open existing store");
+        store.pref_set("fixture", "after").unwrap();
+    }
+
+    let store = Store::open_read_only(&path).expect("reopen fixture read-only");
+    assert_eq!(store.pref_get("fixture").as_deref(), Some("after"));
+
+    let missing = dir.path().join("missing.db");
+    let error = Store::open_existing(&missing)
+        .err()
+        .expect("missing database must be rejected");
+    assert!(error.to_string().contains("no Wake index"));
+    assert!(
+        !missing.exists(),
+        "open_existing must not create a database"
+    );
+}
+
 fn meta(key: &str, title: &str) -> SessionMeta {
     SessionMeta {
         host: String::new(),
@@ -89,6 +117,53 @@ fn tombstone_primitives() {
 }
 
 #[test]
+fn tombstone_allows_changed_file_but_keeps_unchanged_and_legacy_files_hidden() {
+    let (dir, store) = temp_store();
+    let m = meta("codex:revived", "会话继续写入后重新出现");
+    store.write_session(&m, m.updated_at, &[]).unwrap();
+    store.remove_session(&m.key, true).unwrap();
+
+    assert!(store
+        .is_session_tombstoned(&m.key, &m.file_path, m.updated_at, m.size_bytes)
+        .unwrap());
+    assert!(!store
+        .is_session_tombstoned(&m.key, &m.file_path, m.updated_at + 1, m.size_bytes)
+        .unwrap());
+    assert!(!store.is_key_tombstoned(&m.key));
+
+    let legacy = meta("codex:legacy", "旧墓碑");
+    store
+        .write_session(&legacy, legacy.updated_at, &[])
+        .unwrap();
+    store.remove_session(&legacy.key, true).unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE tombstones DROP COLUMN deleted_file_size;
+         ALTER TABLE tombstones DROP COLUMN deleted_file_mtime;",
+    )
+    .unwrap();
+    drop(conn);
+    let store = Store::open_existing(&dir.path().join("test.db")).unwrap();
+    assert!(store
+        .is_session_tombstoned(
+            &legacy.key,
+            &legacy.file_path,
+            legacy.updated_at + 1,
+            legacy.size_bytes + 1,
+        )
+        .unwrap());
+    assert!(!store
+        .is_session_tombstoned(
+            &legacy.key,
+            &legacy.file_path,
+            wake_core::db::now_ms() + 1,
+            legacy.size_bytes,
+        )
+        .unwrap());
+}
+
+#[test]
 fn user_data_survives_rebuild() {
     let (_dir, store) = temp_store();
     let m = meta("claude-code:s3", "收藏的会话");
@@ -154,6 +229,8 @@ fn list_sessions_filters_and_counts() {
         offset: 0,
         updated_since: None,
         project_paths: Vec::new(),
+        tags: Vec::new(),
+        models: Vec::new(),
         ignore_pins: false,
     };
     let (sessions, total) = store.list_sessions(&all).unwrap();
@@ -583,6 +660,27 @@ fn custom_roots_roundtrip() {
     assert!(store.list_removed_default_roots().unwrap().is_empty());
 }
 
+#[test]
+fn skill_project_roots_roundtrip() {
+    let (_dir, store) = temp_store();
+    let first = std::path::Path::new("/tmp/project-a");
+    let second = std::path::Path::new("/tmp/project-b");
+
+    assert!(store.add_skill_project_root(first).unwrap());
+    assert!(!store.add_skill_project_root(first).unwrap());
+    assert!(store.add_skill_project_root(second).unwrap());
+    assert_eq!(
+        store.list_skill_project_roots().unwrap(),
+        vec![first.to_path_buf(), second.to_path_buf()]
+    );
+
+    store.remove_skill_project_root(first).unwrap();
+    assert_eq!(
+        store.list_skill_project_roots().unwrap(),
+        vec![second.to_path_buf()]
+    );
+}
+
 /// location 开关只持久化停用状态，不删除配置；真正 Remove 自定义根或
 /// Restore defaults 时清理相关状态，今后重新添加默认启用。
 #[test]
@@ -939,12 +1037,14 @@ fn insights_snapshot_and_streaks() {
         d.agents,
         vec![
             UsageTally {
+                key: "claude-code".into(),
                 name: "claude-code".into(),
                 sessions: 1,
                 prompts: 5, // 四条有 ts + 一条无 ts;sidechain 不算
                 tokens: 0,
             },
             UsageTally {
+                key: "codex".into(),
                 name: "codex".into(),
                 sessions: 1,
                 prompts: 3, // 榜单 prompts 无日期语义,未来行也计
@@ -955,6 +1055,7 @@ fn insights_snapshot_and_streaks() {
     assert_eq!(
         d.projects,
         vec![UsageTally {
+            key: "/tmp/proj".into(),
             name: "proj".into(),
             sessions: 2,
             prompts: 8, // 两家主线 user 之和(含无 ts 与未来行)
@@ -965,12 +1066,14 @@ fn insights_snapshot_and_streaks() {
         d.models,
         vec![
             UsageTally {
+                key: "claude-opus".into(),
                 name: "claude-opus".into(),
                 sessions: 1,
                 prompts: 5,
                 tokens: 0,
             },
             UsageTally {
+                key: "gpt-5-codex".into(),
                 name: "gpt-5-codex".into(),
                 sessions: 1,
                 prompts: 3,
@@ -1025,6 +1128,114 @@ fn insights_snapshot_and_streaks() {
     let far = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
     let d = store.insights(far).unwrap();
     assert_eq!((d.current_streak, d.longest_streak), (0, 3));
+}
+
+/// 热力图点击联动的数据源:选中日所在月的三段细分(当天逐时/当周逐日/当月逐日)
+/// 从同一查询落桶。复用 insights 测试的固定日期口径,不依赖真实时钟。
+#[test]
+fn period_breakdown_buckets_selected_day_week_month() {
+    use chrono::TimeZone;
+    let (_dir, store) = temp_store();
+    // 2026-01-15 是周四;所在周一是 1/12;当月 31 天
+    let ts = |mo: u32, d: u32, h: u32| {
+        chrono::Local
+            .with_ymd_and_hms(2026, mo, d, h, 30, 0)
+            .single()
+            .expect("unambiguous local time")
+            .timestamp_millis()
+    };
+    let at = |seq: i64, role: Role, t: Option<i64>| IndexUnit {
+        seq,
+        sidechain_id: None,
+        role,
+        timestamp: t,
+        text: format!("msg {seq}"),
+    };
+    let mut m = meta("claude-code:pb", "period 甲");
+    m.file_path = "/tmp/fixtures/pb.jsonl".into();
+    store
+        .write_session(
+            &m,
+            m.updated_at,
+            &[
+                // 选中日 1/15:9 点 2 条 + 22 点 1 条
+                at(0, Role::User, Some(ts(1, 15, 9))),
+                at(1, Role::User, Some(ts(1, 15, 9))),
+                at(2, Role::User, Some(ts(1, 15, 22))),
+                // 同周不同日 1/12(周一):1 条
+                at(3, Role::User, Some(ts(1, 12, 8))),
+                // 同月不同周 1/3:1 条
+                at(4, Role::User, Some(ts(1, 3, 12))),
+                // 上月 2025-12-31:窗口外,不得混入
+                at(5, Role::User, Some(ts(12, 31, 10))),
+                // 无 ts:口径外
+                at(6, Role::User, None),
+            ],
+        )
+        .unwrap();
+
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+    let pb = store.period_breakdown(day).unwrap();
+    assert_eq!(pb.day, day);
+    // 当天逐时:9 点 2、22 点 1
+    assert_eq!(pb.day_hours[9], 2);
+    assert_eq!(pb.day_hours[22], 1);
+    assert_eq!(pb.day_hours.iter().sum::<i64>(), 3);
+    // 当周逐日(周一起始):周一 1、周四 3
+    assert_eq!(pb.week_days[0], 1);
+    assert_eq!(pb.week_days[3], 3);
+    assert_eq!(pb.week_days.iter().sum::<i64>(), 4);
+    // 当月逐日:3 号 1 条;15 号 3 条;合计 5(上月与窗口外的未来日期不混入)
+    assert_eq!(pb.month_days[2], 1);
+    assert_eq!(pb.month_days[14], 3);
+    assert_eq!(pb.month_days.iter().sum::<i64>(), 5);
+}
+
+/// 跨月周:选中月初(2026-01-01 是周四),所在周的周一~周三落在 2025 年 12 月。
+/// 查询窗必须取「当月 ∪ 当周」的并集,只按当月开窗会让 week_days 左端漏数
+#[test]
+fn period_breakdown_keeps_days_of_a_week_spanning_two_months() {
+    use chrono::TimeZone;
+    let (_dir, store) = temp_store();
+    let ts = |y: i32, mo: u32, d: u32, h: u32| {
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, 30, 0)
+            .single()
+            .expect("unambiguous local time")
+            .timestamp_millis()
+    };
+    let at = |seq: i64, t: Option<i64>| IndexUnit {
+        seq,
+        sidechain_id: None,
+        role: Role::User,
+        timestamp: t,
+        text: format!("msg {seq}"),
+    };
+    let m = meta("claude-code:pb2", "period 跨月");
+    store
+        .write_session(
+            &m,
+            m.updated_at,
+            &[
+                // 上周日 2025-12-28:落到选中周之外(周一 12/29 起),不进 week_days
+                at(0, Some(ts(2025, 12, 28, 10))),
+                // 周一 2025-12-29 与周二 12/30:跨月,必须进 week_days[0]/[1]
+                at(1, Some(ts(2025, 12, 29, 9))),
+                at(2, Some(ts(2025, 12, 30, 9))),
+                // 选中日 2026-01-01 本身
+                at(3, Some(ts(2026, 1, 1, 8))),
+            ],
+        )
+        .unwrap();
+
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let pb = store.period_breakdown(day).unwrap();
+    assert_eq!(pb.week_days, [1, 1, 0, 1, 0, 0, 0], "跨月端点日不得漏");
+    assert_eq!(pb.week_days.iter().sum::<i64>(), 3);
+    // 上月那两天不属当月视图
+    assert_eq!(pb.day_hours[8], 1);
+    assert_eq!(pb.month_days[0], 1);
+    assert_eq!(pb.month_days.iter().sum::<i64>(), 1);
 }
 
 /// 老库(无 host 列)打开即迁移;既有行落 ''(本地域),写入远程行后

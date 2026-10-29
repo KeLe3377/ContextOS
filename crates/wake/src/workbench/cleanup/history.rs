@@ -26,9 +26,9 @@ impl Outcome {
     }
     fn description(self) -> &'static str {
         match self {
-            Self::Restored => t("These sessions are available in Wake again."),
+            Self::Restored => t("These sessions are available in ContextOS again."),
             Self::Moved => t("Session files were moved to the system trash."),
-            Self::PartlyRestored => t("Some sessions have been restored to Wake."),
+            Self::PartlyRestored => t("Some sessions have been restored to ContextOS."),
             Self::Partial | Self::NeedsAttention => t("Review the affected sessions below."),
             Self::Interrupted => {
                 t("This cleanup was interrupted. Review the file details before continuing.")
@@ -606,7 +606,7 @@ impl Workbench {
                         .label(t("Update session list"))
                         .disabled(self.cleanup.busy)
                         .tooltip(t(
-                            "Files were moved, but Wake could not update its session list.",
+                            "Files were moved, but ContextOS could not update its session list.",
                         ))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.check_cleanup_batch(false, window, cx)

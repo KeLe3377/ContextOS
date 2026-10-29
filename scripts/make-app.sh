@@ -1,5 +1,5 @@
 #!/bin/zsh
-# 构建 Wake.app:release 二进制 + icns 图标 + Info.plist,ad-hoc 签名。
+# 构建 ContextOS.app:release 二进制 + icns 图标 + Info.plist,ad-hoc 签名。
 # 用法: scripts/make-app.sh [--universal] [--run]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 ASSETS=crates/wake/assets
 TARGET_DIR=${CARGO_TARGET_DIR:-target}
 BUILD="$TARGET_DIR/release"
-APP=dist/Wake.app
+APP=dist/ContextOS.app
 RUN=false
 UNIVERSAL=false
 
@@ -35,12 +35,12 @@ iconutil -c icns "$ICONSET" -o dist/wake.icns
 
 # 2. release 构建。Universal 模式在同一 macOS SDK 上交叉编译两个 Rust
 # target，再用 lipo 合并；目标标准库由调用方预先通过 rustup 安装。
-# 发行二进制清单:主程序 Wake + 并排的辅助可执行文件(只读 MCP server
-# wake-mcp,Settings → Connect 按同目录找它;会话查询 CLI wake-cli)。辅助 bin
+# 发行二进制清单:主程序 ContextOS + 并排的辅助可执行文件(MCP server
+# contextos-mcp,Settings → Connect 按同目录找它;CLI contextos-cli)。辅助 bin
 # 与主程序 cargo 包不同,构建各写一行;lipo / 拷贝 / 签名 / 架构核对、以及
 # cargo 的 --bin 清单全部由 SIDE_BINS 派生,再加一个辅助 bin 只改这一个数组
-SIDE_BINS=(wake-mcp wake-cli)
-BINS=(Wake "${SIDE_BINS[@]}")
+SIDE_BINS=(contextos-mcp contextos-cli)
+BINS=(ContextOS "${SIDE_BINS[@]}")
 build_bins() {
   cargo build --release -p wake "$@"
   cargo build --release -p wake-core "${SIDE_BINS[@]/#/--bin=}" "$@"
@@ -75,10 +75,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Wake</string>
-    <key>CFBundleDisplayName</key><string>Wake</string>
+    <key>CFBundleName</key><string>ContextOS</string>
+    <key>CFBundleDisplayName</key><string>ContextOS</string>
     <key>CFBundleIdentifier</key><string>dev.corey.wake</string>
-    <key>CFBundleExecutable</key><string>Wake</string>
+    <key>CFBundleExecutable</key><string>ContextOS</string>
     <key>CFBundleIconFile</key><string>wake</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
@@ -88,7 +88,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
          macOS 的自动化授权框没有说明文字,启用 hardened runtime 后更会被
          TCC 直接拒绝——两个核心功能都会在别人的机器上静默失效。 -->
     <key>NSAppleEventsUsageDescription</key>
-    <string>Wake uses automation to reopen sessions in your terminal and to move session files to the Trash.</string>
+    <string>ContextOS uses automation to reopen sessions in your terminal and to move session files to the Trash.</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>© 2026 Corey Chiu · MIT License</string>
 </dict>
@@ -97,7 +97,7 @@ PLIST
 
 # 4. ad-hoc 签名(本机运行足够;分发需开发者证书 + notarize)。--deep 只递归
 # 标准嵌套位置(Frameworks/PlugIns/XPCServices…),MacOS/ 里并排的辅助可执行
-# 文件不算,先单独签它们,否则 Gatekeeper 会拦下别人起的 wake-mcp / wake-cli
+# 文件不算,先单独签它们,否则 Gatekeeper 会拦下别人起的 contextos-mcp / contextos-cli
 for bin in "${SIDE_BINS[@]}"; do
   codesign --force -s - "$APP/Contents/MacOS/$bin"
 done
@@ -109,7 +109,8 @@ done
 
 if $UNIVERSAL; then
   for bin in "${BINS[@]}"; do
-    ARCHS=$(lipo -archs "$APP/Contents/MacOS/$bin")
+    BIN_PATH="$APP/Contents/MacOS/$bin"
+    ARCHS=$(lipo -archs "$BIN_PATH")
     if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
       echo "Universal build of $bin is missing an architecture: $ARCHS" >&2
       exit 1

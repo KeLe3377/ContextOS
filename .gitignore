@@ -26,3 +26,26 @@ AuthKey_*.p8
 *.mobileprovision
 .env
 .env.*
+
+# 本地索引、会话数据与开发工具缓存
+/.ContextOS/
+/.codegraph/
+/.archives/
+/.workbuddy-ai/
+/.mcp.json
+/.tmp/
+/.tmp_*
+/runs/
+
+# 设计稿、演示素材、开发计划与第三方参考源码
+/design/
+*.figcraft
+/photos/
+/source/
+/docs/superpowers/
+/docs/contextos-work-plan.md
+/docs/workbuddy-rename-contextos.md
+
+# 本地监控验证文件
+/change-log-test.txt
+/workspace-change-monitor-check.txt

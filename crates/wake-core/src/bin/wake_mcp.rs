@@ -1,9 +1,9 @@
-//! wake-mcp:Wake 索引的只读 MCP server(stdio)。
+//! contextos-mcp:ContextOS 索引的 MCP server(stdio)。
 //!
-//!   wake-mcp [--db PATH]          以 MCP server 身份服务 stdin/stdout(客户端这样起它)
-//!   wake-mcp setup [--db PATH]    打印接入 Claude Code / Codex / Cursor 的配置片段
-//!   wake-mcp call TOOL [JSON]     跑一次工具调用、打印文本(调试用)
-//!   wake-mcp --version | --help
+//!   contextos-mcp [--db PATH]          以 MCP server 身份服务 stdin/stdout(客户端这样起它)
+//!   contextos-mcp setup [--db PATH]    打印接入 Claude Code / Codex / Cursor 的配置片段
+//!   contextos-mcp call TOOL [JSON]     跑一次工具调用、打印文本(调试用)
+//!   contextos-mcp --version | --help
 //!
 //! 索引库默认取 GUI 同一份(`db::default_db_path`),只读打开;库不存在或太老
 //! 直接以清晰的 stderr 错误退出(非零),让客户端的日志说明白"先启动一次 Wake"。
@@ -14,16 +14,26 @@ use std::process::ExitCode;
 use wake_core::db::Store;
 use wake_core::mcp::{self, McpServer};
 
-const USAGE: &str = "wake-mcp — read-only MCP server for your Wake session index
+const USAGE: &str = "contextos-mcp — MCP server for your ContextOS session index
 
 USAGE:
-  wake-mcp [--db PATH]            serve MCP over stdio (what MCP clients run)
-  wake-mcp setup [--db PATH]      print config snippets for Claude Code / Codex / Cursor
-  wake-mcp call TOOL [JSON]       run one tool call and print its text (debugging)
-  wake-mcp --version | --help
+  contextos-mcp [--db PATH]            serve MCP over stdio (what MCP clients run)
+  contextos-mcp setup [--db PATH]      print config snippets for Claude Code / Codex / Cursor
+  contextos-mcp call TOOL [JSON]       run one tool call and print its text (debugging)
+  contextos-mcp --version | --help
 
 OPTIONS:
   --db PATH   index database (default: Wake's own, e.g. ~/Library/Application Support/wake/wake.db)";
+
+fn program_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "contextos-mcp".to_string())
+}
 
 struct Args {
     db: Option<PathBuf>,
@@ -46,7 +56,7 @@ fn parse_args() -> Result<Args, String> {
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                println!("wake-mcp {}", mcp::SERVER_VERSION);
+                println!("{} {}", program_name(), mcp::SERVER_VERSION);
                 std::process::exit(0);
             }
             s if s.starts_with("--db=") => db = Some(PathBuf::from(&s[5..])),
@@ -70,7 +80,7 @@ fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("wake-mcp: {e}");
+            eprintln!("contextos-mcp: {e}");
             return ExitCode::from(2);
         }
     };
@@ -79,7 +89,7 @@ fn main() -> ExitCode {
             let server = match open(&args.db) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("wake-mcp: {e}");
+                    eprintln!("contextos-mcp: {e}");
                     return ExitCode::from(2);
                 }
             };
@@ -90,15 +100,16 @@ fn main() -> ExitCode {
                 // 客户端先走一步、管道断开是正常收场
                 Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("wake-mcp: {e}");
+                    eprintln!("contextos-mcp: {e}");
                     ExitCode::from(1)
                 }
             }
         }
         Some("setup") => {
-            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wake-mcp"));
+            let fallback = program_name();
+            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(&fallback));
             let mut out = io::stdout().lock();
-            let _ = writeln!(out, "wake-mcp binary: {}\n", bin.display());
+            let _ = writeln!(out, "{} binary: {}\n", fallback, bin.display());
             for s in mcp::setup_snippets(&bin) {
                 let _ = writeln!(out, "## {} — {}\n\n{}\n", s.client, s.hint, s.text);
             }
@@ -110,21 +121,21 @@ fn main() -> ExitCode {
         }
         Some("call") => {
             let Some(tool) = args.command.get(1) else {
-                eprintln!("wake-mcp: call needs a tool name\n\n{USAGE}");
+                eprintln!("contextos-mcp: call needs a tool name\n\n{USAGE}");
                 return ExitCode::from(2);
             };
             let json_args = args.command.get(2).map(String::as_str).unwrap_or("{}");
             let params: serde_json::Value = match serde_json::from_str(json_args) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("wake-mcp: arguments are not valid JSON: {e}");
+                    eprintln!("contextos-mcp: arguments are not valid JSON: {e}");
                     return ExitCode::from(2);
                 }
             };
             let server = match open(&args.db) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("wake-mcp: {e}");
+                    eprintln!("contextos-mcp: {e}");
                     return ExitCode::from(2);
                 }
             };
@@ -135,7 +146,7 @@ fn main() -> ExitCode {
             let reply = server.handle_line(&request.to_string()).unwrap_or_default();
             let reply: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
             if let Some(err) = reply.get("error") {
-                eprintln!("wake-mcp: {}", err["message"].as_str().unwrap_or("error"));
+                eprintln!("contextos-mcp: {}", err["message"].as_str().unwrap_or("error"));
                 return ExitCode::from(1);
             }
             let text = reply["result"]["content"][0]["text"]
@@ -148,7 +159,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(other) => {
-            eprintln!("wake-mcp: unknown command {other}\n\n{USAGE}");
+            eprintln!("contextos-mcp: unknown command {other}\n\n{USAGE}");
             ExitCode::from(2)
         }
     }

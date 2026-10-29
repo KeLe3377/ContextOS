@@ -1,11 +1,7 @@
-use std::time::Duration;
-
-use anyhow::{Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 use semver::Version;
-use serde::Deserialize;
 
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/iAmCorey/Wake/releases/latest";
-pub(crate) const LATEST_RELEASE_PAGE: &str = "https://github.com/iAmCorey/Wake/releases/latest";
+pub(crate) const LATEST_RELEASE_PAGE: &str = "";
 
 #[derive(Clone, Default)]
 pub(crate) enum UpdateStatus {
@@ -27,11 +23,6 @@ pub(crate) struct UpdateInfo {
     pub update_available: bool,
 }
 
-#[derive(Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-}
-
 fn evaluate_release(current_version: &str, tag_name: &str) -> Result<UpdateInfo> {
     let current = Version::parse(current_version)
         .with_context(|| format!("invalid current version {current_version:?}"))?;
@@ -48,26 +39,12 @@ fn evaluate_release(current_version: &str, tag_name: &str) -> Result<UpdateInfo>
     })
 }
 
-/// Only called from the explicit Settings action. Wake never checks in the
+/// Only called from the explicit Settings action. ContextOS never checks in the
 /// background, so opening the app still performs no network request.
-pub(crate) fn check_latest_release(current_version: &str) -> Result<UpdateInfo> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("building update client")?;
-    let release = client
-        .get(LATEST_RELEASE_API)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2026-03-10")
-        .header("User-Agent", format!("Wake/{current_version}"))
-        .send()
-        .context("requesting the latest Wake release")?
-        .error_for_status()
-        .context("GitHub returned an error while checking for updates")?
-        .json::<GithubRelease>()
-        .context("reading the latest Wake release")?;
-
-    evaluate_release(current_version, &release.tag_name)
+pub(crate) fn check_latest_release(_current_version: &str) -> Result<UpdateInfo> {
+    Err(anyhow!(
+        "ContextOS release repository is not configured for this build"
+    ))
 }
 
 #[cfg(test)]
@@ -101,12 +78,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "performs a live GitHub request"]
-    fn live_latest_release_check_runs_on_a_plain_thread() {
-        let info = std::thread::spawn(|| check_latest_release("0.2.8"))
-            .join()
-            .expect("update check thread should not panic")
-            .expect("GitHub release request should succeed");
-        assert!(info.update_available);
+    fn release_check_is_disabled_without_a_contextos_repository() {
+        assert!(check_latest_release("0.2.8").is_err());
     }
 }

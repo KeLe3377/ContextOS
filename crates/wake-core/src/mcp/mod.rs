@@ -1,7 +1,7 @@
-//! wake-mcp:把 Wake 的索引以 MCP(stdio 传输、JSON-RPC 2.0)**只读**暴露给别的
+//! contextos-mcp:把 ContextOS 业务能力以 MCP(stdio 传输、JSON-RPC 2.0)暴露给别的
 //! coding agent(Claude Code / Codex / Cursor …)。目标是"换一个 agent 不用重新
 //! 解释自己做到哪了":对方按项目列最近会话、全文搜、读一段转录,全部来自本机
-//! 索引与磁盘上的会话文件,零 LLM、零网络、不写库。
+//! 索引与磁盘上的会话文件；领域工具还可调用明确开放的业务写操作。
 //!
 //! 协议层手写而不引 rmcp:wake-core 全同步、没有 tokio,server 端真正要实现的
 //! 只有 initialize / notifications/initialized / ping / tools/list / tools/call
@@ -9,7 +9,7 @@
 //! stdout 只写协议,日志一律 stderr。需要 resources / prompts / sampling
 //! 全家桶时再考虑换库。
 //!
-//! 索引库经 `Store::open_read_only` 打开——旁路进程绝不 `open_or_rebuild`,
+//! 索引库经 `Store::open_existing` 打开——旁路进程绝不 `open_or_rebuild`,
 //! 也不扫描;新鲜度靠 GUI 常驻的 watcher,每个工具返回都带"索引覆盖到的最新
 //! 活动时间"。读会话是现场解析磁盘文件,不受索引新旧影响。
 
@@ -29,23 +29,28 @@ use crate::models::AgentId;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// 已知且工具子集完全兼容的版本
 const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-pub const SERVER_NAME: &str = "wake";
+pub const SERVER_NAME: &str = "contextos";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 随 initialize 下发给客户端的使用说明(LLM 会读)。重点是"什么时候该用":
 /// 模型对陌生工具默认不碰,问"最近在做什么"会去翻 git log——要点明会话记录里
 /// 有而 git 里没有的东西(讨论、决策、试过的路、停在哪)
-const INSTRUCTIONS: &str = "Wake indexes every coding-agent session on this machine \
-(Claude Code, Codex, Cursor, Gemini CLI, OpenCode and more) and exposes them read-only. \
+const INSTRUCTIONS: &str = "ContextOS indexes every coding-agent session on this machine \
+(Claude Code, Codex, Cursor, Gemini CLI, OpenCode and more). \
 Use these tools whenever the user refers to earlier conversations or sessions with any AI \
 coding agent: what was discussed, decided or tried, why something was done a certain way, \
 where previous work stopped, or whether an error was seen before. Git history and the \
-working tree do not contain that; Wake does. Start with wake_list_sessions (pass the \
-current working directory as `project`) or wake_search, then read the relevant transcript \
-with wake_get_session; wake_list_projects shows which projects have history. \
-wake_list_memories lists the notes agents keep for themselves about a project (Claude \
+working tree do not contain that; ContextOS does. Start with contextos_list_sessions (pass the \
+current working directory as `project`) or contextos_search, then read the relevant transcript \
+with contextos_get_session; contextos_list_projects shows which projects have history. \
+contextos_list_memories lists the notes agents keep for themselves about a project (Claude \
 Code and ZCode auto-memory, Codex memories); read one by passing its wake://memory/… \
-reference to wake_get_session. Nothing here can modify a session or a memory file.";
+reference to contextos_get_session. Use contextos_settings, contextos_sessions, \
+contextos_relations, contextos_compression, contextos_memories, and contextos_data_sources \
+to manage business settings, session metadata, manual relations, compression, \
+ContextOS-owned memories, and local data sources. Original \
+conversation messages are immutable; delete operations only move supported files to OS trash. \
+Use contextos_laya to inspect or control the shared managed Laya runtime.";
 
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
@@ -53,7 +58,7 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 
-/// 一个 MCP server 实例:持有只读 Store 与按库配置构造的 roster
+/// 一个 MCP server 实例:持有既有兼容 Store 与按库配置构造的 roster
 pub struct McpServer {
     store: Arc<Store>,
     adapters: Vec<Box<dyn AgentAdapter>>,
@@ -86,7 +91,7 @@ impl McpServer {
     }
 
     /// 一行进、至多一行出(通知无回包)。批量数组逐条处理、按数组回;
-    /// 测试与 `wake-mcp call` 直接用它,不经 stdio
+    /// 测试与 `contextos-mcp call` 直接用它,不经 stdio
     pub fn handle_line(&self, line: &str) -> Option<String> {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -147,7 +152,7 @@ impl McpServer {
             Some(id) if !id.is_null() => id,
             _ => {
                 if method == "notifications/initialized" {
-                    eprintln!("wake-mcp: client initialized");
+                    eprintln!("contextos-mcp: client initialized");
                 }
                 return None;
             }
@@ -181,7 +186,7 @@ impl McpServer {
         json!({
             "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": SERVER_NAME, "title": "Wake", "version": SERVER_VERSION },
+            "serverInfo": { "name": SERVER_NAME, "title": "ContextOS", "version": SERVER_VERSION },
             "instructions": INSTRUCTIONS,
         })
     }
@@ -223,18 +228,18 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 
 // ---------------------------------------------------------------- 安装辅助
 
-/// 只读打开索引,并按库里的 location / remote host 配置建 roster(不变量
+/// 打开既有兼容索引,并按库里的 location 配置建 roster(不变量
 /// 8⑥:否则自定义根与远程缓存里的会话找不到能读它的 adapter)。旁路进程
-/// (wake-mcp / wake-cli)共用这一条——**绝不 open_or_rebuild**,那会把 GUI
+/// (contextos-mcp / contextos-cli)共用这一条——**绝不 open_or_rebuild**,那会把 GUI
 /// 正在写的库挪走重建
 pub fn open_index(db: &Path) -> Result<(Arc<Store>, Vec<Box<dyn AgentAdapter>>), String> {
-    let store = Arc::new(Store::open_read_only(db).map_err(|e| format!("{e:#}"))?);
+    let store = Arc::new(Store::open_existing(db).map_err(|e| format!("{e:#}"))?);
     let adapters = crate::adapters::create_adapters_for(&store);
     Ok((store, adapters))
 }
 
 /// 与本进程同目录的某个辅助可执行文件(Windows 补 .exe)。打包时辅助 bin 与
-/// Wake 主程序并排:macOS 在 Contents/MacOS,Linux/Windows 同目录。
+/// ContextOS 主程序并排:macOS 在 Contents/MacOS,Linux/Windows 同目录。
 /// current_exe 是系统调用,**别在 render 里问**——GUI 一律开窗时算一次
 pub fn sibling_named(stem: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -266,7 +271,7 @@ pub struct SetupSnippet {
     pub text: String,
 }
 
-/// 三家客户端的接入片段(UI 的 Connect 页与 `wake-mcp setup` 同源)。路径一律
+/// 三家客户端的接入片段(UI 的 Connect 页与 `contextos-mcp setup` 同源)。路径一律
 /// 按 JSON 字符串转义——TOML basic string 与 JSON 的转义子集兼容,Windows 的
 /// 反斜杠与含空格路径都安全
 pub fn setup_snippets(bin: &Path) -> Vec<SetupSnippet> {
@@ -277,14 +282,14 @@ pub fn setup_snippets(bin: &Path) -> Vec<SetupSnippet> {
             agent: AgentId::ClaudeCode,
             hint: "Run in a terminal",
             copy_label: "Copy command",
-            text: format!("claude mcp add --scope user wake -- {quoted}"),
+            text: format!("claude mcp add --scope user contextos -- {quoted}"),
         },
         SetupSnippet {
             client: "Codex",
             agent: AgentId::Codex,
             hint: "Add to ~/.codex/config.toml",
             copy_label: "Copy config",
-            text: format!("[mcp_servers.wake]\ncommand = {quoted}"),
+            text: format!("[mcp_servers.contextos]\ncommand = {quoted}"),
         },
         SetupSnippet {
             client: "Cursor",
@@ -292,7 +297,7 @@ pub fn setup_snippets(bin: &Path) -> Vec<SetupSnippet> {
             hint: "Merge into ~/.cursor/mcp.json",
             copy_label: "Copy config",
             text: format!(
-                "{{\n  \"mcpServers\": {{\n    \"wake\": {{ \"command\": {quoted} }}\n  }}\n}}"
+                "{{\n  \"mcpServers\": {{\n    \"contextos\": {{ \"command\": {quoted} }}\n  }}\n}}"
             ),
         },
     ]
@@ -303,7 +308,7 @@ mod tests {
     use super::*;
 
     /// initialize 回的 instructions 是 agent 唯一常驻的一段说明:每个工具都得点到名,
-    /// 否则新工具对只读这段的 agent 就是隐形的(2026-09-21 review:加 wake_list_memories
+    /// 否则新工具对只读这段的 agent 就是隐形的(2026-09-21 review:加 contextos_list_memories
     /// 时漏了这里)
     #[test]
     fn instructions_mention_every_tool() {
@@ -315,25 +320,25 @@ mod tests {
     #[test]
     fn snippets_quote_paths_for_every_client() {
         let snippets = setup_snippets(Path::new(
-            "/Applications/My Apps/Wake.app/Contents/MacOS/wake-mcp",
+            "/Applications/My Apps/ContextOS.app/Contents/MacOS/contextos-mcp",
         ));
         assert_eq!(snippets.len(), 3);
         assert_eq!(
             snippets[0].text,
-            "claude mcp add --scope user wake -- \"/Applications/My Apps/Wake.app/Contents/MacOS/wake-mcp\""
+            "claude mcp add --scope user contextos -- \"/Applications/My Apps/ContextOS.app/Contents/MacOS/contextos-mcp\""
         );
         assert!(snippets[1]
             .text
-            .starts_with("[mcp_servers.wake]\ncommand = \"/Applications/My Apps/"));
+            .starts_with("[mcp_servers.contextos]\ncommand = \"/Applications/My Apps/"));
         let cursor: Value =
             serde_json::from_str(&snippets[2].text).expect("cursor snippet is valid JSON");
         assert_eq!(
-            cursor["mcpServers"]["wake"]["command"],
-            "/Applications/My Apps/Wake.app/Contents/MacOS/wake-mcp"
+            cursor["mcpServers"]["contextos"]["command"],
+            "/Applications/My Apps/ContextOS.app/Contents/MacOS/contextos-mcp"
         );
-        let win = setup_snippets(Path::new(r"C:\Program Files\Wake\wake-mcp.exe"));
+        let win = setup_snippets(Path::new(r"C:\Program Files\ContextOS\contextos-mcp.exe"));
         assert!(win[1]
             .text
-            .contains(r#"command = "C:\\Program Files\\Wake\\wake-mcp.exe""#));
+            .contains(r#"command = "C:\\Program Files\\ContextOS\\contextos-mcp.exe""#));
     }
 }

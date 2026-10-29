@@ -5,6 +5,7 @@
 mod common;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
@@ -592,6 +593,7 @@ struct SeedAdapter {
     /// 模拟"这一刻读不出关系"(state DB 打不开):parent_links 交 None
     links_unknown: bool,
     rank: u8,
+    parse_count: Option<Arc<AtomicUsize>>,
 }
 
 impl AgentAdapter for SeedAdapter {
@@ -632,6 +634,9 @@ impl AgentAdapter for SeedAdapter {
         (!self.links_unknown).then(|| self.parent_links.clone())
     }
     fn parse_session(&self, _: &SessionFileRef) -> Result<ParsedSession> {
+        if let Some(count) = &self.parse_count {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
         if self.fail_parse {
             bail!("simulated corrupt copy")
         }
@@ -660,6 +665,7 @@ impl AgentAdapter for SeedAdapter {
             parent_links: self.parent_links.clone(),
             links_unknown: self.links_unknown,
             rank: self.rank,
+            parse_count: self.parse_count.clone(),
         })
     }
 }
@@ -1065,7 +1071,37 @@ fn seed(agent: AgentId, root: &str, path: &str, native_id: &str, mtime: i64) -> 
         parent_links: Vec::new(),
         links_unknown: false,
         rank: 0,
+        parse_count: None,
     }
+}
+
+#[test]
+fn unchanged_session_is_not_reparsed_on_incremental_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let parse_count = Arc::new(AtomicUsize::new(0));
+    let mut adapter = seed(
+        AgentId::Opencode,
+        "/virtual/opencode.db",
+        "/virtual/opencode.db#session-1",
+        "session-1",
+        42,
+    );
+    adapter.parse_count = Some(parse_count.clone());
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(adapter)];
+
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    assert_eq!(parse_count.load(Ordering::Relaxed), 1);
+
+    let second = Recorder::new();
+    run_scan(&adapters, &store, &second, false).unwrap();
+
+    assert_eq!(
+        parse_count.load(Ordering::Relaxed),
+        1,
+        "an unchanged virtual session must not be parsed again"
+    );
+    assert_eq!(second.0.lock().unwrap().last().unwrap().total, 0);
 }
 
 /// 不变量 3 端到端:删除(trash+tombstone)后,数据源仍枚举同一文件的
@@ -1113,6 +1149,7 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         parent_links: Vec::new(),
         links_unknown: false,
         rank: 0,
+        parse_count: None,
     })];
     let rec = Recorder::new();
 
@@ -1128,6 +1165,40 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         store.get_session("codex:ghost").unwrap().is_none(),
         "tombstoned 会话重扫后复活 = 不变量 3 破坏"
     );
+}
+
+#[test]
+fn tombstoned_session_is_restored_after_its_file_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(seed(
+        AgentId::Codex,
+        "/live",
+        "/live/revived.jsonl",
+        "revived",
+        9,
+    ))];
+    let rec = Recorder::new();
+    run_scan(&adapters, &store, &rec, true).unwrap();
+    store.remove_session("codex:revived", true).unwrap();
+
+    let mut adapter = seed(
+        AgentId::Codex,
+        "/live",
+        "/live/revived.jsonl",
+        "revived",
+        10,
+    );
+    adapter.r.size += 1;
+    adapter.meta.size_bytes += 1;
+    let changed: Vec<Box<dyn AgentAdapter>> = vec![Box::new(adapter)];
+    run_scan(&changed, &store, &rec, true).unwrap();
+
+    assert!(
+        store.get_session("codex:revived").unwrap().is_some(),
+        "changed source file should release its deletion tombstone"
+    );
+    assert!(!store.is_key_tombstoned("codex:revived"));
 }
 
 /// 同 agent 双根下的同 ID 会话:mtime 新者胜且跨轮稳定。旧行为是"后写者胜",

@@ -8,14 +8,22 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
+toml_edit = "0.22"
+toml = "0.8"
 rusqlite.workspace = true
 dirs.workspace = true
 walkdir.workspace = true
+ignore.workspace = true
 notify.workspace = true
 chrono.workspace = true
 zstd.workspace = true
 base64.workspace = true
 sha2 = "0.10"
+reqwest.workspace = true
+zip.workspace = true
+sysinfo = "0.31"
+tempfile = "3"
 
 # Linux 废纸篓:freedesktop Trash spec 的纯库实现
 # (macOS 走 Finder/osascript,行为已验证不动)
@@ -42,9 +50,6 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
-[dev-dependencies]
-tempfile = "3"
-
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
 
@@ -54,10 +59,10 @@ path = "src/bin/scan.rs"
 
 # 只读 MCP server(stdio),随 Wake 一起打包、与主程序并排;见 src/mcp/
 [[bin]]
-name = "wake-mcp"
+name = "contextos-mcp"
 path = "src/bin/wake_mcp.rs"
 
 # 会话查询 CLI(只读),随 Wake 一起打包、与主程序并排;解析层见 src/cli.rs
 [[bin]]
-name = "wake-cli"
+name = "contextos-cli"
 path = "src/bin/wake_cli.rs"

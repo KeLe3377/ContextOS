@@ -1,4 +1,4 @@
-//! ContextOS MCP 的只读工具:定义(JSON Schema)与执行。输出全是 Markdown 文本,
+//! ContextOS MCP 工具:定义(JSON Schema)与执行。输出全是 Markdown 文本,
 //! 给 LLM 直接读;结构化输出(structuredContent)不做。
 //!
 //! 错误分两类:参数形状不对是协议错误(`InvalidParams` → JSON-RPC -32602);
@@ -16,6 +16,7 @@ use crate::models::*;
 use crate::services::context::{parse_since, resolve_project_paths};
 use crate::services::exporter::{fmt_time, render_compact, CompactOptions};
 use crate::text::{one_line, plural};
+use crate::workspace_store::{workspace_cas_path_for, workspace_db_path_for, WorkspaceStore};
 
 struct ToolContext<'a> {
     store: &'a Store,
@@ -95,8 +96,11 @@ pub const LIST_SESSIONS: &str = "contextos_list_sessions";
 pub const GET_SESSION: &str = "contextos_get_session";
 pub const LIST_PROJECTS: &str = "contextos_list_projects";
 pub const LIST_MEMORIES: &str = "contextos_list_memories";
+pub const LIST_WORKSPACE_CHANGES: &str = "contextos_list_workspace_changes";
+pub const GET_WORKSPACE_CHANGE: &str = "contextos_get_workspace_change";
+pub const DELETE_WORKSPACE_CHANGE: &str = "contextos_delete_workspace_change";
 pub use crate::services::control::{
-    COMPRESSION, DATA_SOURCES, MEMORIES, RELATIONS, SESSIONS, SETTINGS,
+    COMPRESSION, DATA_SOURCES, LAYA, MEMORIES, RELATIONS, SESSIONS, SETTINGS,
 };
 const LEGACY_SEARCH: &str = "wake_search";
 const LEGACY_LIST_SESSIONS: &str = "wake_list_sessions";
@@ -105,20 +109,24 @@ const LEGACY_LIST_PROJECTS: &str = "wake_list_projects";
 const LEGACY_LIST_MEMORIES: &str = "wake_list_memories";
 /// 工具名的清单:自指回声过滤与 wake_lookups 记账(`adapters::wake_lookup_kind`)与
 /// definitions 的稳定性测试都读它,加一家改这里与 `definitions()` 两处即可
-pub const NAMES: [&str; 11] = [
+pub const NAMES: [&str; 15] = [
     SEARCH,
     LIST_SESSIONS,
     GET_SESSION,
     LIST_PROJECTS,
     LIST_MEMORIES,
+    LIST_WORKSPACE_CHANGES,
+    GET_WORKSPACE_CHANGE,
+    DELETE_WORKSPACE_CHANGE,
     SETTINGS,
     SESSIONS,
     RELATIONS,
     COMPRESSION,
     MEMORIES,
     DATA_SOURCES,
+    LAYA,
 ];
-pub const LOOKUP_NAMES: [&str; 16] = [
+pub const LOOKUP_NAMES: [&str; 20] = [
     SEARCH,
     LIST_SESSIONS,
     GET_SESSION,
@@ -129,12 +137,16 @@ pub const LOOKUP_NAMES: [&str; 16] = [
     LEGACY_GET_SESSION,
     LEGACY_LIST_PROJECTS,
     LEGACY_LIST_MEMORIES,
+    LIST_WORKSPACE_CHANGES,
+    GET_WORKSPACE_CHANGE,
+    DELETE_WORKSPACE_CHANGE,
     SETTINGS,
     SESSIONS,
     RELATIONS,
     COMPRESSION,
     MEMORIES,
     DATA_SOURCES,
+    LAYA,
 ];
 
 const MAX_SEARCH_SESSIONS: i64 = 30;
@@ -143,6 +155,8 @@ const MAX_LIST_MEMORIES: i64 = 100;
 /// contextos_search 末尾附带的记忆命中数
 const MEMORY_HITS_IN_SEARCH: i64 = 5;
 const MAX_LIST_PROJECTS: i64 = 200;
+const MAX_LIST_WORKSPACE_CHANGES: i64 = 200;
+const MAX_WORKSPACE_CHANGE_CHARS: i64 = 100_000;
 const SNIPPETS_PER_SESSION: usize = 3;
 
 fn read_only_annotations() -> Value {
@@ -201,6 +215,10 @@ fn domain_properties(name: &str) -> serde_json::Map<String, Value> {
                             "llm_timeout_secs":{"type":"integer","minimum":30,"maximum":3600},
                             "llm_input_limit_chars":{"type":"integer","minimum":1},
                             "jev_enabled":{"type":"boolean"},
+                            "decision_provider":{"type":"string","enum":["jev","laya"]},
+                            "decision_model":{"type":"string"},
+                            "laya_runtime_mode":{"type":"string","enum":["managed","external"]},
+                            "external_laya_api_url":{"type":"string"},
                             "jev_api_url":{"type":"string"},
                             "jev_timeout_secs":{"type":"integer","minimum":10,"maximum":1800}
                         },
@@ -210,7 +228,7 @@ fn domain_properties(name: &str) -> serde_json::Map<String, Value> {
                         "type":"object",
                         "description":"Editable compression strategy parameters and prompt templates.",
                         "properties":{
-                            "mechanical":{"type":"object","description":"Built-in mechanical rule groups: empty_output_rule, error_protection_rule, patch_rule, source_listing_rule, search_output_rule, listing_output_rule, instruction_and_tool_spec_rule, generic_large_output_rule.","additionalProperties":true},
+                            "mechanical":{"type":"object","description":"Retention options: retention_mode (full_mechanical, body_only, body_with_structure), allow_jev_delete_assistant_body, allow_jev_delete_user_messages, expanded_max_chars, evidence_max_chars; plus rule groups: empty_output_rule, error_protection_rule, patch_rule, source_listing_rule, search_output_rule, listing_output_rule, instruction_and_tool_spec_rule, generic_large_output_rule.","additionalProperties":true},
                             "jev":{"type":"object","description":"Jev candidate thresholds, scoring prompt, fallback, and score levels.","additionalProperties":true},
                             "llm":{"type":"object","description":"LLM strategy sections, outer prompt templates, and temperature.","additionalProperties":true}
                         },
@@ -235,7 +253,7 @@ fn domain_properties(name: &str) -> serde_json::Map<String, Value> {
             "new_relation":{"type":"string","description":"New built-in or custom relationship name."}
         }),
         COMPRESSION => json!({
-            "session_key":{"type":"string","description":"Session for list_turns."},
+            "session_key":{"type":"string","description":"Session for list_turns or incremental compression.update."},
             "session_keys":{"type":"array","items":{"type":"string"},"description":"Complete sessions to compress together, whether related or unrelated."},
             "session_inputs":{"type":"array","description":"Explicit per-session turn selection. Do not combine with session_keys.","items":{"type":"object","properties":{"session_key":{"type":"string"},"turn_numbers":{"type":"array","items":{"type":"integer","minimum":1}}},"required":["session_key"],"additionalProperties":false}},
             "output":{"type":"string","description":"Output Markdown path."},
@@ -244,7 +262,12 @@ fn domain_properties(name: &str) -> serde_json::Map<String, Value> {
             "llm_enabled":{"type":"boolean","description":"Per-run override."},
             "generate_memory_candidates":{"type":"boolean","default":false},
             "path":{"type":"string","description":"Derived document path."},
-            "content":{"type":"string"}, "content_hash":{"type":"string"}
+            "content":{"type":"string"}, "content_hash":{"type":"string"},
+            "query":{"type":"string","description":"Compression-document keyword query. Empty or omitted lists recent documents."},
+            "project":{"type":"string","description":"Optional project path whose .ContextOS directory is searched; global compressions are always included."},
+            "limit":{"type":"integer","minimum":1,"maximum":200,"default":50},
+            "expand_relations":{"type":"boolean","default":true,"description":"Include one-hop documents through existing session relationships."},
+            "include_content":{"type":"boolean","default":false,"description":"Include complete Markdown content for each result."}
         }),
         MEMORIES => json!({
             "key":{"type":"string"}, "path":{"type":"string"},
@@ -265,6 +288,9 @@ fn domain_properties(name: &str) -> serde_json::Map<String, Value> {
             "path":{"type":"string","description":"Absolute local source path."},
             "source":{"type":"string","description":"Memory source id for set_enabled."},
             "enabled":{"type":"boolean"}
+        }),
+        LAYA => json!({
+            "delete_models":{"type":"boolean","default":false,"description":"For uninstall only; also remove the downloaded model cache."}
         }),
         _ => json!({}),
     };
@@ -376,12 +402,54 @@ pub fn definitions() -> Vec<Value> {
             },
             "annotations": read_only_annotations(),
         }),
+        json!({
+            "name": LIST_WORKSPACE_CHANGES,
+            "title": "List workspace changes",
+            "description": "List created, modified, and deleted files observed by the file monitor in manually monitored workspaces. Use the returned id with contextos_get_workspace_change to read before/after snapshots when captured.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Exact absolute path of a monitored workspace directory. Omit to include all monitored workspaces." },
+                    "since": since_param(),
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIST_WORKSPACE_CHANGES, "default": 50 },
+                },
+            },
+            "annotations": read_only_annotations(),
+        }),
+        json!({
+            "name": GET_WORKSPACE_CHANGE,
+            "title": "Read a workspace change",
+            "description": "Read one file-monitor workspace event by id, including before/after text snapshots when captured. This never reads or modifies the current workspace file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "minimum": 1, "description": "Workspace change event id returned by contextos_list_workspace_changes." },
+                    "max_chars": { "type": "integer", "minimum": 200, "maximum": MAX_WORKSPACE_CHANGE_CHARS, "default": 20000 },
+                },
+                "required": ["id"],
+            },
+            "annotations": read_only_annotations(),
+        }),
+        json!({
+            "name": DELETE_WORKSPACE_CHANGE,
+            "title": "Delete a workspace change",
+            "description": "Permanently delete one workspace timeline event and remove its snapshot metadata and CAS files when no remaining workspace event or monitored-file baseline references them. This does not modify the monitored workspace file or its current baseline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "minimum": 1, "description": "Workspace change event id returned by contextos_list_workspace_changes." },
+                },
+                "required": ["id"],
+            },
+            "annotations": domain_annotations(),
+        }),
         domain_definition(SETTINGS, "Read or update business settings", "Read and update ContextOS business settings. API keys are never returned or accepted.", &["get", "update"]),
         domain_definition(SESSIONS, "Manage sessions", "List, read, search, update metadata, or move one session tree to the OS trash. Original conversation messages are immutable.", &["list", "get", "search", "list_projects", "update_metadata", "trash", "cleanup_history"]),
         domain_definition(RELATIONS, "Manage session relationships", "List relationships and create, update, or delete manual relationships. Adapter-discovered relationships are read-only.", &["list", "create", "update", "delete"]),
-        domain_definition(COMPRESSION, "Compress sessions and manage derived documents", "List a session's one-based turns, run full-session compression or select turns per session with session_inputs, then read, update, or move ContextOS-derived Markdown documents to the OS trash.", &["list_turns", "run", "get_document", "update_document", "trash_document"]),
+        domain_definition(COMPRESSION, "Compress sessions and manage derived documents", "Search indexed compression documents, list a session's one-based turns, run full-session compression or select turns per session with session_inputs, incrementally update an existing document, then read, update, or move ContextOS-derived Markdown documents to the OS trash.", &["search", "list_turns", "run", "update", "get_document", "update_document", "trash_document"]),
         domain_definition(MEMORIES, "Manage ContextOS memories", "List memories and create, read, update, or trash only memories owned by ContextOS.", &["list", "get", "create", "update", "trash"]),
         domain_definition(DATA_SOURCES, "Manage local data sources", "List, add, enable, disable, remove, or reset local session and memory sources. Remote hosts are not supported.", &["list", "add", "set_enabled", "remove", "reset"]),
+        domain_definition(LAYA, "Manage the managed Laya runtime", "Inspect and control the shared managed Laya runtime used by ContextOS. GUI, MCP, and CLI attach to the same validated process record.", &["status", "start", "stop", "install", "uninstall"]),
     ]
 }
 
@@ -392,7 +460,10 @@ fn call(ctx: &ToolContext, name: &str, args: &Value) -> ToolResult {
         GET_SESSION | LEGACY_GET_SESSION => get_session(ctx, args),
         LIST_PROJECTS | LEGACY_LIST_PROJECTS => list_projects(ctx, args),
         LIST_MEMORIES | LEGACY_LIST_MEMORIES => list_memories(ctx, args),
-        SETTINGS | SESSIONS | RELATIONS | COMPRESSION | MEMORIES | DATA_SOURCES => Ok(
+        LIST_WORKSPACE_CHANGES => list_workspace_changes(ctx, args),
+        GET_WORKSPACE_CHANGE => get_workspace_change(ctx, args),
+        DELETE_WORKSPACE_CHANGE => delete_workspace_change(ctx, args),
+        SETTINGS | SESSIONS | RELATIONS | COMPRESSION | MEMORIES | DATA_SOURCES | LAYA => Ok(
             crate::services::control::invoke(ctx.store, ctx.adapters, name, args),
         ),
         other => Err(ToolError::InvalidParams(format!("Unknown tool: {other}"))),
@@ -995,6 +1066,150 @@ fn list_memories(ctx: &ToolContext, args: &Value) -> ToolResult {
     Ok(out)
 }
 
+fn workspace_store(ctx: &ToolContext) -> Result<Option<WorkspaceStore>, ToolError> {
+    let db = workspace_db_path_for(ctx.store.path());
+    if !db.is_file() {
+        return Ok(None);
+    }
+    WorkspaceStore::open_existing(&db, &workspace_cas_path_for(ctx.store.path()))
+        .map(Some)
+        .map_err(|error| {
+            ToolError::Internal(format!("could not open workspace history: {error:#}"))
+        })
+}
+
+fn writable_workspace_store(ctx: &ToolContext) -> Result<Option<WorkspaceStore>, ToolError> {
+    let db = workspace_db_path_for(ctx.store.path());
+    if !db.is_file() {
+        return Ok(None);
+    }
+    WorkspaceStore::open_existing_writable(&db, &workspace_cas_path_for(ctx.store.path()))
+        .map(Some)
+        .map_err(|error| {
+            ToolError::Internal(format!("could not open workspace history for deletion: {error:#}"))
+        })
+}
+
+fn list_workspace_changes(ctx: &ToolContext, args: &Value) -> ToolResult {
+    let Some(store) = workspace_store(ctx)? else {
+        return Ok("No monitored workspace change history is available. Add a workspace directory in ContextOS first.\n".into());
+    };
+    let project = text_arg(args, "project")?;
+    let since = since_arg(ctx, args)?;
+    let limit = int_arg(args, "limit", 50, 1, MAX_LIST_WORKSPACE_CHANGES)? as usize;
+    let events = store.list_workspace_change_events_filtered(project, since, None, limit)?;
+    let scope = project
+        .map(|path| format!(" for workspace {path}"))
+        .unwrap_or_default();
+    if events.is_empty() {
+        return Ok(format!("No workspace changes{scope}.\n"));
+    }
+    let mut out = format!(
+        "{} workspace change{}{} — newest first.\n\n",
+        events.len(),
+        plural(events.len() as i64),
+        scope
+    );
+    for event in &events {
+        let kind = match event.kind {
+            crate::workspace_changes::WorkspaceChangeKind::Created => "created",
+            crate::workspace_changes::WorkspaceChangeKind::Modified => "modified",
+            crate::workspace_changes::WorkspaceChangeKind::Deleted => "deleted",
+        };
+        let observed = fmt_time(Some(event.observed_at));
+        out.push_str(&format!(
+            "- id {} · {} · {}/{} · {}\n",
+            event.id, kind, event.project_path, event.file_path, observed
+        ));
+        out.push_str(&format!(
+            "  before: {} · after: {}\n  read: {} id {}\n",
+            event.before_hash.as_deref().unwrap_or("none"),
+            event.after_hash.as_deref().unwrap_or("none"),
+            GET_WORKSPACE_CHANGE,
+            event.id
+        ));
+    }
+    Ok(out)
+}
+
+fn get_workspace_change(ctx: &ToolContext, args: &Value) -> ToolResult {
+    let Some(store) = workspace_store(ctx)? else {
+        return Err(ToolError::Failed(
+            "No workspace change history is available.".into(),
+        ));
+    };
+    let id = int_arg(args, "id", 0, 1, i64::MAX)?;
+    let max_chars = int_arg(args, "max_chars", 20_000, 200, MAX_WORKSPACE_CHANGE_CHARS)? as usize;
+    let Some(mut detail) = store.workspace_change_detail(id)? else {
+        return Err(ToolError::Failed(format!(
+            "No workspace change with id `{id}`."
+        )));
+    };
+    let event = &detail.event;
+    let kind = match event.kind {
+        crate::workspace_changes::WorkspaceChangeKind::Created => "created",
+        crate::workspace_changes::WorkspaceChangeKind::Modified => "modified",
+        crate::workspace_changes::WorkspaceChangeKind::Deleted => "deleted",
+    };
+    let mut out = format!(
+        "# Workspace change {}\nproject: {}\nfile: {}\nkind: {}\nobserved: {}\nbefore_hash: {}\nafter_hash: {}\n\n",
+        event.id,
+        event.project_path,
+        event.file_path,
+        kind,
+        fmt_time(Some(event.observed_at)),
+        event.before_hash.as_deref().unwrap_or("none"),
+        event.after_hash.as_deref().unwrap_or("none")
+    );
+    if let Some(text) = detail.before_text.take() {
+        let (text, truncated) = crate::adapters::parse_utils::clip_chars(&text, max_chars);
+        out.push_str("## Before\n\n");
+        out.push_str(&text);
+        if truncated {
+            out.push_str("\n[before snapshot truncated]\n");
+        }
+        out.push('\n');
+    }
+    if let Some(text) = detail.after_text.take() {
+        let (text, truncated) = crate::adapters::parse_utils::clip_chars(&text, max_chars);
+        out.push_str("## After\n\n");
+        out.push_str(&text);
+        if truncated {
+            out.push_str("\n[after snapshot truncated]\n");
+        }
+        out.push('\n');
+    }
+    if event.before_hash.is_none() && event.after_hash.is_none() {
+        out.push_str("No content snapshot was captured for this event; the hashes and metadata above are still available.\n");
+    }
+    Ok(out)
+}
+
+fn delete_workspace_change(ctx: &ToolContext, args: &Value) -> ToolResult {
+    let Some(store) = writable_workspace_store(ctx)? else {
+        return Err(ToolError::Failed(
+            "No workspace change history is available.".into(),
+        ));
+    };
+    let id = int_arg(args, "id", 0, 1, i64::MAX)?;
+    let result = store.delete_workspace_change_with_cleanup(id as i64)?;
+    if !result.deleted {
+        return Err(ToolError::Failed(format!(
+            "No workspace change with id `{id}`."
+        )));
+    }
+    let mut out = format!(
+        "Deleted workspace change {id}; removed {} unreferenced snapshot entr{} and reclaimed {} bytes.",
+        result.unreferenced_snapshots_removed,
+        if result.unreferenced_snapshots_removed == 1 { "y" } else { "ies" },
+        result.bytes_reclaimed
+    );
+    for warning in result.cleanup_warnings {
+        out.push_str(&format!("\nWarning: {warning}"));
+    }
+    Ok(out)
+}
+
 /// `contextos_get_session` 收到 `wake://memory/<key>` 引用时的读法:标题行 + 归属 + 来源
 /// 路径,然后是正文。文件型现场读磁盘(agent 刚改过也能看到),读不到退库里那份;
 /// SQLite 型只有库里那份。同一个 `max_chars` 预算,超了截断并说明
@@ -1073,6 +1288,7 @@ fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
         updated_since: since,
         project_paths: project.clone().unwrap_or_default(),
         tags: Vec::new(),
+        models: Vec::new(),
         // "最近"就是最近:GUI 的置顶优先在这里会让 limit 先被旧置顶会话占掉
         ignore_pins: true,
     })?;
@@ -1196,6 +1412,7 @@ fn child_sessions(ctx: &ToolContext, parent_key: &str) -> Vec<SessionMeta> {
                 updated_since: None,
                 project_paths: Vec::new(),
                 tags: Vec::new(),
+                models: Vec::new(),
                 ignore_pins: true,
             },
         )
@@ -1573,7 +1790,11 @@ mod tests {
         assert_eq!(names, NAMES);
         for (index, d) in defs.iter().enumerate() {
             assert_eq!(d["inputSchema"]["type"], "object");
-            assert_eq!(d["annotations"]["readOnlyHint"], index < 5);
+            assert_eq!(
+                d["annotations"]["readOnlyHint"],
+                index < 7,
+                "definition {index} read-only annotation changed"
+            );
         }
     }
 }

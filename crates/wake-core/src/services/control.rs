@@ -17,13 +17,15 @@ pub const RELATIONS: &str = "contextos_relations";
 pub const COMPRESSION: &str = "contextos_compression";
 pub const MEMORIES: &str = "contextos_memories";
 pub const DATA_SOURCES: &str = "contextos_data_sources";
-pub const NAMES: [&str; 6] = [
+pub const LAYA: &str = "contextos_laya";
+pub const NAMES: [&str; 7] = [
     SETTINGS,
     SESSIONS,
     RELATIONS,
     COMPRESSION,
     MEMORIES,
     DATA_SOURCES,
+    LAYA,
 ];
 
 #[derive(Debug)]
@@ -77,6 +79,7 @@ pub fn invoke(
         COMPRESSION => compression(store, adapters, args),
         MEMORIES => memories(store, args),
         DATA_SOURCES => data_sources(store, args),
+        LAYA => laya(args),
         _ => Err(ControlError::invalid(format!("unknown domain `{domain}`"))),
     };
     match result {
@@ -88,6 +91,30 @@ pub fn invoke(
             }
             json!({"ok": false, "error": body}).to_string()
         }
+    }
+}
+
+fn laya(args: &Value) -> ControlResult {
+    let manager = crate::services::laya_runtime::manager();
+    match operation(args)? {
+        "status" => serde_json::to_value(manager.status()).map_err(ControlError::internal),
+        "start" => manager
+            .start()
+            .map(|endpoint| json!({"endpoint": endpoint.url, "pid": endpoint.pid, "started_at": endpoint.started_at}))
+            .map_err(ControlError::internal),
+        "stop" => manager
+            .stop()
+            .map(|_| json!({"stopped": true}))
+            .map_err(ControlError::internal),
+        "install" => manager
+            .install(None)
+            .map(|installation| json!({"installed": true, "installation": installation}))
+            .map_err(ControlError::internal),
+        "uninstall" => manager
+            .uninstall(args.get("delete_models").and_then(Value::as_bool).unwrap_or(false))
+            .map(|_| json!({"uninstalled": true, "models_deleted": args.get("delete_models").and_then(Value::as_bool).unwrap_or(false)}))
+            .map_err(ControlError::internal),
+        other => Err(ControlError::invalid(format!("unknown Laya operation `{other}`"))),
     }
 }
 
@@ -144,7 +171,9 @@ fn settings(store: &Store, args: &Value) -> ControlResult {
         ));
     }
     match operation(args)? {
-        "get" => Ok(crate::services::compression_settings::public_settings(store)),
+        "get" => Ok(crate::services::compression_settings::public_settings(
+            store,
+        )),
         "update" => {
             let data = args.get("data");
             let reset_defaults = args.get("reset_defaults");
@@ -652,6 +681,88 @@ fn contextos_memory_dir() -> PathBuf {
 
 fn compression(store: &Store, adapters: &[Box<dyn AgentAdapter>], args: &Value) -> ControlResult {
     match operation(args)? {
+        "search" => {
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let project = optional_text(args, "project")?;
+            let limit = args
+                .get("limit")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .filter(|value| (1..=200).contains(value))
+                        .ok_or_else(|| {
+                            ControlError::invalid("`limit` must be an integer from 1 to 200")
+                        })
+                })
+                .transpose()?
+                .unwrap_or(50);
+            let expand_relations = args
+                .get("expand_relations")
+                .map(|value| {
+                    value.as_bool().ok_or_else(|| {
+                        ControlError::invalid("`expand_relations` must be a boolean")
+                    })
+                })
+                .transpose()?
+                .unwrap_or(true);
+            let include_content = args
+                .get("include_content")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| ControlError::invalid("`include_content` must be a boolean"))
+                })
+                .transpose()?
+                .unwrap_or(false);
+            let projects = crate::services::compression_documents::project_paths(store, project)
+                .map_err(ControlError::internal)?;
+            let roots = crate::services::compression_documents::roots_for_paths(&projects);
+            let result = crate::services::compression_documents::sync_and_search(
+                store,
+                &roots,
+                query,
+                limit,
+                expand_relations,
+            )
+            .map_err(ControlError::internal)?;
+            let hits = result
+                .hits
+                .into_iter()
+                .map(|hit| {
+                    let content = include_content
+                        .then(|| store.get_compression_document(&hit.path))
+                        .transpose()
+                        .map_err(ControlError::internal)?
+                        .flatten()
+                        .map(|document| document.body);
+                    Ok(json!({
+                        "path": hit.path,
+                        "scope": hit.scope,
+                        "project_path": hit.project_path,
+                        "title": highlight_markdown(&hit.title),
+                        "snippet": highlight_markdown(&hit.snippet),
+                        "sources": hit.sources,
+                        "modified_at": hit.modified_at,
+                        "score": hit.score,
+                        "match": if hit.direct_match { "keyword" } else { "relation" },
+                        "related_by": hit.related_by,
+                        "content": content,
+                    }))
+                })
+                .collect::<std::result::Result<Vec<_>, ControlError>>()?;
+            Ok(json!({
+                "query": query,
+                "degraded": result.degraded,
+                "indexed_documents": result.indexed_documents,
+                "direct_hits": result.direct_hits,
+                "relation_hits": result.relation_hits,
+                "hits": hits,
+            }))
+        }
         "list_turns" => {
             let session_key = text(args, "session_key")?;
             let turns = crate::services::compression::list_turns(store, adapters, session_key)
@@ -798,6 +909,7 @@ fn compression(store: &Store, adapters: &[Box<dyn AgentAdapter>], args: &Value) 
                         })
                         .transpose()?
                         .unwrap_or(false),
+                    continuation_context: None,
                 },
             )
             .map_err(|error| {
@@ -810,7 +922,8 @@ fn compression(store: &Store, adapters: &[Box<dyn AgentAdapter>], args: &Value) 
                 };
                 ControlError::new(code, error.message).with_details(error.diagnostic)
             })?;
-            let content = format!("---\n{DOCUMENT_MARKER}\ncontextos_sources: {}\ncontextos_mode: {}\ncontextos_settings: {}\n---\n\n{}", sources.join(","), result.mode, crate::services::compression_settings::public_settings(store), result.markdown);
+            let coverage = compression_coverage(store, adapters, &inputs)?;
+            let content = format!("{}\n\n<!--\n{DOCUMENT_MARKER}\ncontextos_sources: {}\ncontextos_coverage: {}\ncontextos_mode: {}\ncontextos_settings: {}\n-->\n", result.markdown.trim_end(), sources.join(","), coverage, result.mode, crate::services::compression_settings::public_settings(store));
             if output.exists() {
                 atomic_replace(&output, &content)?;
             } else {
@@ -820,6 +933,7 @@ fn compression(store: &Store, adapters: &[Box<dyn AgentAdapter>], args: &Value) 
                 json!({"path": output, "content_hash": content_hash(&content), "mode": result.mode, "session_keys": sources, "stats": result.stats, "memory_candidates": result.memory_candidates}),
             )
         }
+        "update" => incremental_compression_update(store, adapters, args),
         "get_document" => document_get(Path::new(text(args, "path")?)),
         "update_document" => {
             let path = PathBuf::from(text(args, "path")?);
@@ -848,6 +962,177 @@ fn compression(store: &Store, adapters: &[Box<dyn AgentAdapter>], args: &Value) 
     }
 }
 
+fn highlight_markdown(value: &str) -> String {
+    value
+        .replace(crate::models::HL_OPEN, "**")
+        .replace(crate::models::HL_CLOSE, "**")
+        .replace("****", "")
+}
+
+fn compression_coverage(
+    store: &Store,
+    adapters: &[Box<dyn AgentAdapter>],
+    inputs: &[crate::services::compression::SessionInput],
+) -> std::result::Result<String, ControlError> {
+    let mut coverage = serde_json::Map::new();
+    for input in inputs {
+        let turns = crate::services::compression::list_turns(store, adapters, &input.session_key)
+            .map_err(|error| ControlError::internal(format!("{error:#}")))?;
+        let covered = input
+            .turn_numbers
+            .as_ref()
+            .and_then(|numbers| numbers.iter().copied().max())
+            .unwrap_or_else(|| turns.last().map(|turn| turn.number).unwrap_or(0));
+        coverage.insert(input.session_key.clone(), json!(covered));
+    }
+    Ok(Value::Object(coverage).to_string())
+}
+
+fn parse_sources(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("contextos_sources:").map(str::trim))
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn parse_coverage(content: &str) -> std::collections::HashMap<String, usize> {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("contextos_coverage:").map(str::trim))
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default()
+}
+
+fn infer_turn_coverage(content: &str, session_key: &str) -> Option<usize> {
+    let marker = format!("({session_key}) - turn ");
+    content
+        .lines()
+        .filter_map(|line| {
+            line.split_once(&marker)
+                .and_then(|(_, tail)| tail.split_whitespace().next())
+                .and_then(|number| number.parse::<usize>().ok())
+        })
+        .max()
+}
+
+fn metadata_block(content: &str) -> Option<(usize, usize)> {
+    if content.starts_with("---\n") {
+        let end = content.find("\n---")? + "\n---".len();
+        return Some((0, end));
+    }
+    let marker = "<!--\n";
+    let start = content.rfind(marker)?;
+    let end = content[start..].find("\n-->")? + start + "\n-->".len();
+    content[start..end]
+        .lines()
+        .any(|line| line.trim() == DOCUMENT_MARKER)
+        .then_some((start, end))
+}
+
+fn trailing_metadata(sources: &str, coverage: &str, mode: &str, settings: Option<&str>) -> String {
+    let settings_line = settings
+        .map(|value| format!("\ncontextos_settings: {value}"))
+        .unwrap_or_default();
+    format!(
+        "<!--\n{DOCUMENT_MARKER}\ncontextos_sources: {sources}\ncontextos_coverage: {coverage}\ncontextos_mode: {mode}{settings_line}\n-->"
+    )
+}
+
+fn incremental_compression_update(
+    store: &Store,
+    adapters: &[Box<dyn AgentAdapter>],
+    args: &Value,
+) -> ControlResult {
+    let path = PathBuf::from(text(args, "path")?);
+    let old = std::fs::read_to_string(&path).map_err(ControlError::internal)?;
+    require_marker(&old, DOCUMENT_MARKER, "document")?;
+    let session_key = args
+        .get("session_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| parse_sources(&old).into_iter().next())
+        .ok_or_else(|| {
+            ControlError::invalid("incremental update needs `session_key` or a document source")
+        })?;
+    let turns = crate::services::compression::list_turns(store, adapters, &session_key)
+        .map_err(|error| ControlError::internal(format!("{error:#}")))?;
+    let mut coverage = parse_coverage(&old);
+    let covered = coverage
+        .get(&session_key)
+        .copied()
+        .or_else(|| infer_turn_coverage(&old, &session_key))
+        .ok_or_else(|| {
+            ControlError::invalid(
+                "document has no contextos_coverage and its covered turns cannot be inferred; run a full compression once to establish a baseline",
+            )
+        })?;
+    coverage.insert(session_key.clone(), covered);
+    let new_turns = turns
+        .iter()
+        .filter(|turn| turn.number > covered)
+        .map(|turn| turn.number)
+        .collect::<Vec<_>>();
+    if new_turns.is_empty() {
+        return Ok(
+            json!({"path": path, "content_hash": content_hash(&old), "updated": false, "session_key": session_key, "covered_until": covered}),
+        );
+    }
+    let (metadata_start, metadata_end) = metadata_block(&old)
+        .ok_or_else(|| ControlError::invalid("document metadata is malformed"))?;
+    let old_body = if metadata_start == 0 {
+        old[metadata_end..].trim().to_string()
+    } else {
+        old[..metadata_start].trim().to_string()
+    };
+    let continuation_context = old_body.clone();
+    let result = crate::services::compression::run_inputs(
+        store,
+        adapters,
+        &[crate::services::compression::SessionInput {
+            session_key: session_key.clone(),
+            turn_numbers: Some(new_turns.clone()),
+        }],
+        &crate::services::compression::RunOverrides {
+            jev_enabled: args.get("jev_enabled").and_then(Value::as_bool),
+            llm_enabled: args.get("llm_enabled").and_then(Value::as_bool),
+            generate_memory_candidates: false,
+            continuation_context: Some(continuation_context),
+        },
+    )
+    .map_err(|error| ControlError::internal(error.message))?;
+    let mut next_coverage = coverage;
+    let next = new_turns.iter().copied().max().unwrap_or(covered);
+    next_coverage.insert(session_key.clone(), next);
+    let old_body = old_body.trim_end();
+    let sources = parse_sources(&old).join(",");
+    let appended = format!(
+        "{}\n\n## 增量更新\n\n- 来源会话：{}\n- 新增轮次：{}-{}\n- 压缩模式：{}\n\n{}\n\n{}",
+        old_body,
+        session_key,
+        new_turns.first().unwrap_or(&covered),
+        new_turns.last().unwrap_or(&covered),
+        result.mode,
+        result.markdown,
+        trailing_metadata(
+            &sources,
+            &serde_json::to_string(&next_coverage).unwrap_or_else(|_| "{}".into()),
+            result.mode,
+            None,
+        )
+    );
+    atomic_replace(&path, &appended)?;
+    Ok(
+        json!({"path": path, "content_hash": content_hash(&appended), "updated": true, "session_key": session_key, "covered_until": next, "mode": result.mode, "continuation_context_used": result.stats.get("continuation_context_chars").and_then(Value::as_u64).unwrap_or(0) > 0}),
+    )
+}
+
 fn document_get(path: &Path) -> ControlResult {
     let content = std::fs::read_to_string(path).map_err(ControlError::internal)?;
     require_marker(&content, DOCUMENT_MARKER, "document")?;
@@ -859,7 +1144,7 @@ fn require_marker(
     marker: &str,
     kind: &str,
 ) -> std::result::Result<(), ControlError> {
-    if content.lines().take(12).any(|line| line.trim() == marker) {
+    if content.lines().any(|line| line.trim() == marker) {
         Ok(())
     } else {
         Err(ControlError::not_allowed(format!(
@@ -950,5 +1235,19 @@ fn atomic_replace(path: &Path, content: &str) -> std::result::Result<(), Control
     #[cfg(not(windows))]
     {
         std::fs::rename(&tmp, path).map_err(|e| ControlError::new("io_error", e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_turn_coverage;
+
+    #[test]
+    fn legacy_mechanical_document_turn_headers_establish_coverage() {
+        let content = "## Title (codex:abc) - turn 2 (seq 5-9)\n\n\
+                       ## Title (codex:abc) - turn 12 (seq 40-45)\n\n\
+                       ## Other (codex:def) - turn 99 (seq 1-2)";
+        assert_eq!(infer_turn_coverage(content, "codex:abc"), Some(12));
+        assert_eq!(infer_turn_coverage(content, "codex:missing"), None);
     }
 }

@@ -2,8 +2,10 @@
 //! 项目参数的三级匹配与 `since` 解析都在这里,单测卡住语义——工具层只管拼装。
 
 use crate::adapters::path_owns;
-use crate::models::{local_ms, ProjectInfo};
+use crate::db::Store;
+use crate::models::{local_ms, ProjectInfo, SessionFilter, SortKey};
 use chrono::{NaiveDate, NaiveDateTime};
+use std::path::Path;
 
 /// 把 agent 给的 project 参数解析成索引里的项目路径集合(交给
 /// `SessionFilter::project_paths` / `SearchFilter::project_paths`)。
@@ -54,6 +56,70 @@ pub fn resolve_project_paths(arg: &str, projects: &[ProjectInfo]) -> Vec<String>
     matched.sort();
     matched.dedup();
     matched
+}
+
+pub fn session_start_context(store: &Store, dir: &Path) -> anyhow::Result<Option<String>> {
+    let project_paths = resolve_project_paths(&dir.to_string_lossy(), &store.list_projects(true)?);
+    if project_paths.is_empty() {
+        return Ok(None);
+    }
+    let roots = crate::services::compression_documents::roots_for_paths(&project_paths);
+    crate::services::compression_documents::sync(store, &roots)?;
+    let (sessions, _) = store.list_sessions(&SessionFilter {
+        include_archived: false,
+        roots_only: true,
+        sort: SortKey::Updated,
+        limit: 5,
+        ignore_pins: true,
+        project_paths,
+        ..Default::default()
+    })?;
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+    let keys = sessions
+        .iter()
+        .map(|session| session.key.clone())
+        .collect::<Vec<_>>();
+    let documents = store.compression_documents_for_sessions(&keys)?;
+    let mut by_session: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for (key, path, title) in documents {
+        by_session.entry(key).or_default().push((title, path));
+    }
+    let mut out = String::from("ContextOS: recent work in this project\n\n");
+    for session in sessions {
+        let (question, reply) = store.last_exchange(&session.key)?;
+        out.push_str(&format!(
+            "- {} · {} · `{}`\n",
+            session.agent.as_str(),
+            crate::text::one_line(&session.title, 160),
+            session.key
+        ));
+        if let Some(question) = question {
+            out.push_str(&format!(
+                "  last asked: {}\n",
+                crate::text::one_line(&question, 320)
+            ));
+        }
+        if let Some(reply) = reply {
+            out.push_str(&format!(
+                "  last reply: {}\n",
+                crate::text::one_line(&reply, 320)
+            ));
+        }
+        if let Some(docs) = by_session.get(&session.key) {
+            for (title, path) in docs {
+                out.push_str(&format!(
+                    "  compression: {}\n    {}\n",
+                    crate::text::one_line(title, 160),
+                    path
+                ));
+            }
+        }
+    }
+    out.push_str("\nRead a session with contextos_get_session or `contextos-cli show <key>`. Read a compression document at its path above.\n");
+    Ok(Some(out))
 }
 
 /// 是"路径"而非"项目名"的判据。不能只看 `Path::is_absolute`:Windows 上它对

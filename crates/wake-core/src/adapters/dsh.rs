@@ -7,8 +7,8 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-/// DeepSeek Harness(dsh):`~/.dsh/sessions/--<cwd转义>--/<id转义>/session.jsonl[.zstd]`,
-/// 一目录一会话,文件名固定。默认落盘是 zstd **多帧连接**(首帧 header 行,之后每次
+/// DeepSeek Harness(dsh):`~/.dsh/sessions/--<cwd转义>--/<id转义>/session[.vN].jsonl[.zstd]`,
+/// 一目录一会话。默认落盘是 zstd **多帧连接**(首帧 header 行,之后每次
 /// append 一帧),标准流式解码到 EOF 即可;`compression: none` 配置则是纯文本 .jsonl,
 /// 两种后缀都认。首行 {type:"session",id,createdAt,cwd,…} 给权威 id/cwd/created,
 /// 不反推目录名;origin=="subagent" 或 delegationDepth>0 是子代理会话,不进列表。
@@ -86,28 +86,38 @@ const KNOWN_SKIP: &[&str] = &[
     "approval/decided",
     "approval/policy",
     "assistant/chunk",
+    "assistant/attempt",
     "command/done",
     "command/run",
     "compaction/end",
     "compaction/prune",
     "compaction/start",
     "compaction/summary",
+    "deliverables/presented",
+    "developer/message",
+    "feedback/message-delete",
+    "feedback/message-put",
     "feedback/record",
     "goal/change",
     "hook/invoked",
     "hook/result",
     "llm/retry",
     "llm/retry-started",
+    "model/selection",
     "permission/preset",
     "plan/mode",
     "request/header",
     "sandbox/mode",
     "schedule/change",
     "session/end-seed",
+    "session-log-deepseek/delivery-accepted",
+    "session/title",
     "session/title-llm-request",
     "step/end",
     "step/start",
     "subagent/descriptor",
+    "subagent/catalog",
+    "system/message",
     "team/member",
     "team/message/delivered",
     "team/message/queued",
@@ -118,11 +128,14 @@ const KNOWN_SKIP: &[&str] = &[
     "tool-workflow/run-end",
     "tool-workflow/run-start",
     "tool/call",
+    "tool/ptc-dispatch",
+    "tool/ptc-dispatch-start",
     "tool/code-dispatch",
     "tool/code-dispatch-start",
     "turn/end",
     "turn/start",
     "web/deepseek-search-llm-request",
+    "workspace/changes",
     "text-chunks",
     "reasoning-chunks",
     "tool-call-chunks",
@@ -135,7 +148,54 @@ struct DshParse {
     messages: Vec<TranscriptMessage>,
     model: Option<String>,
     tokens_used: Option<i64>,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     unknown_lines: u32,
+}
+
+/// DSH 迁移时会在同一会话目录保留旧代日志。v0 使用无版本名,新格式使用
+/// `session.vN.jsonl[.zstd]`;只识别明确的日志名,避免把 lock、临时文件和 artifacts
+/// 当成会话。
+fn log_generation(name: &str) -> Option<(u32, bool)> {
+    let (stem, zstd) = match name.strip_suffix(".zstd") {
+        Some(stem) => (stem, true),
+        None => (name, false),
+    };
+    let version = stem.strip_suffix(".jsonl")?.strip_prefix("session")?;
+    if version.is_empty() {
+        return Some((0, zstd));
+    }
+    let digits = version.strip_prefix(".v")?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits.parse().ok()?, zstd))
+}
+
+/// 同一会话目录只选最高格式代数。同代明文与 zstd 并存时取更新的文件,时间相同优先
+/// zstd。全量扫描和 watcher 都经过此函数,因此不会因入口不同读到不同代。
+fn session_log(dir: &Path) -> Option<SessionFileRef> {
+    let (_, path, size, mtime) = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let (generation, zstd) = log_generation(&entry.file_name().to_string_lossy())?;
+            let path = entry.path();
+            let meta = fs::metadata(&path).ok()?;
+            if !meta.is_file() || meta.len() == 0 {
+                return None;
+            }
+            let mtime = mtime_ms(&meta);
+            Some(((generation, mtime, zstd), path, meta.len() as i64, mtime))
+        })
+        .max_by_key(|(rank, _, _, _)| *rank)?;
+    let header = read_header(&path).filter(|h| !h.subagent)?;
+    Some(SessionFileRef {
+        agent: AgentId::Dsh,
+        native_id: header.id,
+        file_path: path.to_string_lossy().to_string(),
+        mtime_ms: mtime,
+        size,
+    })
 }
 
 fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
@@ -149,6 +209,7 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
         messages: Vec::new(),
         model: None,
         tokens_used: None,
+        usage_events: Vec::new(),
         unknown_lines: 0,
     };
     // toolCallId → (消息下标, tool_calls 下标),tool/result 事件回填用
@@ -274,9 +335,14 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
                     ]
                     .iter()
                     .filter_map(|k| u.get(*k).and_then(|v| v.as_i64()))
-                    .sum::<i64>();
+                    .fold(0i64, i64::saturating_add);
                     if sum > 0 {
-                        p.tokens_used = Some(p.tokens_used.unwrap_or(0) + sum);
+                        p.tokens_used = Some(p.tokens_used.unwrap_or(0).saturating_add(sum));
+                        p.usage_events.push(crate::models::SessionUsageEvent {
+                            timestamp: (ts > 0).then_some(ts),
+                            tokens_used: sum,
+                            model: model.clone(),
+                        });
                     }
                 }
                 if parsed_message.text.is_empty()
@@ -331,9 +397,14 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
                 }
             }
             "tool/result" => {
-                // data.message.content = [tool-result 块]:toolCallId + 嵌套 content + isError
-                let Some(block) = data.pointer("/message/content/0") else {
-                    continue;
+                // v4 直接把 toolCallId/content 放在 message 上,v0-v3 则包在
+                // message.content[0] 的 tool-result 块里。
+                let msg = data.get("message").unwrap_or(&serde_json::Value::Null);
+                let block = if msg.get("toolCallId").is_some() {
+                    msg
+                } else {
+                    msg.pointer("/content/0")
+                        .unwrap_or(&serde_json::Value::Null)
                 };
                 let Some(call_id) = block.get("toolCallId").and_then(|v| v.as_str()) else {
                     continue;
@@ -431,7 +502,7 @@ impl AgentAdapter for DshAdapter {
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = Vec::new();
-        // 固定两层:<project-dir>/<session-dir>/session.jsonl[.zstd],
+        // 固定两层:<project-dir>/<session-dir>/session[.vN].jsonl[.zstd],
         // 不 walkdir 全递归(会话目录还会放别的 artifacts);根目录读不了
         // 就本家降级为空,不把整轮扫描炸掉
         let Ok(projects) = fs::read_dir(&self.root) else {
@@ -445,13 +516,8 @@ impl AgentAdapter for DshAdapter {
                 if !session.file_type().is_ok_and(|t| t.is_dir()) {
                     continue;
                 }
-                // 两个候选名都过 file_ref 漏斗;后缀并存时 sibling 裁决保证至多一个通过
-                let dir = session.path();
-                for name in ["session.jsonl.zstd", "session.jsonl"] {
-                    if let Some(r) = self.file_ref(&dir.join(name)) {
-                        refs.push(r);
-                        break;
-                    }
+                if let Some(r) = session_log(&session.path()) {
+                    refs.push(r);
                 }
             }
         }
@@ -459,37 +525,9 @@ impl AgentAdapter for DshAdapter {
     }
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
-        let name = path.file_name()?.to_string_lossy();
-        if name != "session.jsonl" && name != "session.jsonl.zstd" {
-            return None;
-        }
-        let meta = fs::metadata(path).ok()?;
-        if !meta.is_file() || meta.len() == 0 {
-            return None;
-        }
-        // 压缩配置换挡会新旧后缀并存:陈旧的一份让位(mtime 平局 .zstd 赢,与
-        // 写端当前默认一致)。裁决在此单点,list 与 watcher 两条入口共用——
-        // 只做在 list 会让 watcher 把陈旧 sibling 的事件当主文件解析
-        let sibling = if name == "session.jsonl" {
-            "session.jsonl.zstd"
-        } else {
-            "session.jsonl"
-        };
-        if let Ok(sib) = fs::metadata(path.with_file_name(sibling)) {
-            let (own_m, sib_m) = (mtime_ms(&meta), mtime_ms(&sib));
-            if sib_m > own_m || (sib_m == own_m && name == "session.jsonl") {
-                return None;
-            }
-        }
-        // 首行 header 给权威 id(目录名是转义过的 id);子代理会话在此过滤
-        let header = read_header(path).filter(|h| !h.subagent)?;
-        Some(SessionFileRef {
-            agent: AgentId::Dsh,
-            native_id: header.id,
-            file_path: path.to_string_lossy().to_string(),
-            mtime_ms: mtime_ms(&meta),
-            size: meta.len() as i64,
-        })
+        log_generation(&path.file_name()?.to_string_lossy())?;
+        let selected = session_log(path.parent()?)?;
+        (Path::new(&selected.file_path) == path).then_some(selected)
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
@@ -508,6 +546,7 @@ impl AgentAdapter for DshAdapter {
             meta: build_meta(r, &parsed),
             mainline: parsed.messages,
             sidechains: Vec::new(),
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }
@@ -535,5 +574,38 @@ impl AgentAdapter for DshAdapter {
 
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{log_generation, session_log};
+    use std::fs;
+
+    #[test]
+    fn dsh_log_names_and_generation_selection() {
+        assert_eq!(log_generation("session.jsonl"), Some((0, false)));
+        assert_eq!(log_generation("session.jsonl.zstd"), Some((0, true)));
+        assert_eq!(log_generation("session.v4.jsonl.zstd"), Some((4, true)));
+        assert_eq!(log_generation("session.v12.jsonl"), Some((12, false)));
+        assert_eq!(log_generation("session.v0.jsonl"), None);
+        assert_eq!(log_generation("session.v03.jsonl"), None);
+        assert_eq!(log_generation("session.jsonl.tmp"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(
+            session.join("session.jsonl"),
+            r#"{"type":"session","version":0,"id":"s1","createdAt":1}"#,
+        )
+        .unwrap();
+        fs::write(
+            session.join("session.v4.jsonl"),
+            r#"{"type":"session","version":4,"id":"s1","createdAt":1}"#,
+        )
+        .unwrap();
+        let selected = session_log(&session).unwrap();
+        assert!(selected.file_path.ends_with("session.v4.jsonl"));
     }
 }

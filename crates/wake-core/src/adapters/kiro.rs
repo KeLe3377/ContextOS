@@ -185,6 +185,7 @@ impl AgentAdapter for KiroAdapter {
             meta: build_meta(r, &side, &messages),
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events: Vec::new(),
             unknown_line_count: unknown,
         })
     }

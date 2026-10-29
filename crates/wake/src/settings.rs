@@ -2,6 +2,7 @@ use crate::i18n::t;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{
@@ -19,18 +20,15 @@ use crate::ui::{
 };
 use crate::update::{self, UpdateStatus};
 use crate::workbench::{
-    DataSourceRow, LocationSettingsSnapshot, MemoryLocationRow, MemoryLocationSettingsSnapshot,
-    OpenAbout, OpenSettings, OpenUpdates, Workbench,
+    CompressionConfigField, CompressionStrategyField, DataSourceRow, JevConfigField,
+    LocationSettingsSnapshot, MechanicalRuleKind, MemoryLocationRow,
+    MemoryLocationSettingsSnapshot, OpenAbout, OpenSettings, OpenUpdates, Workbench,
 };
 use crate::{theme, theme::AppearancePreference};
 use std::rc::Rc;
 
 const SETTINGS_SIDEBAR_W: Pixels = px(180.);
 const SETTINGS_PAGE_TOP: Pixels = px(38.);
-/// Connect 页两条 Setup guide 的去处:MCP 面与命令行面各自的完整文档
-const CONNECT_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/mcp.md";
-const CONNECT_CLI_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md";
-
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
 }
@@ -51,13 +49,23 @@ fn format_storage_size(bytes: u64) -> String {
     }
 }
 
+fn retention_index(agent: wake_core::services::session_retention::RetentionAgent) -> usize {
+    match agent {
+        wake_core::services::session_retention::RetentionAgent::ClaudeCode => 0,
+        wake_core::services::session_retention::RetentionAgent::Gemini => 1,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     General,
+    CompressionService,
+    CompressionStrategy,
     Locations,
     MemoryLocations,
     Remotes,
     Connect,
+    Retention,
     Data,
     Updates,
     About,
@@ -129,7 +137,7 @@ fn settings_page_header(title: &'static str, subtitle: &'static str, cx: &App) -
 /// "一张卡一行"的信息卡(Data 的 Storage、Connect 的 MCP server 共用):popover
 /// 底圆角卡,84px 行,主信息 FONT_BODY,副行由调用方给(caption 级),右侧一个操作
 fn settings_info_card(
-    primary: &'static str,
+    primary: impl IntoElement,
     details: Vec<AnyElement>,
     trailing: AnyElement,
     min_h: Pixels,
@@ -177,13 +185,16 @@ struct BinaryFacts {
 }
 
 impl BinaryFacts {
-    fn probe(stem: &str) -> Self {
-        let found = wake_core::mcp::sibling_named(stem);
+    fn probe(primary: &str, fallback: Option<&str>) -> Self {
+        let found = wake_core::mcp::sibling_named(primary)
+            .filter(|p| p.is_file())
+            .or_else(|| fallback.and_then(|stem| wake_core::mcp::sibling_named(stem)))
+            .filter(|p| p.is_file());
         let exists = found.as_ref().is_some_and(|p| p.is_file());
         // 找不到就退回裸名,展示时至少还是个可辨认的东西
         let path = found
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| stem.to_string());
+            .unwrap_or_else(|| primary.to_string());
         Self {
             display: tilde_path(&path).into(),
             exists,
@@ -197,20 +208,22 @@ impl BinaryFacts {
 struct ConnectInfo {
     mcp: BinaryFacts,
     cli: BinaryFacts,
-    /// 把 wake-cli 放进 PATH 的那条命令;deb/tar 已在 `…/bin` 里、或 Windows
+    /// 把 contextos-cli 放进 PATH 的那条命令;deb/tar 已在 `…/bin` 里、或 Windows
     /// 上没有一行命令能说清时为 None,那时就不给这个按钮
     cli_path_command: Option<String>,
-    /// MCP clients 卡的三行:文案与片段来自 wake-core,与 `wake-mcp setup`
+    /// MCP clients 卡的三行:文案与片段来自 wake-core,与 `contextos-mcp setup`
     /// 同源;GUI 只展示与复制,不代写别家配置
     snippets: Vec<wake_core::mcp::SetupSnippet>,
+    session_hooks: Vec<wake_core::mcp::SetupSnippet>,
 }
 
 impl ConnectInfo {
     fn probe() -> Self {
-        let mcp = BinaryFacts::probe("wake-mcp");
-        let cli = BinaryFacts::probe("wake-cli");
+        let mcp = BinaryFacts::probe("contextos-mcp", None);
+        let cli = BinaryFacts::probe("contextos-cli", None);
         Self {
             snippets: wake_core::mcp::setup_snippets(std::path::Path::new(&mcp.path)),
+            session_hooks: wake_core::cli::session_start_snippets(std::path::Path::new(&cli.path)),
             cli_path_command: wake_core::cli::path_command(std::path::Path::new(&cli.path)),
             mcp,
             cli,
@@ -238,6 +251,16 @@ pub(crate) struct SettingsView {
     /// notify),不在 render 里每帧算——原先 hover 一下就重查一遍库(2026-09-22 /simplify)
     locations: LocationSettingsSnapshot,
     memory_locations: MemoryLocationSettingsSnapshot,
+    storage_stats: Option<wake_core::storage::StorageStats>,
+    storage_loading: bool,
+    storage_pending: Option<std::path::PathBuf>,
+    storage_error: Option<String>,
+    retention: Vec<wake_core::services::session_retention::RetentionSnapshot>,
+    codex_compression:
+        Option<wake_core::services::codex_session_compression::CodexCompressionSnapshot>,
+    retention_inputs: [Entity<InputState>; 2],
+    retention_errors: [Option<String>; 2],
+    retention_loaded: bool,
     _workbench_observer: Option<Subscription>,
 }
 
@@ -301,8 +324,24 @@ impl SettingsView {
         // Settings 是在 Workbench::open_settings 的 update 栈内创建的；此处
         // 立即 observe 会尝试反读仍被独占借用的 Workbench，触发 double lease。
         // 下一帧注册时外层 update 已退出。
-        cx.on_next_frame(window, move |this, _, cx| {
+        let retention_inputs = [
+            cx.new(|cx| InputState::new(window, cx).placeholder("30")),
+            cx.new(|cx| InputState::new(window, cx).placeholder("30d")),
+        ];
+        for (ix, input) in retention_inputs.iter().enumerate() {
+            cx.subscribe_in(input, window, move |this, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.retention_errors[ix] = None;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+        cx.on_next_frame(window, move |this, window, cx| {
             this.refresh_snapshots(observed.read(cx));
+            this.storage_pending = wake_core::storage::pending_root();
+            this.refresh_storage_stats(cx);
+            this.initialize_retention_inputs(window, cx);
             this._workbench_observer = Some(cx.observe(&observed, |this, workbench, cx| {
                 this.refresh_snapshots(workbench.read(cx));
                 cx.notify()
@@ -326,6 +365,15 @@ impl SettingsView {
                 rows: Vec::new(),
                 diverged: false,
             },
+            storage_stats: None,
+            storage_loading: false,
+            storage_pending: None,
+            storage_error: None,
+            retention: Vec::new(),
+            codex_compression: None,
+            retention_inputs,
+            retention_errors: [None, None],
+            retention_loaded: false,
             _workbench_observer: None,
         }
     }
@@ -402,6 +450,20 @@ impl SettingsView {
                         cx,
                     ))
                     .child(self.render_nav_item(
+                        "settings-compression-service-nav",
+                        "压缩服务",
+                        "icons/plug.svg",
+                        SettingsPage::CompressionService,
+                        cx,
+                    ))
+                    .child(self.render_nav_item(
+                        "settings-compression-strategy-nav",
+                        "压缩策略",
+                        "icons/file-text.svg",
+                        SettingsPage::CompressionStrategy,
+                        cx,
+                    ))
+                    .child(self.render_nav_item(
                         "settings-locations-nav",
                         t("Session locations"),
                         "icons/hard-drive.svg",
@@ -416,17 +478,17 @@ impl SettingsView {
                         cx,
                     ))
                     .child(self.render_nav_item(
-                        "settings-remotes-nav",
-                        t("Remote hosts"),
-                        "icons/server.svg",
-                        SettingsPage::Remotes,
-                        cx,
-                    ))
-                    .child(self.render_nav_item(
                         "settings-connect-nav",
                         t("Connect"),
                         "icons/plug.svg",
                         SettingsPage::Connect,
+                        cx,
+                    ))
+                    .child(self.render_nav_item(
+                        "settings-retention-nav",
+                        t("Session retention"),
+                        "icons/clock-3.svg",
+                        SettingsPage::Retention,
                         cx,
                     ))
                     .child(self.render_nav_item(
@@ -437,47 +499,73 @@ impl SettingsView {
                         cx,
                     )),
             )
-            .child(
-                v_flex()
-                    .px(SPACE_SM)
-                    .pb(SPACE_SM)
-                    .gap(px(2.))
-                    .child(self.render_nav_item(
-                        "settings-updates-nav",
-                        t("Updates"),
-                        "icons/download.svg",
-                        SettingsPage::Updates,
-                        cx,
-                    ))
-                    .child(self.render_nav_item(
-                        "settings-about-nav",
-                        t("About"),
-                        "icons/info.svg",
-                        SettingsPage::About,
-                        cx,
-                    )),
-            )
             .into_any_element()
     }
 
     /// General 页的设置行:与 Data/Connect 的信息卡同一张卡,只是矮一档
     /// (72 是 Appearance 行的用户定稿值),副行是 caption 级说明
     fn setting_row(
-        title: &'static str,
-        subtitle: &'static str,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
         control: impl IntoElement,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let title: SharedString = title.into();
+        let subtitle: SharedString = subtitle.into();
         let caption = div()
             .text_size(FONT_CAPTION)
             .text_color(cx.theme().muted_foreground)
             .child(subtitle)
             .into_any_element();
         settings_info_card(
-            title,
+            div().child(title),
             vec![caption],
             control.into_any_element(),
             px(72.),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    fn explained_setting_row(
+        title: &'static str,
+        explanation: &'static str,
+        summary: impl Into<SharedString>,
+        control: impl IntoElement,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let title_line = h_flex()
+            .min_w_0()
+            .flex_wrap()
+            .items_center()
+            .gap_x(SPACE_SM)
+            .gap_y(px(2.))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(FONT_BODY)
+                    .text_color(theme.foreground)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .min_w(px(220.))
+                    .flex_1()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(explanation),
+            );
+        let summary = div()
+            .text_size(FONT_CAPTION)
+            .text_color(theme.muted_foreground)
+            .child(summary.into())
+            .into_any_element();
+        settings_info_card(
+            title_line,
+            vec![summary],
+            control.into_any_element(),
+            px(84.),
             cx,
         )
         .into_any_element()
@@ -526,6 +614,1065 @@ impl SettingsView {
                 }
                 menu
             })
+            .into_any_element()
+    }
+
+    fn jev_config_control(
+        &self,
+        id: &'static str,
+        field: JevConfigField,
+        status: SharedString,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let workbench = self.workbench.clone();
+        h_flex()
+            .gap(SPACE_SM)
+            .items_center()
+            .child(
+                div()
+                    .max_w(px(220.))
+                    .truncate()
+                    .text_size(FONT_CAPTION)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(status),
+            )
+            .child(settings_button(Button::new(id).label("设置"), cx).on_click(
+                move |_, window, cx| {
+                    workbench.update(cx, |this, cx| {
+                        this.open_jev_config_form(field, window, cx);
+                    });
+                },
+            ))
+            .into_any_element()
+    }
+
+    fn compression_config_control(
+        &self,
+        id: &'static str,
+        field: CompressionConfigField,
+        status: SharedString,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let workbench = self.workbench.clone();
+        h_flex()
+            .gap(SPACE_SM)
+            .items_center()
+            .child(
+                div()
+                    .max_w(px(220.))
+                    .truncate()
+                    .text_size(FONT_CAPTION)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(status),
+            )
+            .child(settings_button(Button::new(id).label("设置"), cx).on_click(
+                move |_, window, cx| {
+                    workbench.update(cx, |this, cx| {
+                        this.open_compression_config_form(field, window, cx);
+                    });
+                },
+            ))
+            .into_any_element()
+    }
+
+    fn compression_strategy_control(
+        &self,
+        id: &'static str,
+        field: CompressionStrategyField,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let workbench = self.workbench.clone();
+        settings_button(Button::new(id).label("编辑"), cx)
+            .on_click(move |_, window, cx| {
+                workbench.update(cx, |this, cx| {
+                    this.open_compression_strategy_form(field, window, cx);
+                });
+            })
+            .into_any_element()
+    }
+
+    fn mechanical_rule_control(
+        &self,
+        id: &'static str,
+        rule: MechanicalRuleKind,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let workbench = self.workbench.clone();
+        settings_button(Button::new(id).label("编辑"), cx)
+            .on_click(move |_, window, cx| {
+                workbench.update(cx, |this, cx| {
+                    this.open_mechanical_rule_form(rule, window, cx);
+                });
+            })
+            .into_any_element()
+    }
+
+    fn render_compression_service(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let settings = self.workbench.read(cx).compression_settings();
+        let decision = self.workbench.read(cx).jev_config();
+        let is_laya = decision.provider
+            == wake_core::services::compression_settings::DecisionModelProvider::Laya;
+        let managed_laya = is_laya
+            && decision.laya_runtime_mode
+                == wake_core::services::laya_runtime::LayaRuntimeMode::Managed;
+        let show_connection = !is_laya || !managed_laya;
+        let laya_status = wake_core::services::laya_runtime::manager().status();
+        let external_capabilities = self.workbench.read(cx).laya_external_capabilities();
+        let external_capability_status: SharedString = external_capabilities
+            .as_ref()
+            .map(|capabilities| {
+                let compatibility = if capabilities.single && capabilities.batch {
+                    "Single 兼容可用 · Batch 可用"
+                } else if capabilities.single {
+                    "Single 兼容可用 · Batch 不可用"
+                } else {
+                    "Single 兼容不可用"
+                };
+                format!(
+                    "{} · 模型 {}",
+                    compatibility,
+                    capabilities.model.as_deref().unwrap_or("unknown")
+                )
+            })
+            .unwrap_or_else(|| "尚未检测".into())
+            .into();
+        let external_capability_error: SharedString = external_capabilities
+            .as_ref()
+            .and_then(|capabilities| {
+                if capabilities.single {
+                    None
+                } else {
+                    capabilities
+                        .single_error
+                        .as_ref()
+                        .or(capabilities.health_error.as_ref())
+                }
+            })
+            .cloned()
+            .unwrap_or_default()
+            .into();
+        let laya_install_status: SharedString = match laya_status.install_state {
+            wake_core::services::laya_runtime::LayaInstallState::NotInstalled => "未安装".into(),
+            wake_core::services::laya_runtime::LayaInstallState::Installing => {
+                let stage = match laya_status.current_stage.as_deref() {
+                    Some("download_uv") => "下载安装器",
+                    Some("verify_uv") => "校验安装器",
+                    Some("install_python") => "安装 Python",
+                    Some("create_venv") => "创建运行环境",
+                    Some("install_laya") => "安装 Laya",
+                    Some("download_model") => "下载并加载模型",
+                    Some("health_check") => "检查服务健康",
+                    Some("batch_smoke_test") => "验证批量推理",
+                    Some("activate_installation") => "切换运行时",
+                    Some("complete") => "完成",
+                    _ => "安装中",
+                };
+                match laya_status.progress {
+                    Some(progress) => format!("{stage} · {:.0}%", progress * 100.0).into(),
+                    None => stage.into(),
+                }
+            }
+            wake_core::services::laya_runtime::LayaInstallState::Installed => "已安装".into(),
+            wake_core::services::laya_runtime::LayaInstallState::Broken => "安装损坏".into(),
+        };
+        let laya_service_status: SharedString = match laya_status.service_state {
+            wake_core::services::laya_runtime::LayaServiceState::Stopped => "已停止".into(),
+            wake_core::services::laya_runtime::LayaServiceState::Starting => "正在启动".into(),
+            wake_core::services::laya_runtime::LayaServiceState::Ready => "已就绪".into(),
+            wake_core::services::laya_runtime::LayaServiceState::Failed => "启动失败".into(),
+        };
+        let laya_version_status: SharedString = laya_status
+            .installed_version
+            .clone()
+            .unwrap_or_else(|| "-".into())
+            .into();
+        let laya_model_status: SharedString = laya_status
+            .model_revision
+            .as_ref()
+            .map(|revision| format!("laya-multilingual · {revision}"))
+            .unwrap_or_else(|| "laya-multilingual".into())
+            .into();
+        let laya_error_status: SharedString = laya_status
+            .error
+            .as_ref()
+            .map(|error| format!("{}：{}", error.stage, error.message))
+            .unwrap_or_default()
+            .into();
+        let laya_install_dir = wake_core::services::laya_runtime::manager()
+            .installation_dir()
+            .to_string_lossy()
+            .to_string();
+        let laya_log_path = laya_status
+            .error
+            .as_ref()
+            .and_then(|error| error.log_path.as_ref())
+            .map(|path| path.to_string_lossy().to_string());
+        let llm_provider_status: SharedString = crate::tf!(
+            "{} / {}",
+            settings.llm_provider_index + 1,
+            settings.llm_provider_name
+        )
+        .into();
+        let llm_timeout_status: SharedString = format!("{} 秒", settings.llm_timeout_secs).into();
+        let llm_input_limit_status: SharedString =
+            format!("{} 字符", settings.llm_input_limit_chars).into();
+        let decision_url_status: SharedString = if decision.api_url.trim().is_empty() {
+            "未配置".into()
+        } else {
+            decision.api_url.clone().into()
+        };
+        let decision_key_status: SharedString = if decision.api_key.trim().is_empty() {
+            if decision.provider.requires_api_key() {
+                "未配置".into()
+            } else {
+                "无需配置".into()
+            }
+        } else {
+            "已配置".into()
+        };
+        let decision_model_status: SharedString = decision.model.clone().into();
+        let decision_timeout_status: SharedString = format!("{} 秒", decision.timeout_secs).into();
+        let toggle_entity = self.workbench.clone();
+        let llm_toggle_entity = self.workbench.clone();
+        let provider_entity = self.workbench.clone();
+        let jev_provider_entity = self.workbench.clone();
+        let laya_provider_entity = self.workbench.clone();
+        let managed_mode_entity = self.workbench.clone();
+        let external_mode_entity = self.workbench.clone();
+        let install_laya_entity = self.workbench.clone();
+        let reinstall_laya_entity = self.workbench.clone();
+        let start_laya_entity = self.workbench.clone();
+        let stop_laya_entity = self.workbench.clone();
+        let uninstall_laya_entity = self.workbench.clone();
+        let purge_laya_entity = self.workbench.clone();
+        let probe_laya_entity = self.workbench.clone();
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(settings_page_header(
+                "压缩服务",
+                "配置 LLM 和决策模型的连接、开关、模型和运行上限。",
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("settings-compression-service-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(SPACE_XXL)
+                    .pb(SPACE_XXL)
+                    .gap(SPACE_MD)
+                    .child(Self::setting_row(
+                        "LLM 生成",
+                        "关闭后只执行基础机械压缩，不调用 LLM。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(Switch::new("compression-service-llm-enabled").checked(settings.llm_enabled))
+                            .child(settings_button(
+                                Button::new("compression-service-llm-toggle").label(if settings.llm_enabled { "关闭" } else { "启用" }),
+                                cx,
+                            ).on_click(move |_, window, cx| {
+                                llm_toggle_entity.update(cx, |this, cx| {
+                                    this.toggle_compression_llm(window, cx);
+                                });
+                            })),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "模型配置",
+                        "不限数量的 OpenAI-compatible Provider；名称、URL、Key 和模型在同一弹窗中管理。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(div().max_w(px(220.)).truncate().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(llm_provider_status))
+                            .child(settings_button(Button::new("compression-service-llm-provider-manager").label("模型配置"), cx).on_click(move |_, window, cx| {
+                                provider_entity.update(cx, |this, cx| {
+                                    this.open_llm_provider_manager(window, cx);
+                                });
+                            })),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM Timeout",
+                        "LLM 压缩生成的请求超时时间，长对话建议 600 秒或更高。",
+                        self.compression_config_control("compression-service-llm-timeout", CompressionConfigField::LlmTimeoutSecs, llm_timeout_status, cx),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM 输入上限",
+                        "送入 LLM 的最大字符数，不是 token；默认 1,000,000，超长会更慢且更耗 token。",
+                        self.compression_config_control("compression-service-llm-input-limit", CompressionConfigField::LlmInputLimitChars, llm_input_limit_status, cx),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "决策模型辅助评分",
+                        "启用后先评分工具输出，再按六档动作处理并交给 LLM。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(Switch::new("compression-service-jev-enabled").checked(settings.jev_enabled))
+                            .child(settings_button(
+                                Button::new("compression-service-jev-toggle").label(if settings.jev_enabled { "关闭" } else { "启用" }),
+                                cx,
+                            ).on_click(move |_, window, cx| {
+                                toggle_entity.update(cx, |this, cx| {
+                                    this.toggle_compression_jev(window, cx);
+                                });
+                            })),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "决策模型提供方",
+                        "Jev 使用云端 Key；Laya 可连接本地 /v1/systemone 服务。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(settings_button(Button::new("compression-service-provider-jev").label("Jev"), cx).selected(
+                                decision.provider == wake_core::services::compression_settings::DecisionModelProvider::Jev,
+                            ).on_click(move |_, window, cx| {
+                                jev_provider_entity.update(cx, |this, cx| {
+                                    this.set_decision_provider(
+                                        wake_core::services::compression_settings::DecisionModelProvider::Jev,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }))
+                            .child(settings_button(Button::new("compression-service-provider-laya").label("Laya"), cx).selected(
+                                decision.provider == wake_core::services::compression_settings::DecisionModelProvider::Laya,
+                            ).on_click(move |_, window, cx| {
+                                laya_provider_entity.update(cx, |this, cx| {
+                                    this.set_decision_provider(
+                                        wake_core::services::compression_settings::DecisionModelProvider::Laya,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            })),
+                        cx,
+                    ))
+                    .when(is_laya, |this| this.child(Self::setting_row(
+                        "Laya 运行方式",
+                        "托管模式由 ContextOS 安装和管理；外部服务保留完整自部署能力。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(settings_button(Button::new("compression-service-laya-managed").label("ContextOS 托管"), cx).selected(
+                                decision.laya_runtime_mode == wake_core::services::laya_runtime::LayaRuntimeMode::Managed,
+                            ).on_click(move |_, window, cx| {
+                                managed_mode_entity.update(cx, |this, cx| {
+                                    this.set_laya_runtime_mode(
+                                        wake_core::services::laya_runtime::LayaRuntimeMode::Managed,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }))
+                            .child(settings_button(Button::new("compression-service-laya-external").label("外部服务"), cx).selected(
+                                decision.laya_runtime_mode == wake_core::services::laya_runtime::LayaRuntimeMode::External,
+                            ).on_click(move |_, window, cx| {
+                                external_mode_entity.update(cx, |this, cx| {
+                                    this.set_laya_runtime_mode(
+                                        wake_core::services::laya_runtime::LayaRuntimeMode::External,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            })),
+                        cx,
+                    )))
+                    .child(Self::setting_row(
+                        "决策模型",
+                        "发送到 System 1 服务的模型名。",
+                        self.jev_config_control("compression-service-decision-model", JevConfigField::Model, decision_model_status, cx),
+                        cx,
+                    ))
+                    .when(show_connection, |this| this
+                        .child(Self::setting_row(
+                            "决策模型 API URL",
+                            if is_laya { "外部 Laya 使用 /v1/systemone Single 兼容接口。" } else { "SystemOne 服务基址。" },
+                            self.jev_config_control("compression-service-decision-url", if is_laya { JevConfigField::LayaApiUrl } else { JevConfigField::JevApiUrl }, decision_url_status, cx),
+                            cx,
+                        ))
+                        .child(Self::setting_row(
+                            "决策模型 API Key",
+                            if decision.provider.requires_api_key() { "本地保存，不在界面明文展示。" } else { "外部 Laya 服务未启用认证时可留空。" },
+                            self.jev_config_control("compression-service-decision-key", if is_laya { JevConfigField::LayaApiKey } else { JevConfigField::JevApiKey }, decision_key_status, cx),
+                            cx,
+                        )))
+                    .when(is_laya && !managed_laya, |this| this.child(Self::setting_row(
+                        "外部服务能力",
+                        "外部 Laya 需要 single 能力；batch 仅作为附加诊断信息。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(div().max_w(px(330.)).truncate().text_size(FONT_CAPTION).text_color(
+                                if external_capabilities.as_ref().is_some_and(|capabilities| capabilities.single) {
+                                    theme.success
+                                } else {
+                                    theme.muted_foreground
+                                }
+                            ).child(if external_capability_error.is_empty() {
+                                external_capability_status
+                            } else {
+                                external_capability_error
+                            }))
+                            .child(settings_button(Button::new("compression-service-laya-probe").label("检测能力"), cx).on_click(move |_, _, cx| {
+                                probe_laya_entity.update(cx, |this, cx| this.probe_external_laya(cx));
+                            })),
+                        cx,
+                    )))
+                    .when(managed_laya, |this| this
+                        .child(Self::setting_row(
+                            "安装状态",
+                            "Python、PyTorch、Laya 和模型合计为数 GB；只有真实批量推理通过才算安装成功。",
+                            div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(laya_install_status),
+                            cx,
+                        ))
+                        .child(Self::setting_row(
+                            "服务状态",
+                            "应用启动后在后台加载；未就绪时压缩会返回明确错误。",
+                            div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(laya_service_status),
+                            cx,
+                        ))
+                        .child(Self::setting_row(
+                            "运行时版本",
+                            "ContextOS 固定并验证的托管运行时版本。",
+                            div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(laya_version_status),
+                            cx,
+                        ))
+                        .child(Self::setting_row(
+                            "模型",
+                            "托管模式固定使用 multilingual checkpoint。",
+                            div().max_w(px(280.)).truncate().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(laya_model_status),
+                            cx,
+                        ))
+                        .when(laya_status.error.is_some(), |this| this.child(Self::setting_row(
+                            "最近错误",
+                            "完整诊断保存在本地日志。",
+                            h_flex()
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(div().max_w(px(260.)).truncate().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(laya_error_status))
+                                .when_some(laya_log_path.clone(), |this, path| this.child(settings_button(Button::new("compression-service-laya-log").label("打开日志"), cx).on_click(move |_, _, _| {
+                                    wake_core::services::terminal::open_in_file_manager(&path);
+                                }))),
+                            cx,
+                        )))
+                        .child(Self::setting_row(
+                            "运行时管理",
+                            "卸载默认保留模型缓存；删除模型会释放更多磁盘空间。",
+                            h_flex()
+                                .flex_wrap()
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .when(matches!(laya_status.install_state, wake_core::services::laya_runtime::LayaInstallState::NotInstalled | wake_core::services::laya_runtime::LayaInstallState::Broken), |this| this.child(
+                                    settings_button(Button::new("compression-service-laya-install").label(if laya_status.install_state == wake_core::services::laya_runtime::LayaInstallState::Broken { "重试安装" } else { "安装 Laya" }), cx)
+                                        .on_click(move |_, _, cx| install_laya_entity.update(cx, |this, cx| this.install_managed_laya(cx)))
+                                ))
+                                .when(laya_status.install_state == wake_core::services::laya_runtime::LayaInstallState::Installing, |this| this.child(
+                                    settings_button(Button::new("compression-service-laya-installing").label("安装中"), cx).disabled(true)
+                                ))
+                                .when(laya_status.install_state == wake_core::services::laya_runtime::LayaInstallState::Installed, |this| this
+                                    .child(settings_button(Button::new("compression-service-laya-reinstall").label("重新安装"), cx)
+                                        .on_click(move |_, _, cx| reinstall_laya_entity.update(cx, |this, cx| this.install_managed_laya(cx))))
+                                    .when(laya_status.service_state == wake_core::services::laya_runtime::LayaServiceState::Stopped
+                                        || laya_status.service_state == wake_core::services::laya_runtime::LayaServiceState::Failed && !laya_status.cleanup_required, |this| this.child(
+                                        settings_button(Button::new("compression-service-laya-start").label("启动"), cx)
+                                            .on_click(move |_, _, cx| start_laya_entity.update(cx, |this, cx| this.start_managed_laya(cx)))
+                                    ))
+                                    .when(laya_status.service_state == wake_core::services::laya_runtime::LayaServiceState::Ready
+                                        || laya_status.service_state == wake_core::services::laya_runtime::LayaServiceState::Failed && laya_status.cleanup_required, |this| this.child(
+                                        settings_button(Button::new("compression-service-laya-stop").label("停止"), cx)
+                                            .on_click(move |_, _, cx| stop_laya_entity.update(cx, |this, cx| this.stop_managed_laya(cx)))
+                                    ))
+                                    .child(settings_button(Button::new("compression-service-laya-reveal").label("打开文件位置"), cx).on_click(move |_, _, _| {
+                                        wake_core::services::terminal::open_in_file_manager(&laya_install_dir);
+                                    }))
+                                    .child(settings_button(Button::new("compression-service-laya-uninstall").label("卸载"), cx)
+                                        .on_click(move |_, _, cx| uninstall_laya_entity.update(cx, |this, cx| this.uninstall_managed_laya(false, cx))))
+                                    .child(settings_button(Button::new("compression-service-laya-purge").label("卸载并删除模型"), cx)
+                                        .on_click(move |_, _, cx| purge_laya_entity.update(cx, |this, cx| this.uninstall_managed_laya(true, cx))))
+                                ),
+                            cx,
+                        )))
+                    .child(Self::setting_row(
+                        "决策模型 Timeout",
+                        "System 1 请求超时时间，单位秒。",
+                        self.jev_config_control("compression-service-decision-timeout", JevConfigField::TimeoutSecs, decision_timeout_status, cx),
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_compression_strategy(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let strategy = self.workbench.read(cx).compression_strategy_settings();
+        let mechanical = &strategy.mechanical;
+        let jev_entity = self.workbench.clone();
+        let temperature_entity = self.workbench.clone();
+        let retention_mode = mechanical.retention_mode;
+        let allow_assistant_body_delete = mechanical.allow_jev_delete_assistant_body;
+        let allow_user_message_delete = mechanical.allow_jev_delete_user_messages;
+        let retention_entity = self.workbench.clone();
+        let assistant_delete_entity = self.workbench.clone();
+        let user_delete_entity = self.workbench.clone();
+        let limits_entity = self.workbench.clone();
+        let enabled = |value: bool| if value { "已启用" } else { "已停用" };
+        let mechanical_rows = vec![
+            (
+                "空/低信息输出",
+                "删除空输出和短小成功回执，仅保留必要的退出状态。",
+                format!(
+                    "{} · 成功输出 < {} 字符 · write_stdin < {} 字符",
+                    enabled(mechanical.empty_output_rule.enabled),
+                    mechanical.empty_output_rule.success_output_max_chars,
+                    mechanical.empty_output_rule.write_stdin_max_chars
+                ),
+                "mechanical-empty-output",
+                MechanicalRuleKind::EmptyOutput,
+            ),
+            (
+                "错误/失败保护",
+                "识别失败输出，保留命令、错误关键行和头尾上下文。",
+                format!(
+                    "{} · 头 {} / 尾 {} · {} 个失败关键词",
+                    enabled(mechanical.error_protection_rule.enabled),
+                    mechanical.error_protection_rule.head_chars,
+                    mechanical.error_protection_rule.tail_chars,
+                    mechanical.error_protection_rule.failure_keywords.len()
+                ),
+                "mechanical-error-protection",
+                MechanicalRuleKind::ErrorProtection,
+            ),
+            (
+                "Patch/Diff 证据",
+                "裁剪较大的补丁，按文件和 Hunk 保留修改证据。",
+                format!(
+                    "{} · 头 {} / 尾 {} · 每文件最多 {} 个 Hunk",
+                    enabled(mechanical.patch_rule.enabled),
+                    mechanical.patch_rule.head_chars,
+                    mechanical.patch_rule.tail_chars,
+                    mechanical.patch_rule.max_hunks_per_file
+                ),
+                "mechanical-patch",
+                MechanicalRuleKind::Patch,
+            ),
+            (
+                "源码/代码分析输出",
+                "缩减源码读取和代码分析长文本，保留关键头尾内容。",
+                format!(
+                    "{} · 最多 {} 行 · 头 {} / 尾 {}",
+                    enabled(mechanical.source_listing_rule.enabled),
+                    mechanical.source_listing_rule.max_lines,
+                    mechanical.source_listing_rule.head_chars,
+                    mechanical.source_listing_rule.tail_chars
+                ),
+                "mechanical-source-listing",
+                MechanicalRuleKind::SourceListing,
+            ),
+            (
+                "搜索输出",
+                "对搜索结果去重并限制条数，保留前后匹配。",
+                format!(
+                    "{} · 最多 {} 条 · 前 {} / 尾 {}",
+                    enabled(mechanical.search_output_rule.enabled),
+                    mechanical.search_output_rule.max_matches,
+                    mechanical.search_output_rule.head_matches,
+                    mechanical.search_output_rule.tail_matches
+                ),
+                "mechanical-search-output",
+                MechanicalRuleKind::SearchOutput,
+            ),
+            (
+                "列表/表格输出",
+                "缩减目录、列表和表格输出，保留前后项目。",
+                format!(
+                    "{} · 最多 {} 项 · 前 {} / 尾 {}",
+                    enabled(mechanical.listing_output_rule.enabled),
+                    mechanical.listing_output_rule.max_items,
+                    mechanical.listing_output_rule.head_items,
+                    mechanical.listing_output_rule.tail_items
+                ),
+                "mechanical-listing-output",
+                MechanicalRuleKind::ListingOutput,
+            ),
+            (
+                "说明/工具规格",
+                "从长说明中保留标题、工具名称和关键规范。",
+                format!(
+                    "{} · 最多 {} 个标题 / {} 个工具名",
+                    enabled(mechanical.instruction_and_tool_spec_rule.enabled),
+                    mechanical.instruction_and_tool_spec_rule.max_headings,
+                    mechanical.instruction_and_tool_spec_rule.max_tool_names
+                ),
+                "mechanical-tool-spec",
+                MechanicalRuleKind::InstructionAndToolSpec,
+            ),
+            (
+                "通用大输出",
+                "处理未命中专用规则的大输出，并可交给决策模型继续判断。",
+                format!(
+                    "{} · 超过 {} 字符 · 头 {} / 尾 {}{}",
+                    enabled(mechanical.generic_large_output_rule.enabled),
+                    mechanical.generic_large_output_rule.min_output_chars,
+                    mechanical.generic_large_output_rule.head_chars,
+                    mechanical.generic_large_output_rule.tail_chars,
+                    if mechanical.generic_large_output_rule.mark_jev_candidate {
+                        " · 送决策模型"
+                    } else {
+                        ""
+                    }
+                ),
+                "mechanical-generic-large",
+                MechanicalRuleKind::GenericLargeOutput,
+            ),
+        ];
+        let mechanical_elements = mechanical_rows
+            .into_iter()
+            .map(|(title, explanation, description, id, rule)| {
+                Self::explained_setting_row(
+                    title,
+                    explanation,
+                    description,
+                    self.mechanical_rule_control(id, rule, cx),
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>();
+        let jev_summary = format!(
+            "{} 个评分等级 · 候选至少 {} 字符 · 单次最多 {} 字符",
+            strategy.jev.jev_score_levels.len(),
+            strategy.jev.jev_candidate_min_chars,
+            strategy.jev.jev_request_char_limit
+        );
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(settings_page_header(
+                "压缩策略",
+                "配置机械裁剪、决策模型评分和 LLM 提示词；服务连接信息在“压缩服务”页面。",
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("settings-compression-strategy-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(SPACE_XXL)
+                    .pb(SPACE_XXL)
+                    .gap(SPACE_MD)
+                    .child(
+                        div()
+                            .text_size(FONT_LABEL)
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .child("机械压缩规则"),
+                    )
+                    .child(Self::setting_row(
+                        "保留模式",
+                        "控制 Thinking、Input、Output、System 与工具结构的机械保留方式。",
+                        settings_button(
+                            Button::new("compression-retention-mode").label(retention_mode.label()),
+                            cx,
+                        )
+                        .on_click(move |_, window, cx| {
+                            let next = match retention_mode {
+                                wake_core::services::compression_settings::MechanicalRetentionMode::FullMechanical => wake_core::services::compression_settings::MechanicalRetentionMode::BodyOnly,
+                                wake_core::services::compression_settings::MechanicalRetentionMode::BodyOnly => wake_core::services::compression_settings::MechanicalRetentionMode::BodyWithStructure,
+                                wake_core::services::compression_settings::MechanicalRetentionMode::BodyWithStructure => wake_core::services::compression_settings::MechanicalRetentionMode::FullMechanical,
+                            };
+                            retention_entity.update(cx, |this, cx| {
+                                this.update_mechanical_compression_setting(
+                                    serde_json::json!({ "retention_mode": next }),
+                                    "保留模式已更新", window, cx,
+                                );
+                            });
+                        }),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "允许 Jev 删除 Agent 正文",
+                        "默认关闭；开启后 Jev 可按整条消息删除 Agent 正文。",
+                        h_flex().gap(SPACE_SM).items_center()
+                            .child(Switch::new("compression-jev-delete-assistant-body").checked(allow_assistant_body_delete))
+                            .child(settings_button(Button::new("compression-jev-delete-assistant-body-toggle").label(if allow_assistant_body_delete { "允许" } else { "禁止" }), cx)
+                                .on_click(move |_, window, cx| assistant_delete_entity.update(cx, |this, cx| {
+                                    this.update_mechanical_compression_setting(serde_json::json!({ "allow_jev_delete_assistant_body": !allow_assistant_body_delete }), "Jev 正文删除权限已更新", window, cx);
+                                }))),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "允许 Jev 删除用户消息",
+                        "默认关闭；这是独立权限，不随 Agent 正文权限联动。",
+                        h_flex().gap(SPACE_SM).items_center()
+                            .child(Switch::new("compression-jev-delete-user-messages").checked(allow_user_message_delete))
+                            .child(settings_button(Button::new("compression-jev-delete-user-messages-toggle").label(if allow_user_message_delete { "允许" } else { "禁止" }), cx)
+                                .on_click(move |_, window, cx| user_delete_entity.update(cx, |this, cx| {
+                                    this.update_mechanical_compression_setting(serde_json::json!({ "allow_jev_delete_user_messages": !allow_user_message_delete }), "Jev 用户消息删除权限已更新", window, cx);
+                                }))),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "恢复输出上限",
+                        format!("expanded {} 字符 · evidence {} 字符", mechanical.expanded_max_chars, mechanical.evidence_max_chars),
+                        settings_button(Button::new("compression-retention-limits").label("编辑"), cx)
+                            .on_click(move |_, window, cx| limits_entity.update(cx, |this, cx| this.open_mechanical_retention_limits_form(window, cx))),
+                        cx,
+                    ))
+                    .children(mechanical_elements)
+                    .child(
+                        div()
+                            .pt(SPACE_SM)
+                            .text_size(FONT_LABEL)
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .child("决策模型判断策略"),
+                    )
+                    .child(Self::setting_row(
+                        "决策模型评分提示词",
+                        jev_summary,
+                        settings_button(Button::new("compression-jev-strategy-edit").label("编辑"), cx)
+                            .on_click(move |_, window, cx| {
+                                jev_entity.update(cx, |this, cx| {
+                                    this.open_jev_strategy_form(window, cx);
+                                });
+                            }),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .pt(SPACE_SM)
+                            .text_size(FONT_LABEL)
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .child("LLM 提示词"),
+                    )
+                    .child(Self::setting_row("单会话策略", "单个会话压缩使用的重点说明。", self.compression_strategy_control("compression-strategy-single", CompressionStrategyField::Single, cx), cx))
+                    .child(Self::setting_row("生成记忆策略", "判断哪些信息值得成为记忆候选；不定义 JSON 输出格式。", self.compression_strategy_control("compression-strategy-memory-generation", CompressionStrategyField::MemoryGeneration, cx), cx))
+                    .child(Self::setting_row("多会话策略", "多个关联会话压缩使用的重点说明。", self.compression_strategy_control("compression-strategy-multi", CompressionStrategyField::Multi, cx), cx))
+                    .child(Self::setting_row("标签策略", "编辑通用标签策略和各标签专用策略。", self.compression_strategy_control("compression-strategy-tags", CompressionStrategyField::Tags, cx), cx))
+                    .child(Self::setting_row("关系策略", "按会话关系调整压缩重点。", self.compression_strategy_control("compression-strategy-relations", CompressionStrategyField::Relations, cx), cx))
+                    .child(Self::setting_row("System Message", "发送给 LLM 的 system message。", self.compression_strategy_control("compression-llm-system", CompressionStrategyField::LlmSystemMessage, cx), cx))
+                    .child(Self::setting_row("Task 模板", "定义压缩任务和总体目标。", self.compression_strategy_control("compression-llm-task", CompressionStrategyField::LlmTaskTemplate, cx), cx))
+                    .child(Self::setting_row("用户提示词外层模板", "组织策略、分块、Sources 和 Session Markdown；必须包含 {{strategy}} 与 {{markdown}}。", self.compression_strategy_control("compression-llm-user-template", CompressionStrategyField::LlmUserPromptTemplate, cx), cx))
+                    .child(Self::setting_row("记忆候选输出契约", "唯一负责候选 JSON 的字段、取值和代码块格式。", self.compression_strategy_control("compression-llm-memory-contract", CompressionStrategyField::LlmMemoryCandidateContract, cx), cx))
+                    .child(Self::setting_row(
+                        "Temperature",
+                        format!("当前 {:.2}；允许范围 0.0 到 2.0。", strategy.llm.llm_temperature),
+                        settings_button(Button::new("compression-llm-temperature").label("编辑"), cx)
+                            .on_click(move |_, window, cx| {
+                                temperature_entity.update(cx, |this, cx| {
+                                    this.open_llm_temperature_form(window, cx);
+                                });
+                            }),
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    #[allow(dead_code)]
+    fn render_compression_strategy_legacy(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let settings = self.workbench.read(cx).compression_settings();
+        let jev = self.workbench.read(cx).jev_config();
+        let llm_provider_status: SharedString = crate::tf!(
+            "{} / {}",
+            settings.llm_provider_index + 1,
+            settings.llm_provider_name
+        )
+        .into();
+        let llm_url_status: SharedString = if settings.llm_api_url.trim().is_empty() {
+            "未配置".into()
+        } else {
+            settings.llm_api_url.clone().into()
+        };
+        let llm_key_status: SharedString = if settings.llm_api_key.trim().is_empty() {
+            "未配置".into()
+        } else {
+            "已配置".into()
+        };
+        let model_status: SharedString = settings.llm_model.clone().into();
+        let llm_timeout_status: SharedString = format!("{} 秒", settings.llm_timeout_secs).into();
+        let llm_input_limit_status: SharedString =
+            format!("{} 字符", settings.llm_input_limit_chars).into();
+        let jev_url_status: SharedString = if jev.api_url.trim().is_empty() {
+            "未配置".into()
+        } else {
+            jev.api_url.clone().into()
+        };
+        let jev_key_status: SharedString = if jev.api_key.trim().is_empty() {
+            "未配置".into()
+        } else {
+            "已配置".into()
+        };
+        let jev_timeout_status: SharedString = format!("{} 秒", jev.timeout_secs).into();
+        let toggle_entity = self.workbench.clone();
+        let llm_toggle_entity = self.workbench.clone();
+        let provider_entity = self.workbench.clone();
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(settings_page_header(
+                "压缩策略",
+                "配置 LLM、Jev 辅助评分，以及按标签/关系分类的压缩说明。",
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("settings-compression-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(SPACE_XXL)
+                    .pb(SPACE_XXL)
+                    .gap(SPACE_MD)
+                    .child(Self::setting_row(
+                        "LLM 生成",
+                        "关闭后只执行基础机械压缩，不调用 LLM。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(
+                                Switch::new("compression-llm-enabled")
+                                    .checked(settings.llm_enabled),
+                            )
+                            .child(
+                                settings_button(
+                                    Button::new("compression-llm-toggle").label(
+                                        if settings.llm_enabled {
+                                            "关闭"
+                                        } else {
+                                            "启用"
+                                        },
+                                    ),
+                                    cx,
+                                )
+                                .on_click(move |_, window, cx| {
+                                    llm_toggle_entity.update(cx, |this, cx| {
+                                        this.toggle_compression_llm(window, cx);
+                                    });
+                                }),
+                            ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM Provider",
+                        "可配置 3 个提供商；压缩时使用当前选中的这一组 URL、Key、Model。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(
+                                div()
+                                    .max_w(px(220.))
+                                    .truncate()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(llm_provider_status),
+                            )
+                            .child(
+                                settings_button(Button::new("compression-llm-provider-next").label("切换"), cx)
+                                    .on_click(move |_, window, cx| {
+                                        provider_entity.update(cx, |this, cx| {
+                                            this.select_next_llm_provider(window, cx);
+                                        });
+                                    }),
+                            ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "Provider 名称",
+                        "当前 LLM Provider 的显示名称。",
+                        self.compression_config_control(
+                            "compression-llm-provider-name",
+                            CompressionConfigField::LlmProviderName,
+                            settings.llm_provider_name.clone().into(),
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM API URL",
+                        "当前 Provider 的 OpenAI-compatible API 基址，程序会自动补 /v1/chat/completions。",
+                        self.compression_config_control(
+                            "compression-llm-url",
+                            CompressionConfigField::LlmApiUrl,
+                            llm_url_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM API Key",
+                        "本地保存，不在界面明文展示。",
+                        self.compression_config_control(
+                            "compression-llm-key",
+                            CompressionConfigField::LlmApiKey,
+                            llm_key_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM Model",
+                        "用于生成压缩文档的模型名称。",
+                        self.compression_config_control(
+                            "compression-llm-model",
+                            CompressionConfigField::LlmModel,
+                            model_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM Timeout",
+                        "LLM 压缩生成的请求超时时间，长对话建议 600 秒或更高。",
+                        self.compression_config_control(
+                            "compression-llm-timeout",
+                            CompressionConfigField::LlmTimeoutSecs,
+                            llm_timeout_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "LLM 输入上限",
+                        "送入 LLM 的最大字符数，不是 token；默认 1,000,000，超长会更慢且更耗 token。",
+                        self.compression_config_control(
+                            "compression-llm-input-limit",
+                            CompressionConfigField::LlmInputLimitChars,
+                            llm_input_limit_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "Jev 辅助评分",
+                        "启用后先尝试用 Jev 评分/摘取，再交给 LLM；失败时不阻断 LLM 压缩。",
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(
+                                Switch::new("compression-jev-enabled")
+                                    .checked(settings.jev_enabled),
+                            )
+                            .child(
+                                settings_button(
+                                    Button::new("compression-jev-toggle").label(
+                                        if settings.jev_enabled {
+                                            "关闭"
+                                        } else {
+                                            "启用"
+                                        },
+                                    ),
+                                    cx,
+                                )
+                                .on_click(move |_, window, cx| {
+                                    toggle_entity.update(cx, |this, cx| {
+                                        this.toggle_compression_jev(window, cx);
+                                    });
+                                }),
+                            ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "Jev API URL",
+                        "Jev 服务地址；可与 LLM 组合使用。",
+                        self.jev_config_control(
+                            "compression-jev-url",
+                            JevConfigField::JevApiUrl,
+                            jev_url_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "Jev API Key",
+                        "本地保存，不在界面明文展示。",
+                        self.jev_config_control(
+                            "compression-jev-key",
+                            JevConfigField::JevApiKey,
+                            jev_key_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "Jev Timeout",
+                        "Jev 请求超时时间，单位秒。",
+                        self.jev_config_control(
+                            "compression-jev-timeout",
+                            JevConfigField::TimeoutSecs,
+                            jev_timeout_status,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "单会话策略",
+                        "右上角压缩导出使用的基础说明。",
+                        self.compression_strategy_control(
+                            "compression-strategy-single",
+                            CompressionStrategyField::Single,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "压缩并生成记忆提示词",
+                        "新增入口使用的独立提示词；普通压缩导出不受影响。",
+                        self.compression_strategy_control(
+                            "compression-strategy-memory-generation",
+                            CompressionStrategyField::MemoryGeneration,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "多会话策略",
+                        "关系树压缩导出使用的基础说明。",
+                        self.compression_strategy_control(
+                            "compression-strategy-multi",
+                            CompressionStrategyField::Multi,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "标签策略",
+                        "点击后编辑通用标签策略和各标签专用策略。",
+                        self.compression_strategy_control(
+                            "compression-strategy-tags",
+                            CompressionStrategyField::Tags,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        "关系策略",
+                        "按起点、继续、分支、阻塞、解决、相关调整压缩重点。",
+                        self.compression_strategy_control(
+                            "compression-strategy-relations",
+                            CompressionStrategyField::Relations,
+                            cx,
+                        ),
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -598,7 +1745,7 @@ impl SettingsView {
                         div()
                             .text_size(FONT_CAPTION)
                             .text_color(theme.muted_foreground)
-                            .child(t("Customize how Wake looks and reads.")),
+                            .child(t("Customize how ContextOS looks and reads.")),
                     ),
             )
             .child(
@@ -607,7 +1754,7 @@ impl SettingsView {
                     .gap(SPACE_MD)
                     .child(Self::setting_row(
                         t("Appearance"),
-                        t("Follow the system or keep Wake light or dark."),
+                        t("Follow the system or keep ContextOS light or dark."),
                         h_flex()
                             .h(BUTTON_SM_H + px(4.))
                             .p(px(2.))
@@ -648,46 +1795,116 @@ impl SettingsView {
     fn render_data(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let snapshot = self.workbench.read(cx).data_settings_snapshot();
-        // 会话计数的措辞单点在 workbench 的 session_tally(Locations 与
-        // Remote hosts 也用它);这里只补分隔符,不再复制一遍句子。占用已含
-        // remotes/ 镜像(Workbench 后台算好放进快照),镜像非零时另注一句
-        let mut summary = format!(
-            "{} · {}",
-            crate::workbench::session_tally(snapshot.session_count),
-            format_storage_size(snapshot.size_bytes)
-        );
-        if snapshot.remote_bytes > 0 {
-            summary.push(' ');
-            summary.push_str(&crate::tf!(
-                "({} in remote mirrors)",
-                format_storage_size(snapshot.remote_bytes)
-            ));
-        }
-        let summary: SharedString = summary.into();
-        let reveal_path = snapshot.raw_path.clone();
-        let show_in_finder = settings_button(
+        let stats = self.storage_stats.clone();
+        let storage_summary = stats
+            .as_ref()
+            .map(|stats| format!("总占用 {}", format_storage_size(stats.total_bytes)))
+            .unwrap_or_else(|| {
+                if self.storage_loading {
+                    "正在统计空间占用…".to_string()
+                } else {
+                    "空间统计尚未加载".to_string()
+                }
+            });
+        let pending = self.storage_pending.clone();
+        let error = self.storage_error.clone();
+        let loading = self.storage_loading;
+        let root_path = stats
+            .as_ref()
+            .map(|stats| stats.root.clone())
+            .unwrap_or_else(wake_core::storage::root);
+        let root_text = root_path.to_string_lossy().to_string();
+        let reveal_root = root_path.to_string_lossy().to_string();
+        let show_root = settings_button(
             Button::new("settings-show-data")
                 .icon(icon("icons/folder.svg").with_size(px(13.)))
                 .label(show_in_fm()),
             cx,
         )
         .on_click(move |_, _, _| {
-            wake_core::services::terminal::open_in_file_manager(reveal_path.as_ref())
+            wake_core::services::terminal::open_in_file_manager(&reveal_root)
         });
-        let details = vec![
+        let view = cx.entity();
+        let choose_root = settings_button(
+            Button::new("settings-change-data-root")
+                .icon(icon("icons/folder.svg").with_size(px(13.)))
+                .label("选择总目录"),
+            cx,
+        )
+        .on_click(move |_, _, cx| {
+            let rx = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("选择 ContextOS 数据总目录".into()),
+            });
+            let view = view.clone();
+            cx.spawn(async move |cx| {
+                let selected = match rx.await {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    _ => None,
+                };
+                let Some(path) = selected else { return };
+                let result = cx.background_executor().spawn(async move {
+                    wake_core::storage::set_pending_root(&path)
+                }).await;
+                view.update(cx, |this, cx| {
+                    match result {
+                        Ok(()) => {
+                            this.storage_pending = wake_core::storage::pending_root();
+                            this.storage_error = None;
+                        }
+                        Err(error) => this.storage_error = Some(format!("{error:#}")),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        });
+        let storage_rows = if let Some(stats) = stats {
+            let snapshots_label = format!("快照文件 · {} 个", stats.cas_files);
+            let mut rows = vec![
+                self.storage_row("contextos-index-db", "索引数据库", &stats.index_db, stats.index_bytes, cx),
+                self.storage_row("contextos-workspace-db", "工作区数据库", &stats.workspace_db, stats.workspace_bytes, cx),
+                self.storage_row("contextos-snapshots", snapshots_label, &stats.cas_dir, stats.cas_bytes, cx),
+            ];
+            if stats.index_backup_bytes > 0 {
+                rows.insert(
+                    1,
+                    self.storage_row(
+                        "contextos-index-backup",
+                        "损坏索引备份",
+                        &stats.index_backup,
+                        stats.index_backup_bytes,
+                        cx,
+                    ),
+                );
+            }
+            rows
+        } else {
+            vec![div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(if loading { "正在统计空间占用…" } else { "空间统计尚未加载" }).into_any_element()]
+        };
+        let pending_note = pending.map(|path| {
             div()
-                .w_full()
-                .truncate()
                 .text_size(FONT_CAPTION)
-                .text_color(theme.muted_foreground)
-                .child(snapshot.display_path)
-                .into_any_element(),
+                .text_color(theme.primary)
+                .child(format!("重启 ContextOS 后迁移到：{}", path.display()))
+                .into_any_element()
+        });
+        let error_note = error.map(|error| {
             div()
                 .text_size(FONT_CAPTION)
-                .text_color(theme.muted_foreground)
-                .child(summary)
-                .into_any_element(),
-        ];
+                .text_color(theme.danger)
+                .child(error)
+                .into_any_element()
+        });
+        let refresh = settings_button(
+            Button::new("settings-refresh-storage-stats")
+                .icon(icon("icons/refresh-cw.svg").with_size(px(13.)))
+                .label("刷新统计"),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.refresh_storage_stats(cx)));
 
         v_flex()
             .flex_1()
@@ -696,13 +1913,24 @@ impl SettingsView {
             .bg(theme.background)
             .child(settings_page_header(
                 t("Data"),
-                t("See where Wake stores local data. Sessions refresh automatically."),
+                t("查看 ContextOS 数据位置与空间占用。"),
                 cx,
             ))
             .child(
                 v_flex()
                     .px(SPACE_XXL)
                     .gap(SPACE_SM)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(SPACE_SM)
+                            .child(div().flex_1().min_w_0().truncate().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(root_text))
+                            .child(self.copy_button("settings-data-root-copy".into(), "复制路径", root_path.to_string_lossy().to_string(), cx))
+                            .child(show_root)
+                            .child(choose_root),
+                    )
+                    .children(pending_note)
+                    .children(error_note)
                     .child(
                         div()
                             .text_size(FONT_CAPTION)
@@ -711,12 +1939,179 @@ impl SettingsView {
                             .child(t("Storage")),
                     )
                     .child(settings_info_card(
-                        t("Wake data"),
-                        details,
-                        show_in_finder.into_any_element(),
-                        px(84.),
+                        t("存储空间"),
+                        storage_rows,
+                        refresh.into_any_element(),
+                        px(72.),
                         cx,
-                    )),
+                    ))
+                    .child(div().text_size(FONT_CAPTION).text_color(theme.foreground).child(format!("{} · 已索引会话 {} 条", storage_summary, crate::workbench::session_tally(snapshot.session_count)))),
+            )
+            .into_any_element()
+    }
+
+    fn storage_row(
+        &self,
+        id: &'static str,
+        label: impl Into<SharedString>,
+        path: &std::path::Path,
+        bytes: u64,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let raw = path.to_string_lossy().to_string();
+        let display = raw.clone();
+        let label: SharedString = label.into();
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap(SPACE_SM)
+            .items_center()
+            .child(div().w(px(128.)).flex_shrink_0().text_size(FONT_CAPTION).text_color(cx.theme().foreground).child(label))
+            .child(div().flex_1().min_w_0().truncate().text_size(FONT_CAPTION).text_color(cx.theme().muted_foreground).font_family(cx.theme().mono_font_family.clone()).child(display.clone()))
+            .child(div().w(px(96.)).flex_shrink_0().text_right().text_size(FONT_CAPTION).child(format_storage_size(bytes)))
+            .child(self.copy_button(format!("{id}-copy").into(), "复制", display, cx))
+            .child(settings_button(Button::new(format!("{id}-reveal")).icon(icon("icons/folder.svg").with_size(px(13.))).label(show_in_fm()), cx).on_click(move |_, _, _| wake_core::services::terminal::open_in_file_manager(&raw)))
+            .into_any_element()
+    }
+
+    fn refresh_storage_stats(&mut self, cx: &mut Context<Self>) {
+        self.storage_loading = true;
+        let task = cx.background_spawn(async { wake_core::storage::stats() });
+        cx.spawn(async move |this, cx| {
+            let stats = task.await;
+            this.update(cx, |this, cx| {
+                this.storage_stats = Some(stats);
+                this.storage_loading = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_retention(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let labels = [t("Claude Code"), t("Gemini CLI")];
+        let mut cards = Vec::new();
+        for (ix, snapshot) in self.retention.iter().enumerate() {
+            let title = labels[ix];
+            let path: SharedString = snapshot.path.to_string_lossy().to_string().into();
+            let status = if let Some(error) = &snapshot.error {
+                crate::tf!("Configuration status: {}", error)
+            } else if snapshot.is_default {
+                t("Using the default retention period").to_string()
+            } else {
+                t("Custom retention period").to_string()
+            };
+            let value_label = if ix == 0 { t("Days") } else { t("Duration") };
+            let error = self.retention_errors[ix].as_ref().map(|message| {
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.danger)
+                    .child(message.clone())
+                    .into_any_element()
+            });
+            let input = Input::new(&self.retention_inputs[ix]);
+            let save = settings_button(
+                Button::new(SharedString::from(format!("retention-save-{ix}"))).label(t("Save")),
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.save_retention(ix, cx)));
+            let mut details = vec![
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(path)
+                    .into_any_element(),
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(status)
+                    .into_any_element(),
+                h_flex()
+                    .items_center()
+                    .gap(SPACE_SM)
+                    .child(div().w(px(90.)).text_size(FONT_CAPTION).child(value_label))
+                    .child(div().w(px(180.)).child(input))
+                    .into_any_element(),
+            ];
+            if let Some(error) = error {
+                details.push(error);
+            }
+            cards.push(settings_info_card(
+                div().child(title),
+                details,
+                save.into_any_element(),
+                px(116.),
+                cx,
+            ));
+        }
+        let compression = self.codex_compression.as_ref();
+        let compression_enabled = compression.is_some_and(|snapshot| snapshot.enabled);
+        let compression_path: SharedString = compression
+            .map(|snapshot| snapshot.path.to_string_lossy().to_string())
+            .unwrap_or_default()
+            .into();
+        let mut compression_details = vec![
+            div()
+                .w_full()
+                .truncate()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .child(compression_path)
+                .into_any_element(),
+            div()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .child(t("Restart Codex to apply this setting. Codex controls when inactive sessions are compressed."))
+                .into_any_element(),
+        ];
+        if let Some(error) = compression.and_then(|snapshot| snapshot.error.as_ref()) {
+            compression_details.push(
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.danger)
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+        let compression_toggle = Switch::new("retention-codex-compression")
+            .checked(compression_enabled)
+            .tooltip(if compression_enabled {
+                t("Disable Codex session compression")
+            } else {
+                t("Enable Codex session compression")
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_codex_compression(cx)));
+        cards.push(settings_info_card(
+            div().child(t("Codex session compression")),
+            compression_details,
+            compression_toggle.into_any_element(),
+            px(116.),
+            cx,
+        ));
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(settings_page_header(
+                t("Session retention"),
+                t("Configure transcript retention and Codex session compression."),
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("settings-retention-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(SPACE_XXL)
+                    .pb(SPACE_XXL)
+                    .gap(SPACE_MD)
+                    .children(cards),
             )
             .into_any_element()
     }
@@ -770,11 +2165,11 @@ impl SettingsView {
         .detach();
     }
 
-    /// Settings → Connect:把 Wake 的索引以 MCP 只读暴露给 coding agent。页面只放
+    /// Settings → Connect:把 ContextOS 的索引以 MCP 只读暴露给 coding agent。页面只放
     /// **状态与动作**:server 卡(路径 + Copy path)、Agents 卡(每家一行一个
-    /// Copy 钮)、一句 caption 加 Setup guide 链接。代码块与工具表都不放——那是
+    /// Copy 钮)、命令行与 skill 导出。代码块与工具表都不放——那是
     /// README 的内容,塞进设置窗怎么排都像教程(用户 2026-09-08 三轮定稿)。
-    /// 只展示与复制,不代写别家配置;片段与 `wake-mcp setup` 同源(wake-core mcp)
+    /// 只展示与复制,不代写别家配置;片段与 `contextos-mcp setup` 同源(wake-core mcp)
     fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
@@ -881,6 +2276,101 @@ impl SettingsView {
             })
             .collect();
 
+        let hook_rows: Vec<AnyElement> =
+            info.session_hooks
+                .iter()
+                .enumerate()
+                .map(|(ix, hook)| {
+                    let key = count + ix;
+                    let shown = self.connect_shown.contains(&key);
+                    let toggle = Button::new(SharedString::from(format!("connect-show-hook-{ix}")))
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(theme.transparent)
+                                .foreground(theme.muted_foreground)
+                                .hover(theme.secondary_hover)
+                                .active(theme.popover),
+                        )
+                        .small()
+                        .rounded(RADIUS_BUTTON)
+                        .icon(
+                            icon(if shown {
+                                "icons/chevron-down.svg"
+                            } else {
+                                "icons/chevron-right.svg"
+                            })
+                            .with_size(px(13.)),
+                        )
+                        .label(if shown { t("Hide") } else { t("Show") })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.connect_shown.remove(&key) {
+                                this.connect_shown.insert(key);
+                            }
+                            cx.notify();
+                        }));
+                    let copy = self.copy_button(
+                        format!("connect-copy-hook-{ix}").into(),
+                        t(hook.copy_label),
+                        hook.text.clone(),
+                        cx,
+                    );
+                    let mut row = v_flex().w_full().flex_shrink_0().child(
+                        h_flex()
+                            .w_full()
+                            .min_h(px(52.))
+                            .px(SPACE_LG)
+                            .py(SPACE_SM)
+                            .gap(ICON_TEXT_GAP)
+                            .items_center()
+                            .child(
+                                img(hook.agent.brand_icon(dark))
+                                    .size(px(17.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(FONT_BODY)
+                                            .text_color(theme.foreground)
+                                            .child(t(hook.client)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.muted_foreground)
+                                            .child(t(hook.hint)),
+                                    ),
+                            )
+                            .child(toggle)
+                            .child(copy),
+                    );
+                    if shown {
+                        row =
+                            row.child(
+                                v_flex()
+                                    .ml(SPACE_LG + px(17.) + SPACE_MD)
+                                    .mr(SPACE_LG)
+                                    .mb(SPACE_MD)
+                                    .px(SPACE_MD)
+                                    .py(SPACE_SM)
+                                    .rounded(theme.radius)
+                                    .bg(theme.secondary)
+                                    .font_family(mono.clone())
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.foreground)
+                                    .children(hook.text.lines().map(|line| {
+                                        div().child(line.to_string()).into_any_element()
+                                    })),
+                            );
+                    }
+                    row.into_any_element()
+                })
+                .collect();
+
         // 信息卡里那条 mono 副信息;exists=false 再补一句红字
         let mono_details = |display: SharedString, exists: bool| {
             let mut out = vec![div()
@@ -896,13 +2386,15 @@ impl SettingsView {
                     div()
                         .text_size(FONT_CAPTION)
                         .text_color(theme.danger)
-                        .child(t("Not found next to the Wake app — reinstall Wake"))
+                        .child(t(
+                            "Not found next to the ContextOS app — reinstall ContextOS",
+                        ))
                         .into_any_element(),
                 );
             }
             out
         };
-        // wake-mcp 与 wake-cli 的卡完全同构,只差名字、路径与按钮 id
+        // 设置页展示并复制发布的 ContextOS 二进制路径。
         let binary_card = |primary: &'static str,
                            id: &'static str,
                            f: &BinaryFacts,
@@ -931,16 +2423,31 @@ impl SettingsView {
             )
             .into_any_element()
         });
+        let skill_entity = self.workbench.clone();
         let skill_card = settings_info_card(
-            t("Wake skill"),
-            mono_details(wake_core::cli::SKILL_INSTALL.into(), true),
-            self.copy_button(
-                "connect-copy-skill".into(),
-                t("Copy command"),
-                wake_core::cli::SKILL_INSTALL.to_string(),
-                cx,
-            )
-            .into_any_element(),
+            t("ContextOS skill"),
+            vec![
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_size(FONT_CAPTION)
+                    .font_family(mono.clone())
+                    .text_color(theme.muted_foreground)
+                    .child("contextos-skill.zip")
+                    .into_any_element(),
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child("导出后可手动安装到支持 skill 的 agent。")
+                    .into_any_element(),
+            ],
+            settings_button(Button::new("connect-export-skill").label("导出 ZIP"), cx)
+                .on_click(move |_, window, cx| {
+                    skill_entity.update(cx, |this, cx| {
+                        this.export_contextos_skill_package(window, cx);
+                    });
+                })
+                .into_any_element(),
             px(84.),
             cx,
         );
@@ -953,25 +2460,12 @@ impl SettingsView {
                 .text_color(theme.foreground)
                 .child(label)
         };
-        // 区块标题右侧的文档链接:MCP 面与命令行面各链自己那份,页尾只放一条
-        // 会让读 CLI 那半页的人点进 MCP 的参考里。设置窗里不放文档,所以这页
-        // 只有状态、动作与这两个去处,没有解释性的散文(用户 2026-09-11 定)
-        let titled = |label: &'static str, guide: Option<(&'static str, &'static str)>| {
+        let titled = |label: &'static str| {
             h_flex()
                 .flex_shrink_0()
                 .gap(SPACE_SM)
                 .items_center()
                 .child(section(label).flex_1())
-                .children(guide.map(|(id, url)| {
-                    div()
-                        .id(id)
-                        .cursor_pointer()
-                        .flex_shrink_0()
-                        .text_size(FONT_CAPTION)
-                        .text_color(theme.primary)
-                        .on_click(move |_, _, cx| cx.open_url(url))
-                        .child(t("Setup guide"))
-                }))
         };
 
         v_flex()
@@ -981,7 +2475,7 @@ impl SettingsView {
             .bg(theme.background)
             .child(settings_page_header(
                 t("Connect"),
-                t("Let your coding agents look up your past sessions from Wake."),
+                t("Let your coding agents look up your past sessions from ContextOS."),
                 cx,
             ))
             .child(
@@ -993,22 +2487,26 @@ impl SettingsView {
                     .px(SPACE_XXL)
                     .pb(SPACE_XXL)
                     .gap(SPACE_SM)
-                    // 四个区块同一种写法,有没有文档链接写在参数里,不靠两种拼法
-                    // 区分。规则一句话:**每个面的第一个区块挂自己的文档**——
-                    // MCP 面 = MCP server + MCP clients,命令行面 = Command line
-                    // + Skill,所以链接落在第一、第三块上。第五个区块该不该有
-                    // 链接,照这条判就行,不用再拍脑袋
-                    .child(titled(
-                        t("MCP server"),
-                        Some(("connect-setup-guide", CONNECT_GUIDE_URL)),
-                    ))
+                    .child(titled(t("Session start")).pt(SPACE_LG))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.popover)
+                            .children(hook_rows),
+                    )
+                    .child(titled(t("MCP server")))
                     .child(binary_card(
-                        "wake-mcp",
+                        "ContextOS MCP",
                         "connect-copy-path",
                         &info.mcp,
                         None,
                     ))
-                    .child(titled(t("MCP clients"), None).pt(SPACE_LG))
+                    .child(titled(t("MCP clients")).pt(SPACE_LG))
                     .child(
                         v_flex()
                             .w_full()
@@ -1020,20 +2518,14 @@ impl SettingsView {
                             .bg(theme.popover)
                             .children(agent_rows),
                     )
-                    .child(
-                        titled(
-                            t("Command line"),
-                            Some(("connect-cli-setup-guide", CONNECT_CLI_GUIDE_URL)),
-                        )
-                        .pt(SPACE_LG),
-                    )
+                    .child(titled(t("Command line")).pt(SPACE_LG))
                     .child(binary_card(
-                        "wake-cli",
+                        "ContextOS CLI",
                         "connect-copy-cli-path",
                         &info.cli,
                         copy_cli_command,
                     ))
-                    .child(titled(t("Skill"), None).pt(SPACE_LG))
+                    .child(titled(t("Skill")).pt(SPACE_LG))
                     .child(skill_card),
             )
             .into_any_element()
@@ -1059,7 +2551,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 与 Kooky / Birth 的 About 面板使用同一信息层级，但落在 Wake 已有的
+    /// 与 Kooky / Birth 的 About 面板使用同一信息层级，但落在 ContextOS 已有的
     /// Settings 场景内：产品图标、名称、版本、tagline、仓库和作者署名。
     fn render_about(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
@@ -1088,7 +2580,7 @@ impl SettingsView {
                             .text_size(FONT_DISPLAY)
                             .font_medium()
                             .text_color(theme.foreground)
-                            .child("Wake"),
+                            .child("ContextOS"),
                     )
                     .child(
                         div()
@@ -1149,7 +2641,7 @@ impl SettingsView {
                 crate::tf!("No newer release is available (latest: {}).", latest).into()
             }
             UpdateStatus::Available { latest } => crate::tf!(
-                "Wake {} is available. Open the release page to download it.",
+                "ContextOS {} is available. Open the release page to download it.",
                 latest
             )
             .into(),
@@ -1209,7 +2701,7 @@ impl SettingsView {
                         div()
                             .text_size(FONT_CAPTION)
                             .text_color(theme.muted_foreground)
-                            .child(t("Keep Wake up to date.")),
+                            .child(t("Keep ContextOS up to date.")),
                     ),
             )
             .child(
@@ -1233,7 +2725,7 @@ impl SettingsView {
                                     div()
                                         .text_size(FONT_BODY)
                                         .text_color(theme.foreground)
-                                        .child(format!("Wake {}", env!("CARGO_PKG_VERSION"))),
+                                        .child(format!("ContextOS {}", env!("CARGO_PKG_VERSION"))),
                                 )
                                 .child(
                                     div()
@@ -1261,8 +2753,58 @@ impl SettingsView {
             SettingsPage::MemoryLocations => {
                 self.memory_locations = workbench.memory_location_settings_snapshot()
             }
+            SettingsPage::Retention => {
+                self.retention = workbench.retention_settings_snapshot();
+                self.codex_compression = Some(workbench.codex_compression_snapshot());
+            }
             _ => {}
         }
+    }
+
+    fn initialize_retention_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retention_loaded {
+            return;
+        }
+        self.retention = self.workbench.read(cx).retention_settings_snapshot();
+        self.codex_compression = Some(self.workbench.read(cx).codex_compression_snapshot());
+        for snapshot in &self.retention {
+            let ix = retention_index(snapshot.agent);
+            if let Some(value) = &snapshot.value {
+                self.retention_inputs[ix]
+                    .update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+            }
+        }
+        self.retention_loaded = true;
+    }
+
+    fn save_retention(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let agent = if ix == 0 {
+            wake_core::services::session_retention::RetentionAgent::ClaudeCode
+        } else {
+            wake_core::services::session_retention::RetentionAgent::Gemini
+        };
+        let value = self.retention_inputs[ix].read(cx).value().to_string();
+        match self.workbench.read(cx).save_retention_period(agent, &value) {
+            Ok(rows) => {
+                self.retention = rows;
+                self.retention_errors[ix] = None;
+            }
+            Err(error) => self.retention_errors[ix] = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn toggle_codex_compression(&mut self, cx: &mut Context<Self>) {
+        let enabled = !self
+            .codex_compression
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.enabled);
+        self.codex_compression = Some(
+            self.workbench
+                .read(cx)
+                .set_codex_compression_enabled(enabled),
+        );
+        cx.notify();
     }
 
     /// Session locations 的一行:Edit… 恒有,Show in Finder 挂存在的路径,Remove 只给自定义行
@@ -1481,7 +3023,7 @@ impl SettingsView {
         );
         self.locations_page(
             t("Memory locations"),
-            t("Choose which memory and instruction files Wake indexes."),
+            t("Choose which memory and instruction files ContextOS indexes."),
             snapshot.diverged,
             Workbench::open_add_memory_location_form,
             Workbench::restore_default_memory_locations,
@@ -1566,7 +3108,7 @@ impl SettingsView {
         }
         self.locations_page(
             t("Session locations"),
-            t("Choose where Wake looks for local agent sessions."),
+            t("Choose where ContextOS looks for local agent sessions."),
             snapshot.diverged,
             Workbench::open_add_location_form,
             Workbench::restore_default_locations,
@@ -1904,7 +3446,7 @@ impl SettingsView {
                             div()
                                 .text_size(FONT_CAPTION)
                                 .text_color(theme.muted_foreground)
-                                .child(t("No remote hosts yet. Add one to mirror its sessions into Wake.")),
+                                .child(t("No remote hosts yet. Add one to mirror its sessions into ContextOS.")),
                         )
                     }),
             )
@@ -1926,10 +3468,13 @@ impl Render for SettingsView {
         let selected_page = self.workbench.read(cx).settings_page();
         let content = match selected_page {
             SettingsPage::General => self.render_general(cx),
+            SettingsPage::CompressionService => self.render_compression_service(cx),
+            SettingsPage::CompressionStrategy => self.render_compression_strategy(cx),
             SettingsPage::Locations => self.render_locations(cx).into_any_element(),
             SettingsPage::MemoryLocations => self.render_memory_locations(cx).into_any_element(),
             SettingsPage::Remotes => self.render_remotes(cx),
             SettingsPage::Connect => self.render_connect(cx),
+            SettingsPage::Retention => self.render_retention(cx),
             SettingsPage::Data => self.render_data(cx),
             SettingsPage::Updates => self.render_updates(cx),
             SettingsPage::About => self.render_about(cx),

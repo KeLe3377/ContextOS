@@ -1,4 +1,4 @@
-//! Wake 界面尺度规范——六档字阶。
+//! ContextOS 界面尺度规范——六档字阶。
 //! 规则:所有 UI 字号必须引用本模块常量,禁止裸 px 数字与 rem 工具类
 //! (text_sm 等按 rem=14px 折算会产生 12.25px 这类幽灵值)。
 //! 颜色只用三级:foreground(主文字)/muted_foreground(辅助)/primary(强调)。
@@ -173,7 +173,7 @@ pub const LEAD_INSET: Pixels = px(7.75);
 pub const SUB_INDENT: Pixels = px(12.);
 // 组头(Agents / Projects)没有自己的内边距常量:NAV_ICON 的 chevron 按自己的框居中压轴
 //(见 workbench.rs group_header);靠首字母字形宽度反推的 GROUP_HEAD_INSET 已删(2026-09-22)。
-/// 侧栏标题 "Wake" 的左内边距:同样让首字母 W 的字形中心落在轴上。
+/// 侧栏标题 "ContextOS" 的左内边距:与上方 traffic light 同法,让首字母 的字形中心落在轴上(换名不重调,留着这个约束本身)。
 /// 实测 16px semibold 的 W 宽 14.25、左承距 0.5,文字左缘需 19.65;
 /// 减去容器的 SIDEBAR_EDGE 得 9.15,取 9.0(2x 屏下 0.5px 以下的差会被光栅化吃掉)。
 pub const TITLE_INSET: Pixels = px(9.);
@@ -207,7 +207,7 @@ pub fn search_field_frame(cx: &App) -> Div {
 pub const RADIUS_BUTTON: Pixels = px(6.);
 
 /// Page and dialog actions use fixed pixels; the library's rem-based Small
-/// preset becomes 21px at Wake's 14px rem size and crowds mixed-size footers.
+/// preset becomes 21px at ContextOS's 14px rem size and crowds mixed-size footers.
 /// Normalize the inner label/icon/gap too: Button renders those in a nested
 /// element, so setting the outer text_size alone does not override its size preset.
 pub fn action_button(button: Button) -> Button {
@@ -255,7 +255,7 @@ pub trait TextColored: Styled + Sized {
 
 impl<T: Styled + Sized> TextColored for T {}
 
-/// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
+/// ContextOS 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
 pub const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
 
 // ---- 弹窗「点面板外关闭」补丁 ----
@@ -280,7 +280,7 @@ struct ClosableDialogs(HashSet<WindowId>);
 impl Global for ClosableDialogs {}
 
 /// 打开可点面板外关闭的普通弹窗(确认类用 gpui-component 的 `open_alert_dialog`);
-/// Wake 里不要再裸调 `window.open_dialog`
+/// ContextOS 里不要再裸调 `window.open_dialog`
 pub fn open_closable_dialog<F>(window: &mut Window, cx: &mut App, build: F)
 where
     F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,

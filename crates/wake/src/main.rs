@@ -1,10 +1,6 @@
-// release 挂 windows 子系统:双击启动不带控制台黑窗。debug 保留控制台,
-// eprintln 的诊断日志还有处落;GUI 子系统下致命错误走 MessageBox
-//(wake-core 的 show_fatal_alert),不依赖 stderr。
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+// Windows 统一使用 GUI 子系统:双击启动不带控制台黑窗。致命错误走
+// MessageBox(wake-core 的 show_fatal_alert),不依赖 stderr。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod assets;
 mod format;
@@ -14,6 +10,7 @@ mod markdown_links;
 mod prefs;
 mod settings;
 mod theme;
+mod tray;
 mod ui;
 mod update;
 mod workbench;
@@ -58,12 +55,12 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
         TitlebarOptions {
             title: None,
             appears_transparent: true,
-            // 44px Wake 顶部净空中垂直居中 13.5px traffic lights。
+            // 44px 顶部净空中垂直居中 13.5px traffic lights。
             traffic_light_position: Some(point(px(20.), px(15.))),
         }
     } else {
         TitlebarOptions {
-            title: Some("Wake".into()),
+            title: Some("ContextOS".into()),
             appears_transparent: false,
             traffic_light_position: None,
         }
@@ -74,8 +71,8 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             window_bounds: Some(window_bounds),
             display_id,
             window_min_size: Some(size(px(940.), px(620.))),
-            // Linux 桌面按它归组窗口、匹配 .desktop(StartupWMClass=wake)
-            app_id: Some("wake".into()),
+            // Linux 桌面按它归组窗口、匹配 .desktop(StartupWMClass=contextos)
+            app_id: Some("contextos".into()),
             // Wayland 显式请求 CSD(2026-08-24 Codex review):默认的 Server
             // 请求在 GNOME/Mutter(无 zxdg-decoration 协议)下会被 gpui 记成
             // Server 而 compositor 实际什么都不画——窗口既无系统标题栏、
@@ -117,7 +114,7 @@ fn open_main_window_or_exit(cx: &mut App, what: &'static str) -> WindowHandle<Ro
         Ok(handle) => handle,
         Err(e) => {
             wake_core::services::terminal::show_fatal_alert(&crate::tf!(
-                "Wake couldn't {} its window: {}",
+                "ContextOS couldn't {} its window: {}",
                 t(what),
                 e
             ));
@@ -197,6 +194,16 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
     });
 }
 
+pub(crate) fn handle_tray_command(command: tray::Command, cx: &mut App) {
+    match command {
+        tray::Command::Open => show_main_window(cx, |_, _| {}),
+        tray::Command::Refresh => show_main_window(cx, |workbench, cx| {
+            workbench.refresh_from_tray(cx);
+        }),
+        tray::Command::Quit => cx.quit(),
+    }
+}
+
 fn key_bindings() -> Vec<KeyBinding> {
     // secondary = macOS 的 cmd、其他平台的 ctrl(gpui keystroke 内建别名)。
     // macOS 标准的应用/窗口键位 gpui 不会自动处理,没有绑定就是死键;
@@ -227,16 +234,13 @@ fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) fn app_menus() -> Vec<Menu> {
     let mac = cfg!(target_os = "macos");
     let wake: Vec<MenuItem> = [
-        Some(MenuItem::action(t("About Wake"), OpenAbout)),
-        mac.then(|| MenuItem::action(t("Check for Updates…"), OpenUpdates)),
-        Some(MenuItem::separator()),
         Some(MenuItem::action(t("Settings…"), OpenSettings)),
         Some(MenuItem::separator()),
-        mac.then(|| MenuItem::action(t("Hide Wake"), Hide)),
+        mac.then(|| MenuItem::action(t("Hide ContextOS"), Hide)),
         mac.then(|| MenuItem::action(t("Hide Others"), HideOthers)),
         mac.then(|| MenuItem::action(t("Show All"), ShowAll)),
         mac.then(MenuItem::separator),
-        Some(MenuItem::action(t("Quit Wake"), Quit)),
+        Some(MenuItem::action(t("Quit ContextOS"), Quit)),
     ]
     .into_iter()
     .flatten()
@@ -286,7 +290,7 @@ pub(crate) fn app_menus() -> Vec<Menu> {
     });
     [
         Some(Menu {
-            name: "Wake".into(),
+            name: "ContextOS".into(),
             items: wake,
             disabled: false,
         }),
@@ -304,7 +308,19 @@ pub(crate) fn app_menus() -> Vec<Menu> {
 }
 
 fn main() {
-    let app = gpui_platform::application().with_assets(Assets);
+    if let Err(error) = wake_core::storage::apply_pending_root() {
+        let recovery = wake_core::storage::clear_pending_root();
+        let recovery_note = recovery
+            .err()
+            .map(|error| format!(" The pending move could not be cleared: {error:#}."))
+            .unwrap_or_default();
+        wake_core::services::terminal::show_fatal_alert(&format!(
+            "ContextOS could not move its data directory and will continue using the current directory: {error:#}.{recovery_note}"
+        ));
+    }
+    let app = gpui_platform::application()
+        .with_assets(Assets)
+        .with_quit_mode(QuitMode::Explicit);
     // macOS:用户关掉最后一个窗后进程仍留 Dock,点 Dock 图标走 NSApplication 的
     // applicationShouldHandleReopen → gpui Platform::on_reopen(只在系统认为
     // 没有可见窗口时触发)。与 Window → Main Window 同一条路
@@ -316,11 +332,32 @@ fn main() {
         theme::sync_appearance(None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
+        let _window_lifecycle = if let Err(error) = tray::init(cx) {
+            eprintln!("ContextOS could not initialize the system tray: {error:#}");
+            // Without a tray there is no way to recover a hidden process, so
+            // retain the old fail-safe behavior for unsupported environments.
+            cx.on_window_closed(|cx, _window_id| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+        } else {
+            // Closing the last window hides the UI lifecycle only. The tray
+            // and BackgroundRuntime keep monitoring alive until Quit.
+            cx.on_window_closed(|_, _window_id| {})
+        };
         // 退出前把主窗几何落盘(节流写盘可能还没触发);Dock 的 Quit、注销关机
         // 都走这里,不只 ⌘Q
-        cx.on_app_quit(|cx| {
+        let runtime = Workbench::background_runtime_for_shutdown();
+        cx.on_app_quit(move |cx| {
             main_window::flush(cx);
-            async {}
+            let runtime = runtime.clone();
+            async move {
+                runtime.shutdown();
+                if let Err(error) = wake_core::services::laya_runtime::manager().stop() {
+                    eprintln!("ContextOS could not stop managed Laya during exit: {error:#}");
+                }
+            }
         })
         .detach();
         cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w| w.remove_window()));

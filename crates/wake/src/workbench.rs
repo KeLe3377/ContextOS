@@ -15,8 +15,10 @@
 //   finish review, the verdict, and DESIGN.md
 // ============================================================================
 use crate::i18n::t;
+mod chunk_compression;
 mod cleanup;
 mod memory;
+mod skills;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -24,8 +26,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex, OnceLock,
 };
+use std::time::Duration;
 
 use chrono::{Datelike as _, Local, NaiveDate, TimeZone as _};
 use futures::StreamExt;
@@ -33,9 +36,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::highlighter::HighlightTheme;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::{AutoScroll, ScrollableElement as _};
@@ -50,18 +53,26 @@ use wake_core::adapters::{
     adapter_for, create_adapter_roster_for, path_owns, session_source_path, AdapterLocation,
     AgentAdapter,
 };
-use wake_core::db::Store;
+use wake_core::db::{SessionRelation, SessionRelationEdge, SessionRelationNode, Store};
 use wake_core::models::Role as MessageRole;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
+use wake_core::workspace_changes::{
+    SessionChangeSessionGroup, SessionFileChangeEvent, WorkspaceChangeDetail,
+    WorkspaceChangeEvent, WorkspaceChangeKind, WorkspaceRoot,
+};
+use wake_core::workspace_store::{
+    default_workspace_cas_path, default_workspace_db_path, WorkspaceStore,
+};
+use wake_core::workspace_supervisor::{start_workspace_watcher, WorkspaceWatcher};
 
 use crate::format::{
     abs_date, clip_display, expand_tilde, fmt_tokens, month_year, one_line, smart_time, thousands,
     tilde_path,
 };
-use crate::settings::{SettingsPage, SettingsView};
+use crate::settings::{settings_button, SettingsPage, SettingsView};
 use crate::ui::*;
 use crate::update::{self, UpdateStatus};
 
@@ -91,15 +102,238 @@ const LIBRARY_IDENTITY_HEIGHT: Pixels = px(88.);
 const SIDEBAR_FOOTER_ROW_HEIGHT: Pixels = px(43.);
 /// 三栏固定结构宽度；工具摘要需要从窗口宽度反算真实可用空间。
 const SIDEBAR_WIDTH: Pixels = px(224.);
+const SIDEBAR_COLLAPSED_WIDTH: Pixels = px(40.);
 const SESSION_STREAM_WIDTH: Pixels = px(336.);
 const READER_MAX_WIDTH: Pixels = px(720.);
+const DETAIL_OUTLINE_WIDTH: Pixels = px(232.);
+const DETAIL_OUTLINE_COLLAPSED_WIDTH: Pixels = px(40.);
+const DETAIL_OUTLINE_MIN_READER_WIDTH: Pixels = px(400.);
 /// FONT_MSG_THINKING 使用等宽字体时，一个 ASCII 显示格的实测近似宽度。
 const TOOL_MONO_CELL_WIDTH: f32 = 6.9;
 /// Insights 主区块间距，明确落在 4px 网格上。
 const INSIGHTS_SECTION_GAP: Pixels = px(32.);
+const COMPRESSION_DIALOG_EDGE_GAP: Pixels = px(16.);
+const COMPRESSION_DIALOG_MIN_WIDTH: Pixels = px(280.);
+const COMPRESSION_DIALOG_MIN_BODY_HEIGHT: Pixels = px(160.);
+
+fn compression_dialog_width(window: &Window, preferred: Pixels) -> Pixels {
+    (window.viewport_size().width - COMPRESSION_DIALOG_EDGE_GAP * 2.)
+        .max(COMPRESSION_DIALOG_MIN_WIDTH)
+        .min(preferred)
+}
+
+fn compression_dialog_max_height(window: &Window) -> Pixels {
+    let viewport_height = window.viewport_size().height;
+    (viewport_height - viewport_height / 10. - COMPRESSION_DIALOG_EDGE_GAP).max(px(240.))
+}
+
+fn compression_dialog_body_height(
+    window: &Window,
+    preferred: Pixels,
+    dialog_chrome: Pixels,
+) -> Pixels {
+    (compression_dialog_max_height(window) - dialog_chrome)
+        .max(COMPRESSION_DIALOG_MIN_BODY_HEIGHT)
+        .min(preferred)
+}
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
+
+struct BackgroundEvents {
+    subscriber: Mutex<Option<futures::channel::mpsc::UnboundedSender<BgEvent>>>,
+    progress: Mutex<ScanProgress>,
+}
+
+impl BackgroundEvents {
+    fn subscribe(&self, sender: futures::channel::mpsc::UnboundedSender<BgEvent>) {
+        *self.subscriber.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
+    }
+
+    fn current_progress(&self) -> ScanProgress {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn send(&self, event: BgEvent) {
+        if let Some(sender) = self
+            .subscriber
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = sender.unbounded_send(event);
+        }
+    }
+}
+
+impl ScanEvents for BackgroundEvents {
+    fn on_progress(&self, progress: &ScanProgress) {
+        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = progress.clone();
+        self.send(BgEvent::Progress(progress.clone()));
+    }
+
+    fn on_sessions_changed(&self) {
+        self.send(BgEvent::Changed);
+    }
+
+    fn on_workspace_changes_changed(&self) {
+        self.send(BgEvent::WorkspaceChangesChanged);
+    }
+
+    fn on_rescan_needed(&self) {
+        self.send(BgEvent::RescanNeeded);
+    }
+}
+
+pub(crate) struct BackgroundRuntime {
+    store: Arc<Store>,
+    workspace_store: Arc<WorkspaceStore>,
+    db_note: Mutex<Option<String>>,
+    adapters: Mutex<SharedAdapters>,
+    events: Arc<BackgroundEvents>,
+    watcher: Mutex<Option<SessionWatcher>>,
+    workspace_watcher: Mutex<Option<WorkspaceWatcher>>,
+    started: OnceLock<()>,
+}
+
+impl BackgroundRuntime {
+    fn new(
+        store: Arc<Store>,
+        workspace_store: Arc<WorkspaceStore>,
+        adapters: SharedAdapters,
+        db_note: Option<String>,
+    ) -> Self {
+        Self {
+            store,
+            workspace_store,
+            db_note: Mutex::new(db_note),
+            adapters: Mutex::new(adapters),
+            events: Arc::new(BackgroundEvents {
+                subscriber: Mutex::new(None),
+                progress: Mutex::new(ScanProgress::default()),
+            }),
+            watcher: Mutex::new(None),
+            workspace_watcher: Mutex::new(None),
+            started: OnceLock::new(),
+        }
+    }
+
+    fn adapters(&self) -> SharedAdapters {
+        self.adapters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn take_db_note(&self) -> Option<String> {
+        self.db_note
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    fn replace_adapters(&self, adapters: SharedAdapters) {
+        *self.adapters.lock().unwrap_or_else(|e| e.into_inner()) = adapters;
+    }
+
+    fn subscribe(&self, sender: futures::channel::mpsc::UnboundedSender<BgEvent>) {
+        self.events.subscribe(sender);
+    }
+
+    fn ensure_started(&self) {
+        if self.started.set(()).is_err() {
+            return;
+        }
+
+        let adapters = self.adapters();
+        let events: Arc<dyn ScanEvents> = self.events.clone();
+        self.events.on_progress(&ScanProgress {
+            scanning: true,
+            ..Default::default()
+        });
+        spawn_scan(adapters.clone(), self.store.clone(), events.clone(), false);
+        spawn_usage_sync(adapters.clone(), self.store.clone(), events.clone());
+
+        let syncing_hosts = self.store.enabled_remote_host_names();
+        spawn_remote_sync_thread_events(&self.store, self.events.clone(), syncing_hosts);
+
+        {
+            let store = self.store.clone();
+            let events = self.events.clone();
+            std::thread::spawn(move || report_remote_cache_size_events(&store, &events));
+        }
+
+        *self.watcher.lock().unwrap_or_else(|e| e.into_inner()) =
+            start_watcher(adapters, self.store.clone(), events);
+
+        let events = self.events.clone();
+        let watcher = start_workspace_watcher(
+            self.workspace_store.clone(),
+            Arc::new(move || events.send(BgEvent::WorkspaceChangesChanged)),
+        );
+        *self
+            .workspace_watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = watcher;
+    }
+
+    fn remount_watcher(&self) {
+        let adapters = self.adapters();
+        let events: Arc<dyn ScanEvents> = self.events.clone();
+        let mut watcher = self.watcher.lock().unwrap_or_else(|e| e.into_inner());
+        *watcher = None;
+        *watcher = start_watcher(adapters, self.store.clone(), events);
+    }
+
+    fn watched_roots(&self) -> Option<std::collections::BTreeSet<PathBuf>> {
+        self.watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|watcher| watcher.watched_roots().clone())
+    }
+
+    fn watcher_available(&self) -> bool {
+        self.watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    fn request_workspace_refresh(&self) {
+        if let Some(watcher) = self
+            .workspace_watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            watcher.request_refresh();
+        }
+    }
+
+    fn workspace_watcher_available(&self) -> bool {
+        self.workspace_watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    pub(crate) fn shutdown(&self) {
+        // Dropping these guards joins the watcher supervisors before the
+        // process exits. The finite scan/sync jobs are allowed to finish.
+        self.watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        self.workspace_watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+}
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -152,12 +386,70 @@ fn library_header(
                         ),
                 )
                 .when_some(actions, |row, actions| {
-                    row.child(div().flex_shrink_0().pt(px(2.)).child(actions))
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .pt(px(2.))
+                            // The header is a native window drag region. Stop its hitbox before
+                            // action buttons so Windows delivers clicks instead of HTCAPTION.
+                            .occlude()
+                            .child(actions),
+                    )
                 }),
         )
 }
 
-/// 起一条后台扫描线程。启动时的自动扫描(full=false)与用户主动重扫(full=true)
+/// Search input shared by the global session palette and full-page libraries.
+/// Keeping the prefix, clear affordance, and focus behavior here prevents each
+/// searchable page from drifting into a different interaction.
+fn search_input_control(
+    input: &Entity<InputState>,
+    size: gpui_component::Size,
+    clear_id: &'static str,
+    cx: &App,
+) -> AnyElement {
+    let has_query = input.read(cx).text().len() > 0;
+    let clear_input = input.clone();
+    Input::new(input)
+        .with_size(size)
+        .prefix(
+            icon("icons/search.svg")
+                .with_size(px(16.))
+                .text_color(cx.theme().muted_foreground),
+        )
+        .when(has_query, |input| {
+            input.suffix(
+                div()
+                    .id(clear_id)
+                    .size(px(24.))
+                    .mr(-size.input_px())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(cx.theme().radius)
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|style| {
+                        style
+                            .bg(cx.theme().secondary_hover)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .on_click(move |_, window, cx| {
+                        clear_input.update(cx, |state, cx| {
+                            state.set_value("", window, cx);
+                            state.focus(window, cx);
+                        });
+                    })
+                    .child(icon("icons/circle-x.svg").with_size(px(16.))),
+            )
+        })
+        .p_0()
+        .appearance(false)
+        .into_any_element()
+}
+
+/// 起一条后台扫描线程。启动时的自动扫描与用户主动刷新都按文件指纹做增量扫描；
+/// `full=true` 只保留给建库或显式的 CLI 全量重建。
 /// 共用;返回的 Result 由 run_scan 的终态事件代为上报,这里只需丢弃。
 /// 远程同步不在这条线程上——它走 Workbench::spawn_remote_sync 的独立线程,
 /// 本地扫描不等网络(不可达 host 的 ConnectTimeout 不该拖住启动索引)。
@@ -169,6 +461,29 @@ fn spawn_scan(
 ) {
     std::thread::spawn(move || {
         let _ = run_scan(&adapters, &store, events.as_ref(), full);
+    });
+}
+
+/// 用量有独立游标和解析器,与会话索引扫描解耦。启动时立即补齐,此后按
+/// CC Switch 的常驻扫描节奏每十分钟检查源日志的文件指纹。
+fn spawn_usage_sync(adapters: SharedAdapters, store: Arc<Store>, events: Arc<dyn ScanEvents>) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        match wake_core::services::session_usage::sync_session_usage(&adapters, &store) {
+            Ok(result) => {
+                if result.files_parsed > 0 {
+                    events.on_sessions_changed();
+                }
+                if !result.errors.is_empty() {
+                    eprintln!("usage scan completed with errors: {:?}", result.errors);
+                }
+            }
+            Err(error) => eprintln!("usage scan failed: {error:#}"),
+        }
+        std::thread::sleep(Duration::from_secs(10 * 60));
     });
 }
 
@@ -194,6 +509,23 @@ fn spawn_remote_sync_thread(
     });
 }
 
+fn spawn_remote_sync_thread_events(
+    store: &Arc<Store>,
+    events: Arc<BackgroundEvents>,
+    names: Vec<String>,
+) {
+    if names.is_empty() {
+        return;
+    }
+    let store = store.clone();
+    std::thread::spawn(move || {
+        wake_core::remote::sync_hosts(&store, &names);
+        wake_core::remote::purge_orphan_caches(&store);
+        report_remote_cache_size_events(&store, &events);
+        events.send(BgEvent::RemoteSyncDone);
+    });
+}
+
 /// 算 remotes/ 镜像的占用并经 bg_tx 报回(走目录树 stat,只在后台线程调)。
 /// 镜像只在启动、同步收工、删 host 后会变,所以只在那三处算,不放 render
 fn report_remote_cache_size(
@@ -204,6 +536,1120 @@ fn report_remote_cache_size(
         let bytes = wake_core::remote::cache_bytes(&db_dir);
         let _ = bg_tx.unbounded_send(BgEvent::RemoteCacheBytes(bytes));
     }
+}
+
+fn report_remote_cache_size_events(store: &Store, events: &BackgroundEvents) {
+    if let Some(db_dir) = store.db_dir() {
+        let bytes = wake_core::remote::cache_bytes(&db_dir);
+        events.send(BgEvent::RemoteCacheBytes(bytes));
+    }
+}
+
+#[derive(Clone)]
+struct MarkdownDetail {
+    id: String,
+    start: usize,
+    end: usize,
+    summary: String,
+    body: String,
+    kind: DetailKind,
+    chars: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailKind {
+    Thinking,
+    CodeGraph,
+    Patch,
+    Read,
+    Exec,
+    Image,
+    Other,
+}
+
+impl DetailKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            DetailKind::Thinking => "thinking",
+            DetailKind::CodeGraph => "codegraph",
+            DetailKind::Patch => "patch",
+            DetailKind::Read => "read",
+            DetailKind::Exec => "exec",
+            DetailKind::Image => "image",
+            DetailKind::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DetailDecision {
+    detail: MarkdownDetail,
+    replacement: Option<String>,
+    uncertain_for_jev: bool,
+}
+
+#[derive(Default)]
+struct DetailCompactionStats {
+    original_chars: usize,
+    first_step_deleted: usize,
+    first_step_deleted_chars: usize,
+    second_step_cropped: usize,
+    second_step_saved_chars: usize,
+    third_step_jev_candidates: usize,
+    third_step_jev_kept_full: usize,
+    third_step_jev_dropped_full: usize,
+    third_step_jev_batches: usize,
+    third_step_jev_skipped_by_budget: usize,
+}
+
+struct DetailCompactionResult {
+    markdown: String,
+    report: String,
+    stats: DetailCompactionStats,
+}
+
+const JEV_CANDIDATE_OUTPUT_CHARS: usize = 3_000;
+const JEV_SUMMARY_PREVIEW_CHARS: usize = 180;
+const JEV_HEAD_PREVIEW_CHARS: usize = 240;
+const JEV_TAIL_PREVIEW_CHARS: usize = 160;
+const JEV_REQUEST_CHAR_BUDGET: usize = 45_000;
+const DEFAULT_LLM_INPUT_LIMIT_CHARS: usize =
+    wake_core::services::compression::DEFAULT_LLM_INPUT_LIMIT_CHARS;
+
+fn char_slice(text: &str, head: usize, tail: usize) -> String {
+    if text.len() <= head + tail + 80 {
+        return text.to_string();
+    }
+    let head_end = safe_prefix_end(text, head);
+    let tail_start = safe_suffix_start(text, tail);
+    format!(
+        "{}\n\n[... {} chars omitted ...]\n\n{}",
+        &text[..head_end],
+        text.len()
+            .saturating_sub(head_end + text[tail_start..].len()),
+        &text[tail_start..]
+    )
+}
+
+fn safe_prefix_end(text: &str, limit: usize) -> usize {
+    let mut end = limit.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+fn safe_suffix_start(text: &str, limit: usize) -> usize {
+    let mut start = text.len().saturating_sub(limit);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
+
+fn detail_kind(summary: &str, body: &str) -> DetailKind {
+    let combined = format!("{summary}\n{body}");
+    if summary.contains("Thinking") || summary.contains("🧠") {
+        DetailKind::Thinking
+    } else if combined.contains("apply_patch")
+        || combined.contains("Begin Patch")
+        || combined.contains("Update File:")
+        || combined.contains("Add File:")
+        || combined.contains("Delete File:")
+        || combined.contains("diff --git")
+        || combined.contains("@@")
+    {
+        DetailKind::Patch
+    } else if summary.to_ascii_lowercase().contains("codegraph") {
+        DetailKind::CodeGraph
+    } else if summary.contains("Read") || summary.contains("read") {
+        DetailKind::Read
+    } else if summary.contains("exec_command")
+        || summary.contains("Bash")
+        || summary.contains("PowerShell")
+        || summary.contains("TaskCreate")
+        || summary.contains("TaskUpdate")
+        || summary.contains("write_stdin")
+    {
+        DetailKind::Exec
+    } else if summary.contains("view_image") {
+        DetailKind::Image
+    } else {
+        DetailKind::Other
+    }
+}
+
+fn detail_flags(summary: &str, body: &str) -> Vec<&'static str> {
+    let combined = format!("{summary}\n{body}");
+    let lower = combined.to_ascii_lowercase();
+    let mut flags = Vec::new();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("panic")
+        || lower.contains("exception")
+        || lower.contains("stderr")
+        || combined.contains("失败")
+        || combined.contains("报错")
+        || combined.contains("错误")
+    {
+        flags.push("error_or_failure");
+    }
+    if combined.contains("changed on disk")
+        || combined.contains("source omitted")
+        || combined.contains("Already sent earlier")
+        || combined.contains("last index sync")
+    {
+        flags.push("codegraph_state");
+    }
+    if lower.contains("cargo")
+        || lower.contains("npm")
+        || lower.contains("pnpm")
+        || lower.contains("git")
+        || lower.contains("rg ")
+        || lower.contains("test")
+        || lower.contains("check")
+        || lower.contains("build")
+        || combined.contains("验证")
+        || combined.contains("测试")
+        || combined.contains("编译")
+    {
+        flags.push("command_or_verification");
+    }
+    if combined.contains(":\\")
+        || combined.contains("/src/")
+        || combined.contains("crates/")
+        || combined.contains(".rs")
+        || combined.contains(".ts")
+        || combined.contains(".tsx")
+        || combined.contains(".md")
+    {
+        flags.push("paths_or_files");
+    }
+    flags
+}
+
+fn parse_markdown_details(markdown: &str) -> Vec<MarkdownDetail> {
+    let mut details = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open_rel) = markdown[cursor..].find("<details><summary>") {
+        let start = cursor + open_rel;
+        let summary_start = start + "<details><summary>".len();
+        let Some(summary_end_rel) = markdown[summary_start..].find("</summary>") else {
+            break;
+        };
+        let summary_end = summary_start + summary_end_rel;
+        let body_start = summary_end + "</summary>".len();
+        let Some(close_rel) = markdown[body_start..].find("</details>") else {
+            break;
+        };
+        let close_start = body_start + close_rel;
+        let end = close_start + "</details>".len();
+        let summary = markdown[summary_start..summary_end].to_string();
+        let body = markdown[body_start..close_start]
+            .trim_matches('\n')
+            .to_string();
+        details.push(MarkdownDetail {
+            id: format!("d{}", details.len() + 1),
+            start,
+            end,
+            kind: detail_kind(&summary, &body),
+            chars: body.len(),
+            summary,
+            body,
+        });
+        cursor = end;
+    }
+    details
+}
+
+fn fenced_section(body: &str, label: &str) -> Option<(usize, usize, String)> {
+    let marker = format!("{label}:\n\n```\n");
+    let start = body.find(&marker)? + marker.len();
+    let end = body[start..].find("\n```")? + start;
+    Some((start, end, body[start..end].to_string()))
+}
+
+fn is_low_value_detail(detail: &MarkdownDetail) -> bool {
+    let body = detail.body.trim();
+    if detail.summary.contains("write_stdin") && body.len() < 220 {
+        return true;
+    }
+    body.is_empty()
+        || body == "Output:\n\n```\n\n```"
+        || body.contains("Process exited with code 0") && body.len() < 260
+}
+
+fn is_skill_output(output: &str) -> bool {
+    output.contains("# Systematic Debugging")
+        || output.contains("# ")
+            && (output.contains("## Overview") || output.contains("## The Iron Law"))
+        || output.contains("SKILL.md")
+}
+
+fn is_codegraph_output(summary: &str, output: &str) -> bool {
+    summary.to_ascii_lowercase().contains("codegraph")
+        || output.contains("CodeGraph")
+        || output.contains("Blast radius")
+        || output.contains("changed on disk after the last index sync")
+}
+
+fn is_patch_evidence(detail: &MarkdownDetail, output: &str) -> bool {
+    detail.kind == DetailKind::Patch
+        || output.contains("Begin Patch")
+        || output.contains("Update File:")
+        || output.contains("diff --git")
+        || output.contains("@@")
+}
+
+fn compress_codegraph_output(output: &str) -> String {
+    let mut kept = Vec::new();
+    for line in output.lines() {
+        if line.contains("Exploration:")
+            || line.contains("Found ")
+            || line.contains("Blast radius")
+            || line.contains("depends on")
+            || line.contains("changed on disk")
+            || line.contains("source omitted")
+            || line.contains("Already sent earlier")
+            || line.contains("last index sync")
+            || line.starts_with("**`")
+            || line.starts_with("> ")
+        {
+            kept.push(line.to_string());
+        }
+    }
+    if kept.is_empty() {
+        format!(
+            "{}\n\n[已省略 CodeGraph 源码输出，保留首尾状态]\n\n{}",
+            char_slice(output, 900, 0),
+            char_slice(output, 0, 500)
+        )
+    } else {
+        format!(
+            "{}\n\n[已省略 CodeGraph 源码全文；保留查询、文件状态、blast radius 与同步提示。]",
+            kept.join("\n")
+        )
+    }
+}
+
+fn compress_skill_output(output: &str) -> String {
+    let headings = output
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .take(24)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if headings.is_empty() {
+        format!(
+            "{}\n\n[已省略 skill 全文，仅保留首尾线索]\n\n{}",
+            char_slice(output, 800, 0),
+            char_slice(output, 0, 500)
+        )
+    } else {
+        format!("[已省略 skill 全文；保留使用的 skill 结构标题]\n\n{headings}")
+    }
+}
+
+fn structured_output_stub(detail: &MarkdownDetail, output: &str) -> (String, bool) {
+    if output.len() < 900 {
+        return (output.to_string(), false);
+    }
+    if is_patch_evidence(detail, output) {
+        return (char_slice(output, 2_400, 1_200), output.len() > 3_800);
+    }
+    if is_codegraph_output(&detail.summary, output) {
+        return (compress_codegraph_output(output), false);
+    }
+    if is_skill_output(output) {
+        return (compress_skill_output(output), false);
+    }
+    let uncertain = output.len() >= JEV_CANDIDATE_OUTPUT_CHARS
+        && !detail_flags(&detail.summary, output).contains(&"error_or_failure");
+    (
+        format!(
+            "{}\n\n[已机械裁剪 Output：原始 {} chars]\n\n{}",
+            char_slice(output, 700, 0),
+            output.len(),
+            char_slice(output, 0, 500)
+        ),
+        uncertain,
+    )
+}
+
+fn rewrite_output_section(body: &str, replacement: &str) -> String {
+    if let Some((start, end, _)) = fenced_section(body, "Output") {
+        let mut out = String::new();
+        out.push_str(&body[..start]);
+        out.push_str(replacement);
+        out.push_str(&body[end..]);
+        out
+    } else {
+        body.to_string()
+    }
+}
+
+fn mechanical_detail_decision(
+    detail: MarkdownDetail,
+    stats: &mut DetailCompactionStats,
+) -> DetailDecision {
+    if is_low_value_detail(&detail) {
+        stats.first_step_deleted += 1;
+        stats.first_step_deleted_chars += detail.end.saturating_sub(detail.start);
+        return DetailDecision {
+            detail,
+            replacement: None,
+            uncertain_for_jev: false,
+        };
+    }
+    let Some((_, _, output)) = fenced_section(&detail.body, "Output") else {
+        return DetailDecision {
+            detail,
+            replacement: None,
+            uncertain_for_jev: false,
+        };
+    };
+    let (stub, uncertain_for_jev) = structured_output_stub(&detail, &output);
+    if stub == output {
+        return DetailDecision {
+            detail,
+            replacement: None,
+            uncertain_for_jev: false,
+        };
+    }
+    stats.second_step_cropped += 1;
+    stats.second_step_saved_chars += output.len().saturating_sub(stub.len());
+    let body = rewrite_output_section(&detail.body, &stub);
+    let replacement = format!(
+        "<details><summary>{}</summary>\n\n{}\n\n</details>",
+        detail.summary, body
+    );
+    DetailDecision {
+        detail,
+        replacement: Some(replacement),
+        uncertain_for_jev,
+    }
+}
+
+fn apply_detail_decisions(markdown: &str, decisions: &[DetailDecision]) -> String {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for decision in decisions {
+        out.push_str(&markdown[cursor..decision.detail.start]);
+        if let Some(replacement) = &decision.replacement {
+            out.push_str(replacement);
+        }
+        cursor = decision.detail.end;
+    }
+    out.push_str(&markdown[cursor..]);
+    out
+}
+
+fn build_detail_jev_state(meta: &SessionMeta, details: &[MarkdownDetail]) -> serde_json::Value {
+    let mut kind_counts = serde_json::Map::new();
+    for detail in details {
+        let entry = kind_counts
+            .entry(detail.kind.as_str())
+            .or_insert_with(|| serde_json::json!(0));
+        *entry = serde_json::json!(entry.as_i64().unwrap_or(0) + 1);
+    }
+    serde_json::json!({
+        "goal": "Decide whether large uncertain Markdown tool outputs should remain full before LLM compression. Prefer preserving exact outputs only when they contain facts, paths, failures, verification, code changes, or resume-critical details not captured by the mechanical head/tail stub.",
+        "session": {
+            "title": meta.title,
+            "agent": meta.agent.display_name(),
+            "project": meta.project_path,
+            "message_count": meta.message_count,
+            "tokens_used": meta.tokens_used,
+        },
+        "detail_count": details.len(),
+        "kind_counts": kind_counts,
+    })
+}
+
+fn detail_jev_question(detail: &MarkdownDetail) -> serde_json::Value {
+    let output = fenced_section(&detail.body, "Output")
+        .map(|(_, _, output)| output)
+        .unwrap_or_default();
+    serde_json::json!({
+        "type": "noul",
+        "instructions": format!(
+            "The full Output of Markdown detail {} ({}, {} chars) should remain verbatim for LLM compression. Summary: {}\nHead:\n{}\nTail:\n{}",
+            detail.id,
+            detail.kind.as_str(),
+            detail.chars,
+            char_slice(&detail.summary, JEV_SUMMARY_PREVIEW_CHARS, 0),
+            char_slice(&output, JEV_HEAD_PREVIEW_CHARS, 0),
+            char_slice(&output, 0, JEV_TAIL_PREVIEW_CHARS),
+        )
+    })
+}
+
+fn jev_noul_answer(json: &serde_json::Value, key: &str) -> f64 {
+    json.pointer(&format!("/answers/{key}/noul"))
+        .and_then(|value| value.as_f64())
+        .or_else(|| {
+            json.pointer(&format!("/answers/{key}/score"))
+                .and_then(|value| value.as_f64())
+        })
+        .unwrap_or(1.0)
+}
+
+fn invoke_detail_jev_batch(
+    config: &JevConfig,
+    meta: &SessionMeta,
+    all_details: &[MarkdownDetail],
+    batch: &[MarkdownDetail],
+) -> anyhow::Result<serde_json::Value> {
+    let endpoint = jev_endpoint(&config.api_url);
+    let questions = batch
+        .iter()
+        .map(|detail| (format!("full_{}", detail.id), detail_jev_question(detail)))
+        .collect::<serde_json::Map<_, _>>();
+    let body = serde_json::json!({
+        "model": config.model,
+        "state": build_detail_jev_state(meta, all_details),
+        "questions": questions,
+    });
+    let text = post_jev_json(config, &endpoint, &body)?;
+    let json_text = text.trim_start_matches('\u{feff}');
+    let json: serde_json::Value = serde_json::from_str(json_text).map_err(|error| {
+        anyhow::anyhow!(
+            "{} returned non-JSON response: {error}; raw head: {}",
+            config.provider.display_name(),
+            char_slice(json_text.trim(), 600, 0)
+        )
+    })?;
+    if !json.get("answers").is_some_and(|value| value.is_object()) {
+        return Err(anyhow::anyhow!(
+            "{} response missing answers",
+            config.provider.display_name()
+        ));
+    }
+    Ok(json)
+}
+
+fn jev_body_len(
+    config: &JevConfig,
+    meta: &SessionMeta,
+    all_details: &[MarkdownDetail],
+    batch: &[MarkdownDetail],
+) -> usize {
+    let questions = batch
+        .iter()
+        .map(|detail| (format!("full_{}", detail.id), detail_jev_question(detail)))
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::json!({
+        "model": config.model,
+        "state": build_detail_jev_state(meta, all_details),
+        "questions": questions,
+    })
+    .to_string()
+    .len()
+}
+
+fn split_jev_batches(
+    config: &JevConfig,
+    meta: &SessionMeta,
+    all_details: &[MarkdownDetail],
+    candidates: &[MarkdownDetail],
+    stats: &mut DetailCompactionStats,
+) -> Vec<Vec<MarkdownDetail>> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    for detail in candidates {
+        let single = std::slice::from_ref(detail);
+        if jev_body_len(config, meta, all_details, single) > JEV_REQUEST_CHAR_BUDGET {
+            stats.third_step_jev_skipped_by_budget += 1;
+            continue;
+        }
+        let mut trial = current.clone();
+        trial.push(detail.clone());
+        if !current.is_empty()
+            && jev_body_len(config, meta, all_details, &trial) > JEV_REQUEST_CHAR_BUDGET
+        {
+            batches.push(current);
+            current = vec![detail.clone()];
+        } else {
+            current = trial;
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+fn compact_markdown_details(
+    markdown: &str,
+    meta: &SessionMeta,
+    jev: Option<&JevConfig>,
+) -> anyhow::Result<DetailCompactionResult> {
+    let details = parse_markdown_details(markdown);
+    let mut stats = DetailCompactionStats {
+        original_chars: markdown.len(),
+        ..Default::default()
+    };
+    let mut decisions = details
+        .into_iter()
+        .map(|detail| mechanical_detail_decision(detail, &mut stats))
+        .collect::<Vec<_>>();
+    let candidates = decisions
+        .iter()
+        .filter(|decision| decision.uncertain_for_jev)
+        .map(|decision| decision.detail.clone())
+        .collect::<Vec<_>>();
+    stats.third_step_jev_candidates = candidates.len();
+    if let Some(config) = jev {
+        let all_details = decisions
+            .iter()
+            .map(|decision| decision.detail.clone())
+            .collect::<Vec<_>>();
+        let batches = split_jev_batches(config, meta, &all_details, &candidates, &mut stats);
+        stats.third_step_jev_batches = batches.len();
+        for batch in batches {
+            let answers = invoke_detail_jev_batch(config, meta, &all_details, &batch)?;
+            for detail in batch {
+                let score = jev_noul_answer(&answers, &format!("full_{}", detail.id));
+                if score >= 0.5 {
+                    if let Some(decision) = decisions.iter_mut().find(|d| d.detail.id == detail.id)
+                    {
+                        decision.replacement = Some(detail_full(&detail));
+                        decision.uncertain_for_jev = false;
+                    }
+                    stats.third_step_jev_kept_full += 1;
+                } else {
+                    stats.third_step_jev_dropped_full += 1;
+                }
+            }
+        }
+    }
+    let compacted = apply_detail_decisions(markdown, &decisions);
+    let report = format!(
+        "# 基础压缩处理报告\n\n- 原始 Markdown：{} chars\n- 第一步机械删除：{} blocks，{} chars\n- 第二步 Output 内部裁剪：{} blocks，约节省 {} chars\n- 第三步 Jev 候选：{} blocks\n- 第三步 Jev 批次：{} batches\n- 第三步 Jev 保留全文：{} blocks\n- 第三步 Jev 继续裁剪：{} blocks\n- thirdStepJevSkippedByBudget：{}\n- LLM 输入 Markdown：{} chars\n",
+        stats.original_chars,
+        stats.first_step_deleted,
+        stats.first_step_deleted_chars,
+        stats.second_step_cropped,
+        stats.second_step_saved_chars,
+        stats.third_step_jev_candidates,
+        stats.third_step_jev_batches,
+        stats.third_step_jev_kept_full,
+        stats.third_step_jev_dropped_full,
+        stats.third_step_jev_skipped_by_budget,
+        compacted.len(),
+    );
+    Ok(DetailCompactionResult {
+        markdown: compacted,
+        report,
+        stats,
+    })
+}
+
+fn detail_full(detail: &MarkdownDetail) -> String {
+    format!(
+        "<details><summary>{}</summary>\n\n{}\n\n</details>",
+        detail.summary, detail.body
+    )
+}
+
+fn jev_endpoint(raw: &str) -> String {
+    let raw = raw.trim().trim_end_matches('/');
+    if raw.ends_with("/v1/systemone") {
+        raw.to_string()
+    } else {
+        format!("{raw}/v1/systemone")
+    }
+}
+
+fn llm_endpoint(raw: &str) -> String {
+    let raw = raw.trim().trim_end_matches('/');
+    if raw.ends_with("/chat/completions") {
+        raw.to_string()
+    } else {
+        format!("{raw}/v1/chat/completions")
+    }
+}
+
+fn default_single_compression_strategy() -> String {
+    wake_core::services::compression::default_single_strategy()
+}
+
+fn default_memory_generation_strategy() -> String {
+    wake_core::services::compression::default_memory_generation_strategy()
+}
+
+fn default_multi_compression_strategy() -> String {
+    wake_core::services::compression::default_multi_strategy()
+}
+
+fn default_tag_compression_strategy() -> String {
+    wake_core::services::compression::default_tag_strategy()
+}
+
+fn default_specific_tag_compression_strategy(tag: &str) -> String {
+    wake_core::services::compression::default_specific_tag_strategy(tag)
+}
+
+fn compression_strategy_tag_key(tag: &str) -> String {
+    format!("compression_strategy_tag_{}", tag.replace('-', "_"))
+}
+
+fn compression_strategy_tag_button_id(tag: &str) -> &'static str {
+    match tag {
+        "development" => "compression-strategy-tag-development",
+        "design" => "compression-strategy-tag-design",
+        "testing" => "compression-strategy-tag-testing",
+        "research" => "compression-strategy-tag-research",
+        "refactor" => "compression-strategy-tag-refactor",
+        "bugfix" => "compression-strategy-tag-bugfix",
+        "product-decision" => "compression-strategy-tag-product-decision",
+        "paused" => "compression-strategy-tag-paused",
+        "completed" => "compression-strategy-tag-completed",
+        "continue-later" => "compression-strategy-tag-continue-later",
+        _ => "compression-strategy-tag-unknown",
+    }
+}
+
+pub(crate) fn compression_strategy_tag_options() -> Vec<(&'static str, &'static str)> {
+    SESSION_TAGS
+        .iter()
+        .map(|tag| (*tag, session_tag_label(tag)))
+        .collect()
+}
+
+#[cfg(test)]
+fn format_tag_strategy_for_prompt(settings: &CompressionSettings, tags: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str("## 通用标签策略\n");
+    out.push_str(settings.tag_strategy.trim());
+    out.push_str("\n\n## 当前会话命中的标签专用策略\n");
+    let mut matched = false;
+    for tag in tags {
+        if let Some(strategy) = settings.tag_specific_strategies.get(tag) {
+            let strategy = strategy.trim();
+            if !strategy.is_empty() {
+                matched = true;
+                out.push_str(&format!(
+                    "- #{}：{}\n",
+                    session_tag_label(tag),
+                    strategy.replace('\n', "\n  ")
+                ));
+            }
+        }
+    }
+    if !matched {
+        out.push_str("- 无\n");
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompressionExportMode {
+    Plain,
+    WithMemory,
+}
+
+impl CompressionExportMode {
+    fn file_suffix(self) -> &'static str {
+        match self {
+            Self::Plain => "compressed",
+            Self::WithMemory => "compressed-memory",
+        }
+    }
+
+    fn start_message(self) -> &'static str {
+        match self {
+            Self::Plain => "正在准备压缩导出…",
+            Self::WithMemory => "正在准备压缩并生成记忆…",
+        }
+    }
+
+    fn llm_message(self) -> &'static str {
+        match self {
+            Self::Plain => "LLM 正在生成压缩文档…",
+            Self::WithMemory => "LLM 正在生成压缩文档和记忆候选…",
+        }
+    }
+
+    #[cfg(test)]
+    fn task_title(self) -> &'static str {
+        match self {
+            Self::Plain => "请按 ContextOS 策略压缩一个 agent 对话，输出 Markdown。",
+            Self::WithMemory => {
+                "请按 ContextOS 策略压缩一个 agent 对话，输出 Markdown，并在末尾输出 contextos-json 记忆候选。"
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn strategy<'a>(self, settings: &'a CompressionSettings) -> &'a str {
+        match self {
+            Self::Plain => &settings.single_strategy,
+            Self::WithMemory => &settings.memory_generation_strategy,
+        }
+    }
+
+    fn success_title(self) -> &'static str {
+        match self {
+            Self::Plain => "压缩导出完成",
+            Self::WithMemory => "压缩并生成记忆完成",
+        }
+    }
+}
+
+fn default_relation_compression_strategy() -> String {
+    wake_core::services::compression::default_relation_strategy()
+}
+
+fn post_jev_json(
+    config: &JevConfig,
+    endpoint: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let id = JEV_CURL_FALLBACK_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir();
+    let stem = format!("contextos-jev-pwsh-{id}-{}", std::process::id());
+    let body_path = dir.join(format!("{stem}.json"));
+    let script_path = dir.join(format!("{stem}.ps1"));
+    let response_path = dir.join(format!("{stem}.out"));
+    std::fs::write(&body_path, serde_json::to_vec(body)?)?;
+    std::fs::write(
+        &script_path,
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $body = Get-Content -LiteralPath '{}' -Raw\n\
+             $headers = @{{ Authorization = 'Bearer {}'; 'Content-Type' = 'application/json' }}\n\
+             try {{\n\
+               $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)\n\
+               $response = Invoke-WebRequest -Method Post -Uri '{}' -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $bodyBytes -TimeoutSec {} -UseBasicParsing\n\
+               Set-Content -LiteralPath '{}' -Value $response.Content -Encoding UTF8\n\
+             }} catch {{\n\
+               $message = $_.Exception.Message\n\
+               if ($_.ErrorDetails -and $_.ErrorDetails.Message) {{ $message = \"$message`n$($_.ErrorDetails.Message)\" }}\n\
+               Set-Content -LiteralPath '{}' -Value $message -Encoding UTF8\n\
+               exit 1\n\
+             }}\n",
+            body_path.to_string_lossy().replace('\'', "''"),
+            config.api_key.trim().replace('\'', "''"),
+            endpoint.replace('\'', "''"),
+            config.timeout_secs,
+            response_path.to_string_lossy().replace('\'', "''"),
+            response_path.to_string_lossy().replace('\'', "''"),
+        ),
+    )?;
+    let output = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script_path)
+        .output();
+    let _ = std::fs::remove_file(&script_path);
+    let _ = std::fs::remove_file(&body_path);
+    let output = output?;
+    let response = std::fs::read_to_string(&response_path)
+        .unwrap_or_default()
+        .trim_start_matches('\u{feff}')
+        .to_string();
+    let _ = std::fs::remove_file(&response_path);
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Jev PowerShell request failed: {}{}{}",
+            response.trim(),
+            if output.stderr.is_empty() { "" } else { "\n" },
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
+fn truncate_for_llm(text: &str, limit: usize) -> String {
+    let Some((end, _)) = text.char_indices().nth(limit) else {
+        return text.to_string();
+    };
+    format!(
+        "{}\n\n[原始会话过长，已截断到前 {limit} 字符。]",
+        &text[..end]
+    )
+}
+
+#[cfg(test)]
+fn call_openai_compatible_llm(
+    settings: &CompressionSettings,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    let endpoint = llm_endpoint(&settings.llm_api_url);
+    let body = serde_json::json!({
+        "model": settings.llm_model.trim(),
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是 ContextOS 的压缩引擎。你只根据输入内容压缩，不编造事实；保留可接手的工程上下文。"
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.2
+    });
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(settings.llm_timeout_secs))
+        .build()?
+        .post(endpoint)
+        .bearer_auth(settings.llm_api_key.trim())
+        .header(reqwest::header::USER_AGENT, "ContextOS/0.8.0")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&body)
+        .send()?;
+    let status = response.status();
+    let text = response.text()?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("LLM API returned {status}: {text}"));
+    }
+    let json: serde_json::Value = serde_json::from_str(&text)?;
+    json.pointer("/choices/0/message/content")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .ok_or_else(|| anyhow::anyhow!("LLM API response missing choices[0].message.content"))
+}
+
+#[cfg(test)]
+fn extract_contextos_json(markdown: &str) -> Option<&str> {
+    if let Some(json) = extract_fenced_block(markdown, "```contextos-json") {
+        return Some(json);
+    }
+    extract_memory_candidates_section_json(markdown)
+}
+
+#[cfg(test)]
+fn extract_fenced_block<'a>(markdown: &'a str, marker: &str) -> Option<&'a str> {
+    let start = markdown.rfind(marker)?;
+    extract_fenced_block_from(markdown, start, marker)
+}
+
+#[cfg(test)]
+fn extract_memory_candidates_section_json(markdown: &str) -> Option<&str> {
+    let heading = find_contextos_memory_candidates_heading(markdown)?;
+    let section = &markdown[heading..];
+    let fence = section.find("```")? + heading;
+    extract_any_fenced_block_from(markdown, fence)
+}
+
+#[cfg(test)]
+fn find_contextos_memory_candidates_heading(markdown: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let title = trimmed.trim_start_matches('#').trim();
+            if title == "ContextOS 记忆候选" {
+                return Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
+#[cfg(test)]
+fn extract_any_fenced_block_from(markdown: &str, start: usize) -> Option<&str> {
+    let after_open = &markdown[start + "```".len()..];
+    let content_start = after_open.find('\n').map_or(0, |ix| ix + 1);
+    let content = &after_open[content_start..];
+    let end = content.find("```")?;
+    Some(content[..end].trim())
+}
+
+#[cfg(test)]
+fn extract_fenced_block_from<'a>(markdown: &'a str, start: usize, marker: &str) -> Option<&'a str> {
+    let after_marker = &markdown[start + marker.len()..];
+    let after_newline = after_marker
+        .strip_prefix("\r\n")
+        .or_else(|| after_marker.strip_prefix('\n'))
+        .unwrap_or(after_marker);
+    let end = after_newline.find("```")?;
+    Some(after_newline[..end].trim())
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct ContextosMemoryCandidates {
+    #[serde(default)]
+    memory_candidates: Vec<ContextosMemoryCandidate>,
+}
+
+type ContextosMemoryCandidate = wake_core::services::compression::MemoryCandidate;
+
+#[cfg(test)]
+fn parse_contextos_memory_candidates(
+    markdown: &str,
+) -> anyhow::Result<Vec<ContextosMemoryCandidate>> {
+    let json = extract_contextos_json(markdown).ok_or_else(|| {
+        anyhow::anyhow!(
+            "LLM 输出缺少 contextos-json 块，也未找到“ContextOS 记忆候选”标题后的 JSON 代码块"
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    if !value
+        .get("memory_candidates")
+        .is_some_and(|value| value.is_array())
+    {
+        return Err(anyhow::anyhow!(
+            "ContextOS 记忆候选 JSON 缺少 memory_candidates 数组"
+        ));
+    }
+    let parsed: ContextosMemoryCandidates = serde_json::from_value(value)?;
+    Ok(parsed.memory_candidates)
+}
+
+fn contextos_memory_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("memories")
+}
+
+fn safe_file_stem(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if ch.is_whitespace() || ch == '.' {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-');
+    if out.is_empty() {
+        "memory".to_string()
+    } else {
+        out.chars().take(48).collect()
+    }
+}
+
+fn render_memory_candidate_markdown(
+    candidate: &ContextosMemoryCandidate,
+    meta: &SessionMeta,
+) -> String {
+    wake_core::services::compression::render_memory_candidate_markdown(
+        candidate,
+        Some(&meta.title),
+        Some(&meta.project_path),
+    )
+}
+
+fn empty_dash(value: &str) -> &str {
+    let value = value.trim();
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
+#[cfg(test)]
+fn push_markdown_section(out: &mut String, title: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    out.push_str(&format!("## {title}\n\n{value}\n\n"));
+}
+
+fn write_contextos_memory_candidate(
+    candidate: &ContextosMemoryCandidate,
+    meta: &SessionMeta,
+) -> anyhow::Result<PathBuf> {
+    let dir = contextos_memory_dir();
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join(format!(
+        "contextos-{}-{}-{}-{}.md",
+        safe_file_stem(candidate.kind_label()),
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        if meta.project_name.is_empty() {
+            "unknown-project".to_string()
+        } else {
+            safe_file_stem(&meta.project_name)
+        },
+        safe_file_stem(&candidate.title_or_fallback())
+    ));
+    std::fs::write(&file, render_memory_candidate_markdown(candidate, meta))?;
+    Ok(file)
+}
+
+#[cfg(test)]
+fn compress_markdown_with_llm(
+    settings: &CompressionSettings,
+    meta: &SessionMeta,
+    markdown: &str,
+    tags: &[String],
+    relationship_context: &str,
+    jev_reference: Option<&str>,
+    mode: CompressionExportMode,
+) -> anyhow::Result<String> {
+    if settings.llm_api_url.trim().is_empty()
+        || settings.llm_api_key.trim().is_empty()
+        || settings.llm_model.trim().is_empty()
+    {
+        return Err(anyhow::anyhow!(
+            "请先在设置 > 压缩策略里配置 LLM API URL、Key 和 Model"
+        ));
+    }
+    let tag_labels = if tags.is_empty() {
+        "无".to_string()
+    } else {
+        tags.iter()
+            .map(|tag| format!("#{}", session_tag_label(tag)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let tag_strategy = format_tag_strategy_for_prompt(settings, tags);
+    let jev_reference = jev_reference.unwrap_or("未启用或未生成。");
+    let prompt = format!(
+        r#"# 任务
+{task_title}
+
+# 压缩策略
+{strategy}
+
+# 标签策略
+{tag_strategy}
+
+# 关系策略
+{relation_strategy}
+
+# 会话元信息
+- 标题：{title}
+- Agent：{agent}
+- 项目：{project}
+- 标签：{tags}
+- 关系：{relationship_context}
+
+# Jev 辅助摘取/评分参考
+{jev_reference}
+
+# 原始会话 Markdown
+{markdown}
+"#,
+        task_title = mode.task_title(),
+        strategy = mode.strategy(settings),
+        tag_strategy = tag_strategy,
+        relation_strategy = settings.relation_strategy,
+        title = meta.title,
+        agent = meta.agent.display_name(),
+        project = if meta.project_path.is_empty() {
+            "(unknown)"
+        } else {
+            &meta.project_path
+        },
+        tags = tag_labels,
+        relationship_context = relationship_context,
+        jev_reference = truncate_for_llm(jev_reference, settings.llm_input_limit_chars),
+        markdown = truncate_for_llm(markdown, settings.llm_input_limit_chars),
+    );
+    call_openai_compatible_llm(settings, &prompt)
 }
 
 // ---------------- 后台事件桥 ----------------
@@ -217,20 +1663,15 @@ enum BgEvent {
     RemoteSyncDone,
     /// remotes/ 镜像的磁盘占用算好了(启动、同步收工、删 host 后各算一次)
     RemoteCacheBytes(u64),
-}
-
-struct ChannelEvents(futures::channel::mpsc::UnboundedSender<BgEvent>);
-
-impl ScanEvents for ChannelEvents {
-    fn on_progress(&self, p: &ScanProgress) {
-        let _ = self.0.unbounded_send(BgEvent::Progress(p.clone()));
-    }
-    fn on_sessions_changed(&self) {
-        let _ = self.0.unbounded_send(BgEvent::Changed);
-    }
-    fn on_rescan_needed(&self) {
-        let _ = self.0.unbounded_send(BgEvent::RescanNeeded);
-    }
+    WorkspaceChangesChanged,
+    /// 托管 Laya 状态变化；业务状态保存在 wake-core，这里只触发重绘。
+    LayaRuntimeChanged,
+    /// 托管 Laya 后台命令收工后的用户通知。
+    LayaRuntimeFinished(Result<String, String>),
+    /// 外部 SystemOne 能力探测结果。
+    LayaExternalProbeFinished(
+        Result<wake_core::services::laya_runtime::LayaExternalCapabilities, String>,
+    ),
 }
 
 // ---------------- 会话列表 delegate ----------------
@@ -241,6 +1682,7 @@ const SESSION_TITLE_MAX_WIDTH: usize = 42;
 /// 会话流首批与后续每页的条数。列表组件会在距末尾 20 行时预取下一页。
 const SESSION_PAGE_SIZE: i64 = 100;
 static SESSION_PAGINATION_GENERATION: AtomicU64 = AtomicU64::new(1);
+static JEV_CURL_FALLBACK_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionGroup {
@@ -261,7 +1703,8 @@ struct SessionPagination {
 fn session_group_timestamp(session: &SessionMeta, sort: SortKey) -> i64 {
     match sort {
         SortKey::Created => session.created_at,
-        SortKey::Updated | SortKey::Messages => session.updated_at,
+        // Tokens 按用量排,日期分组没意义,归到 updated 桶只出单组
+        SortKey::Updated | SortKey::Messages | SortKey::Tokens => session.updated_at,
     }
 }
 
@@ -344,6 +1787,8 @@ fn build_row_groups_at(
 fn same_session_query(left: &SessionFilter, right: &SessionFilter) -> bool {
     left.agents == right.agents
         && left.project_paths == right.project_paths
+        && left.tags == right.tags
+        && left.models == right.models
         && left.updated_since == right.updated_since
         && left.ignore_pins == right.ignore_pins
         && left.favorite_only == right.favorite_only
@@ -357,6 +1802,12 @@ fn same_session_query(left: &SessionFilter, right: &SessionFilter) -> bool {
 fn session_matches_filter(session: &SessionMeta, filter: &SessionFilter) -> bool {
     (filter.agents.is_empty() || filter.agents.contains(&session.agent))
         && (filter.project_paths.is_empty() || filter.project_paths.contains(&session.project_path))
+        && filter.tags.is_empty()
+        && (filter.models.is_empty()
+            || session
+                .model
+                .as_deref()
+                .is_some_and(|m| filter.models.contains(&m.to_string())))
         && filter
             .updated_since
             .is_none_or(|since| session.updated_at >= since)
@@ -380,6 +1831,7 @@ pub struct SessionsDelegate {
     rows: Vec<SessionListRow>,
     children: HashMap<String, Vec<SessionMeta>>,
     child_counts: HashMap<String, i64>,
+    tags: HashMap<String, Vec<String>>,
     expanded: HashSet<String>,
     groups: Vec<SessionGroup>,
     grouped_on: NaiveDate,
@@ -406,6 +1858,7 @@ impl SessionsDelegate {
             rows: Vec::new(),
             children: HashMap::new(),
             child_counts: HashMap::new(),
+            tags: HashMap::new(),
             expanded: HashSet::new(),
             groups: Vec::new(),
             grouped_on,
@@ -429,8 +1882,14 @@ impl SessionsDelegate {
         } else {
             HashMap::new()
         };
+        let keys = sessions
+            .iter()
+            .map(|session| session.key.clone())
+            .collect::<Vec<_>>();
+        let tags = store.session_tags_for(&keys).unwrap_or_default();
         let mut delegate = Self::new(sessions, filter.sort, filter.ascending);
         delegate.child_counts = child_counts;
+        delegate.tags = tags;
         delegate.pagination = Some(SessionPagination {
             store,
             total: total.max(0),
@@ -511,11 +1970,21 @@ impl SessionsDelegate {
             .iter()
             .map(|session| session.key.clone())
             .collect();
-        self.sessions.extend(
-            page.into_iter()
-                .filter(|session| keys.insert(session.key.clone())),
-        );
+        let added = page
+            .into_iter()
+            .filter(|session| keys.insert(session.key.clone()))
+            .collect::<Vec<_>>();
         if let Some(pagination) = &self.pagination {
+            let added_keys = added
+                .iter()
+                .map(|session| session.key.clone())
+                .collect::<Vec<_>>();
+            self.tags.extend(
+                pagination
+                    .store
+                    .session_tags_for(&added_keys)
+                    .unwrap_or_default(),
+            );
             if pagination.filter.roots_only {
                 self.child_counts = pagination
                     .store
@@ -523,6 +1992,7 @@ impl SessionsDelegate {
                     .unwrap_or_default();
             }
         }
+        self.sessions.extend(added);
         self.rebuild_rows();
     }
 
@@ -547,6 +2017,12 @@ impl SessionsDelegate {
         self.children.clear();
         for key in &self.expanded {
             if let Ok(children) = store.list_children(key, &filter) {
+                let child_keys = children
+                    .iter()
+                    .map(|session| session.key.clone())
+                    .collect::<Vec<_>>();
+                self.tags
+                    .extend(store.session_tags_for(&child_keys).unwrap_or_default());
                 self.children.insert(key.clone(), children);
             }
         }
@@ -566,6 +2042,16 @@ impl SessionsDelegate {
             let Ok(children) = pagination.store.list_children(key, &pagination.filter) else {
                 return false;
             };
+            let child_keys = children
+                .iter()
+                .map(|session| session.key.clone())
+                .collect::<Vec<_>>();
+            self.tags.extend(
+                pagination
+                    .store
+                    .session_tags_for(&child_keys)
+                    .unwrap_or_default(),
+            );
             self.expanded.insert(key.to_string());
             self.children.insert(key.to_string(), children);
         }
@@ -650,6 +2136,7 @@ impl ListDelegate for SessionsDelegate {
         let child_count = row.child_count;
         let expanded = row.expanded;
         let depth = row.depth;
+        let row_tags = self.tags.get(&s.key).cloned().unwrap_or_default();
         let child_line_color = theme.muted_foreground.opacity(0.38);
         // 2px 线的中心与父行 15px Grok 图标的 11.5px 中轴一致。
         let child_line_left = SPACE_XS + px(6.5);
@@ -830,6 +2317,13 @@ impl ListDelegate for SessionsDelegate {
                                 .when(!s.host.is_empty(), |this| {
                                     this.child(host_badge(&s.host, &theme))
                                 })
+                                .children(row_tags.into_iter().take(3).map(|tag| {
+                                    outline_badge(
+                                        format!("#{}", session_tag_label(&tag)),
+                                        theme.primary,
+                                    )
+                                    .into_any_element()
+                                }))
                                 .when(show_chevron, |this| {
                                     this.child(
                                         div()
@@ -966,8 +2460,36 @@ mod session_group_tests {
     use super::{
         clip_tool_text, load_visible_transcript, non_blank_tool_text, same_session_query,
         session_group_label, session_matches_filter, toggle_expanded_row, tool_cluster_heading,
-        visible_git_branch, SessionsDelegate, SESSION_PAGE_SIZE,
+        truncate_for_llm, visible_git_branch, SessionsDelegate, SESSION_PAGE_SIZE,
     };
+
+    #[test]
+    fn llm_input_limit_counts_characters_instead_of_utf8_bytes() {
+        let text = "中文测试";
+
+        assert_eq!(truncate_for_llm(text, 4), text);
+        assert_eq!(
+            truncate_for_llm(text, 3),
+            "中文测\n\n[原始会话过长，已截断到前 3 字符。]"
+        );
+    }
+
+    #[test]
+    fn compression_strategy_editor_has_explicit_save_footer() {
+        let source = include_str!("workbench.rs");
+        let start = source
+            .rfind("pub(crate) fn open_compression_strategy_form")
+            .expect("compression strategy editor exists");
+        let end = source[start..]
+            .find("fn open_compression_tag_strategies_form")
+            .map(|offset| start + offset)
+            .expect("tag strategy editor follows compression strategy editor");
+        let editor = &source[start..end];
+
+        assert!(editor.contains("DialogFooter::new"));
+        assert!(editor.contains("compression-strategy-cancel"));
+        assert!(editor.contains("compression-strategy-save"));
+    }
 
     struct FailingAdapter;
 
@@ -1558,7 +3080,13 @@ fn visible_git_branch(branch: Option<&str>) -> Option<&str> {
 fn load_visible_transcript(
     adapters: &[Box<dyn AgentAdapter>],
     meta: &SessionMeta,
-) -> Result<Vec<TranscriptMessage>, String> {
+) -> Result<
+    (
+        Vec<TranscriptMessage>,
+        Vec<wake_core::models::SessionUsageEvent>,
+    ),
+    String,
+> {
     // adapter_for 按文件路径挑实例：自定义 location 的会话必须由拥有其根的
     // 实例解析；完全找不到对应 agent 时保留可读错误，不再静默变成空详情。
     let adapter = adapter_for(adapters, meta.agent, &meta.file_path).ok_or_else(|| {
@@ -1576,18 +3104,25 @@ fn load_visible_transcript(
         )
     })?;
 
-    Ok(transcript
-        .mainline
-        .into_iter()
-        .filter(|message| {
-            message.kind != MessageKind::Meta
-                && (!message.text.trim().is_empty()
-                    || !message.tool_calls.is_empty()
-                    || message.thinking.is_some()
-                    || !message.images.is_empty()
-                    || message.kind == MessageKind::CompactSummary)
-        })
-        .collect())
+    let ParsedTranscript {
+        mainline,
+        usage_events,
+        ..
+    } = transcript;
+    Ok((
+        mainline
+            .into_iter()
+            .filter(|message| {
+                message.kind != MessageKind::Meta
+                    && (!message.text.trim().is_empty()
+                        || !message.tool_calls.is_empty()
+                        || message.thinking.is_some()
+                        || !message.images.is_empty()
+                        || message.kind == MessageKind::CompactSummary)
+            })
+            .collect(),
+        usage_events,
+    ))
 }
 
 fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
@@ -1596,9 +3131,69 @@ fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
     }
 }
 
+const SESSION_TAGS: &[&str] = &[
+    "development",
+    "design",
+    "testing",
+    "research",
+    "refactor",
+    "bugfix",
+    "product-decision",
+    "paused",
+    "completed",
+    "continue-later",
+];
+
+const SESSION_RELATIONS: &[&str] = &["continues", "branches", "blocks", "resolves", "related"];
+
+fn session_tag_label(tag: &str) -> &'static str {
+    match tag {
+        "development" => "开发",
+        "design" => "设计",
+        "testing" => "测试",
+        "research" => "研究",
+        "refactor" => "重构",
+        "bugfix" => "修复",
+        "product-decision" => "产品决策",
+        "paused" => "暂停",
+        "completed" => "已完成",
+        "continue-later" => "稍后继续",
+        _ => "标签",
+    }
+}
+
+fn session_relation_label(relation: &str) -> &'static str {
+    match relation {
+        "continues" => "继续",
+        "branches" => "分支",
+        "blocks" => "阻塞",
+        "resolves" => "解决",
+        "related" => "相关",
+        _ => "关系",
+    }
+}
+
+fn session_relation_icon(relation: &str) -> &'static str {
+    match relation {
+        "continues" => "icons/chevron-right.svg",
+        "branches" => "icons/git-branch.svg",
+        "blocks" => "icons/circle-x.svg",
+        "resolves" => "icons/check.svg",
+        "related" => "icons/link.svg",
+        _ => "icons/link.svg",
+    }
+}
+
 struct DetailState {
     load_id: u64,
     meta: SessionMeta,
+    tags: HashSet<String>,
+    link_parent_count: i64,
+    link_child_count: i64,
+    link_parents: Vec<SessionRelation>,
+    link_children: Vec<SessionRelation>,
+    link_parent_tree: Vec<SessionRelationNode>,
+    link_child_tree: Vec<SessionRelationNode>,
     /// Resolved in the background independently of the transcript; None while pending.
     source_path: Option<String>,
     /// Its lifetime is also the inline copy feedback; copying again resets the timer.
@@ -1610,12 +3205,19 @@ struct DetailState {
     error: Option<SharedString>,
     /// 逐消息不等高列表(gpui 原生 ListState,惰性测量)
     msg_list: gpui::ListState,
+    /// 轮次模型：右侧目录和主阅读区筛选都从这里派生。
+    reader_turns: Vec<DetailTurn>,
+    /// 当前筛选下，ListState 行下标到原始 transcript 下标的映射。
+    reader_visible_indices: Vec<usize>,
     /// 展开的工具簇(按消息在 transcript 里的下标)
     expanded_tools: HashSet<usize>,
     /// 展开的 Thinking。与工具簇分开存，避免其中一个把另一个一起展开。
     expanded_thinking: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
+    /// 当前会话内搜索命中消息；搜索只改变阅读定位，不改变源会话。
+    search_matches: Vec<usize>,
+    search_cursor: usize,
     /// 与 transcript 同下标；原始字节只保留在 Arc<Image> 内，避免双份内存。
     images: Vec<Vec<ImageSlot>>,
     /// 放大预览中的图片：(消息下标, 消息内图片下标)。
@@ -1623,6 +3225,182 @@ struct DetailState {
     /// 放大预览操作的短暂就地反馈。绑定具体图片，避免切换预览后把上一张的
     /// 成功状态带过来；generation 让较早的复位计时器不能清掉较新的反馈。
     image_action_feedback: [Option<ImageActionFeedback>; 2],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailOutlineMode {
+    All,
+    Conversation,
+    Changes,
+}
+
+#[derive(Clone, Default)]
+struct DetailTurn {
+    index: usize,
+    question: Option<usize>,
+    reply: Option<usize>,
+    step_messages: Vec<usize>,
+    changed_messages: Vec<usize>,
+    tokens_used: i64,
+    request_count: usize,
+}
+
+fn build_detail_turns(
+    messages: &[TranscriptMessage],
+    usage_events: &[wake_core::models::SessionUsageEvent],
+) -> Vec<DetailTurn> {
+    let mut turns = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.role == MessageRole::User {
+            turns.push(DetailTurn {
+                index: turns.len(),
+                question: Some(index),
+                ..Default::default()
+            });
+        } else if turns.is_empty() {
+            turns.push(DetailTurn {
+                index: 0,
+                ..Default::default()
+            });
+        }
+        let turn = turns.last_mut().expect("detail turn exists");
+        if message.role == MessageRole::Assistant {
+            if !message.text.trim().is_empty() {
+                turn.reply = Some(index);
+            }
+            if !message.tool_calls.is_empty() || message.thinking.is_some() {
+                turn.step_messages.push(index);
+            }
+            if transcript_message_is_change(message) {
+                turn.changed_messages.push(index);
+            }
+        }
+    }
+    let question_indices = turns
+        .iter()
+        .map(|turn| turn.question.unwrap_or(0))
+        .collect::<Vec<_>>();
+    let turn_starts = turns
+        .iter()
+        .enumerate()
+        .map(|(turn_index, turn)| {
+            turn.question
+                .and_then(|index| messages.get(index))
+                .and_then(|message| message.timestamp)
+                .or_else(|| {
+                    let start_index = question_indices[turn_index];
+                    let end_index = question_indices
+                        .get(turn_index + 1)
+                        .copied()
+                        .unwrap_or(messages.len());
+                    messages[start_index..end_index]
+                        .iter()
+                        .find_map(|message| message.timestamp)
+                })
+        })
+        .collect::<Vec<_>>();
+    for turn_index in 0..turns.len() {
+        let start = turn_starts[turn_index];
+        let end = turn_starts.get(turn_index + 1).copied().flatten();
+        let Some(start) = start else { continue };
+        for event in usage_events {
+            let Some(timestamp) = event.timestamp else {
+                continue;
+            };
+            if timestamp >= start && end.is_none_or(|end| timestamp < end) {
+                let turn = &mut turns[turn_index];
+                turn.tokens_used = turn.tokens_used.saturating_add(event.tokens_used);
+                turn.request_count = turn.request_count.saturating_add(1);
+            }
+        }
+    }
+    turns
+}
+
+fn detail_visible_indices(
+    messages: &[TranscriptMessage],
+    turns: &[DetailTurn],
+    mode: DetailOutlineMode,
+) -> Vec<usize> {
+    match mode {
+        DetailOutlineMode::All => (0..messages.len()).collect(),
+        DetailOutlineMode::Conversation => turns
+            .iter()
+            .flat_map(|turn| turn.question.into_iter().chain(turn.reply))
+            .collect(),
+        DetailOutlineMode::Changes => turns
+            .iter()
+            .flat_map(|turn| {
+                turn.question
+                    .into_iter()
+                    .chain(turn.changed_messages.iter().copied())
+            })
+            .collect(),
+    }
+}
+
+fn rebuild_detail_reader_view(detail: &mut DetailState, mode: DetailOutlineMode) {
+    detail.reader_visible_indices =
+        detail_visible_indices(&detail.transcript, &detail.reader_turns, mode);
+    detail.msg_list = gpui::ListState::new(
+        detail.reader_visible_indices.len(),
+        gpui::ListAlignment::Bottom,
+        px(512.),
+    );
+}
+
+fn transcript_message_is_change(message: &TranscriptMessage) -> bool {
+    message.tool_calls.iter().any(|call| {
+        let name = call.name.to_ascii_lowercase();
+        let input = call.input.as_deref().unwrap_or_default();
+        let output = call.output.as_deref().unwrap_or_default();
+        (name == "edit"
+            || name == "write"
+            || name.ends_with(".edit")
+            || name.ends_with(".write")
+            || name.contains("apply_patch")
+            || name.contains("file_change"))
+            || input.contains("*** Begin Patch")
+            || input.contains("diff --git")
+            || output.contains("*** Begin Patch")
+            || output.contains("diff --git")
+    })
+}
+
+fn tool_call_is_change(call: &ToolCallView) -> bool {
+    let name = call.name.to_ascii_lowercase();
+    let input = call.input.as_deref().unwrap_or_default();
+    let output = call.output.as_deref().unwrap_or_default();
+    (name == "edit"
+        || name == "write"
+        || name.ends_with(".edit")
+        || name.ends_with(".write")
+        || name.contains("apply_patch")
+        || name.contains("file_change"))
+        || input.contains("*** Begin Patch")
+        || input.contains("diff --git")
+        || output.contains("*** Begin Patch")
+        || output.contains("diff --git")
+}
+
+fn transcript_message_matches(message: &TranscriptMessage, query: &str) -> bool {
+    message.text.to_lowercase().contains(query)
+        || message
+            .thinking
+            .as_deref()
+            .is_some_and(|text| text.to_lowercase().contains(query))
+        || message.tool_calls.iter().any(|call| {
+            call.name.to_lowercase().contains(query)
+                || call.input_preview.to_lowercase().contains(query)
+                || call
+                    .input
+                    .as_deref()
+                    .is_some_and(|text| text.to_lowercase().contains(query))
+                || call
+                    .output
+                    .as_deref()
+                    .is_some_and(|text| text.to_lowercase().contains(query))
+        })
 }
 
 impl DetailState {
@@ -1633,14 +3411,25 @@ impl DetailState {
             source_path: None,
             copy_path_reset: None,
             meta,
+            tags: HashSet::new(),
+            link_parent_count: 0,
+            link_child_count: 0,
+            link_parents: Vec::new(),
+            link_children: Vec::new(),
+            link_parent_tree: Vec::new(),
+            link_child_tree: Vec::new(),
             transcript: Rc::new(Vec::new()),
             loading: true,
             error: None,
             // Bottom 对齐 = 聊天语义:打开落在最新消息,向上翻历史
             msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.)),
+            reader_turns: Vec::new(),
+            reader_visible_indices: Vec::new(),
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
             jump_seq,
+            search_matches: Vec::new(),
+            search_cursor: 0,
             images: Vec::new(),
             zoom: None,
             image_action_feedback: [None; 2],
@@ -2079,7 +3868,7 @@ mod detail_selection_tests {
 
 // ---------------- Workbench ----------------
 
-/// 主区当前显示的页:会话列表 + 阅读面,或两个整页目的地(侧栏底部入口)。一个
+/// 主区当前显示的页:会话列表 + 阅读面,或整页目的地(侧栏底部入口)。一个
 /// 字段承担互斥——三个 bool 各自"关掉别人"漏一处就是两页同时亮(2026-09-17
 /// /simplify)。Clean up 是叠在会话视图上的模式(侧栏筛选仍然作用于它),另有
 /// `cleanup.open`,进入时把这里落回 Sessions
@@ -2088,11 +3877,847 @@ enum Page {
     Sessions,
     Insights,
     Memory,
+    Skills,
+    Relationships,
+    Compressions,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InsightsSubview {
+    Overview,
+    WorkspaceChanges,
+    SessionChanges,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceChangeRange {
+    Days7,
+    Days30,
+    All,
+}
+
+impl WorkspaceChangeRange {
+    const ALL: [Self; 3] = [Self::Days7, Self::Days30, Self::All];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Days7 => "最近 7 天",
+            Self::Days30 => "最近 30 天",
+            Self::All => "全部时间",
+        }
+    }
+
+    fn since_ms(self) -> Option<i64> {
+        let days = match self {
+            Self::Days7 => 7,
+            Self::Days30 => 30,
+            Self::All => return None,
+        };
+        Some(Local::now().timestamp_millis() - days * 24 * 60 * 60 * 1000)
+    }
+}
+
+const WORKSPACE_CHANGE_MARKDOWN_PREVIEW_BYTES: usize = 32 * 1024;
+
+fn workspace_change_markdown_preview(text: &str) -> (&str, bool) {
+    if text.len() <= WORKSPACE_CHANGE_MARKDOWN_PREVIEW_BYTES {
+        return (text, false);
+    }
+    let mut end = WORKSPACE_CHANGE_MARKDOWN_PREVIEW_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+#[derive(Clone)]
+struct WorkspaceChangeFileGroup<'a> {
+    path: String,
+    events: Vec<&'a WorkspaceChangeEvent>,
+}
+
+#[derive(Clone)]
+struct WorkspaceChangeFolderGroup<'a> {
+    path: String,
+    files: Vec<WorkspaceChangeFileGroup<'a>>,
+}
+
+#[derive(Clone)]
+struct WorkspaceChangeTimelineGroup<'a> {
+    latest: i64,
+    earliest: i64,
+    folder: WorkspaceChangeFolderGroup<'a>,
+}
+
+fn session_change_activity_key(group: &SessionChangeSessionGroup) -> String {
+    let first_event_id = group
+        .folders
+        .iter()
+        .flat_map(|folder| folder.files.iter())
+        .flat_map(|file| file.events.iter())
+        .chain(group.root_files.iter().flat_map(|file| file.events.iter()))
+        .map(|event| event.id)
+        .min()
+        .unwrap_or_default();
+    format!("{}:{first_event_id}", group.session_key)
+}
+
+fn workspace_change_groups(
+    events: &[WorkspaceChangeEvent],
+ ) -> Vec<WorkspaceChangeTimelineGroup<'_>> {
+    const WINDOW_MS: i64 = 10 * 60 * 1000;
+    let mut sorted: Vec<_> = events.iter().collect();
+    sorted.sort_by(|left, right| {
+        right
+            .observed_at
+            .cmp(&left.observed_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+    let mut batches = Vec::<(i64, i64, Vec<&WorkspaceChangeEvent>)>::new();
+    for event in sorted {
+        let starts_batch = batches
+            .last()
+            .is_none_or(|(latest, _, _)| latest.saturating_sub(event.observed_at) >= WINDOW_MS);
+        if starts_batch {
+            batches.push((event.observed_at, event.observed_at, vec![event]));
+        } else if let Some((_, earliest, batch)) = batches.last_mut() {
+            *earliest = event.observed_at;
+            batch.push(event);
+        }
+    }
+
+    let mut groups = Vec::new();
+    for (latest, earliest, batch) in batches {
+        let mut by_folder = HashMap::<String, Vec<&WorkspaceChangeEvent>>::new();
+        for event in batch {
+            let folder = event
+                .file_path
+                .rsplit_once('/')
+                .map(|(parent, _)| parent)
+                .unwrap_or_default()
+                .to_string();
+            by_folder.entry(folder).or_default().push(event);
+        }
+        let mut folders = Vec::new();
+        for (path, folder_events) in by_folder {
+            let mut by_file = HashMap::<String, Vec<&WorkspaceChangeEvent>>::new();
+            for event in folder_events {
+                by_file.entry(event.file_path.clone()).or_default().push(event);
+            }
+            let mut files: Vec<_> = by_file
+                .into_iter()
+                .map(|(path, mut events)| {
+                    events.sort_by(|left, right| {
+                        right
+                            .observed_at
+                            .cmp(&left.observed_at)
+                            .then_with(|| right.id.cmp(&left.id))
+                    });
+                    WorkspaceChangeFileGroup { path, events }
+                })
+                .collect();
+            files.sort_by(|left, right| {
+                let left_latest = left.events.first().map(|event| event.observed_at).unwrap_or_default();
+                let right_latest = right.events.first().map(|event| event.observed_at).unwrap_or_default();
+                right_latest.cmp(&left_latest).then_with(|| left.path.cmp(&right.path))
+            });
+            folders.push(WorkspaceChangeFolderGroup { path, files });
+        }
+        folders.sort_by(|left, right| {
+            let latest_for = |folder: &WorkspaceChangeFolderGroup<'_>| {
+                folder
+                    .files
+                    .iter()
+                    .filter_map(|file| file.events.first().map(|event| event.observed_at))
+                    .max()
+                    .unwrap_or_default()
+            };
+            latest_for(right)
+                .cmp(&latest_for(left))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        groups.extend(folders.into_iter().map(|folder| WorkspaceChangeTimelineGroup {
+            latest,
+            earliest,
+            folder,
+        }));
+    }
+    groups
+}
+
+#[derive(Clone, Debug)]
+struct CompressionDocumentEntry {
+    path: PathBuf,
+    project_path: String,
+    title: String,
+    scope: String,
+    snippet: String,
+    direct_match: bool,
+    relation_count: usize,
+}
+
+fn compression_documents(
+    store: &Store,
+    projects: &[ProjectInfo],
+    query: &str,
+) -> anyhow::Result<(Vec<CompressionDocumentEntry>, usize, bool)> {
+    let roots = wake_core::services::compression_documents::roots_for_projects(projects);
+    let result = wake_core::services::compression_documents::sync_and_search(
+        store, &roots, query, 200, true,
+    )?;
+    let entries = result
+        .hits
+        .into_iter()
+        .map(|hit| CompressionDocumentEntry {
+            path: PathBuf::from(hit.path),
+            project_path: hit.project_path,
+            title: hit.title,
+            scope: hit.scope,
+            snippet: hit.snippet,
+            direct_match: hit.direct_match,
+            relation_count: hit.related_by.len(),
+        })
+        .collect();
+    Ok((entries, result.indexed_documents, result.degraded))
+}
+
+#[derive(Clone, Debug)]
+struct RelationshipRootEntry {
+    session: SessionMeta,
+    edge_count: usize,
+}
+
+/// A relationship tree is represented by its roots in the navigation. For malformed
+/// or manually-created cycles, keep one stable representative so the component remains
+/// reachable without turning every edge into a duplicate sidebar row.
+fn relationship_roots(edges: &[SessionRelationEdge]) -> Vec<RelationshipRootEntry> {
+    let mut parents = HashMap::<String, SessionMeta>::new();
+    let mut child_keys = HashSet::new();
+    let mut degree = HashMap::<String, usize>::new();
+    let mut neighbors = HashMap::<String, Vec<String>>::new();
+    for edge in edges {
+        parents
+            .entry(edge.parent.key.clone())
+            .or_insert_with(|| edge.parent.clone());
+        child_keys.insert(edge.child.key.clone());
+        *degree.entry(edge.parent.key.clone()).or_default() += 1;
+        neighbors
+            .entry(edge.parent.key.clone())
+            .or_default()
+            .push(edge.child.key.clone());
+        neighbors
+            .entry(edge.child.key.clone())
+            .or_default()
+            .push(edge.parent.key.clone());
+    }
+
+    let mut roots = Vec::new();
+    let mut visited = HashSet::new();
+    let mut keys = parents.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {
+        if visited.contains(&key) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut stack = vec![key.clone()];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            component.push(current.clone());
+            if let Some(next) = neighbors.get(&current) {
+                stack.extend(next.iter().cloned());
+            }
+        }
+        component.sort();
+        let root_key = component
+            .iter()
+            .find(|candidate| parents.contains_key(*candidate) && !child_keys.contains(*candidate))
+            .cloned()
+            .or_else(|| {
+                component
+                    .iter()
+                    .find(|candidate| parents.contains_key(*candidate))
+                    .cloned()
+            });
+        if let Some(root_key) = root_key {
+            if let Some(session) = parents.get(&root_key) {
+                let edge_count = component
+                    .iter()
+                    .map(|key| degree.get(key).copied().unwrap_or_default())
+                    .sum();
+                roots.push(RelationshipRootEntry {
+                    session: session.clone(),
+                    edge_count,
+                });
+            }
+        }
+    }
+    roots.sort_by(|left, right| {
+        left.session
+            .project_path
+            .cmp(&right.session.project_path)
+            .then_with(|| left.session.title.cmp(&right.session.title))
+            .then_with(|| left.session.key.cmp(&right.session.key))
+    });
+    roots
+}
+
+#[derive(Clone, Debug, Default)]
+struct CompressionDocumentMetadata {
+    generated_at: String,
+    source_session: String,
+    project: String,
+    processing_chain: String,
+    coverage: String,
+}
+
+fn metadata_value(line: &str, ascii_prefix: &str, fullwidth_prefix: &str) -> Option<String> {
+    line.strip_prefix(ascii_prefix)
+        .or_else(|| line.strip_prefix(fullwidth_prefix))
+        .map(|value| value.trim().trim_matches('`').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn compression_document_metadata(content: &str) -> CompressionDocumentMetadata {
+    let mut metadata = CompressionDocumentMetadata::default();
+    for line in content.lines().map(str::trim) {
+        if metadata.generated_at.is_empty() {
+            metadata.generated_at =
+                metadata_value(line, "生成时间:", "生成时间：").unwrap_or_default();
+        }
+        if metadata.source_session.is_empty() {
+            metadata.source_session =
+                metadata_value(line, "原始会话:", "原始会话：").unwrap_or_default();
+        }
+        if metadata.project.is_empty() {
+            metadata.project = metadata_value(line, "项目:", "项目：").unwrap_or_default();
+        }
+        if metadata.processing_chain.is_empty() {
+            metadata.processing_chain =
+                metadata_value(line, "处理链路:", "处理链路：").unwrap_or_default();
+        }
+        if metadata.coverage.is_empty() {
+            metadata.coverage = metadata_value(line, "覆盖范围:", "覆盖范围：").unwrap_or_default();
+        }
+    }
+    for line in content.lines().map(str::trim) {
+        if metadata.generated_at.is_empty() {
+            metadata.generated_at =
+                metadata_value(line, "generated_at:", "generated_at：").unwrap_or_default();
+        }
+        if metadata.source_session.is_empty() {
+            metadata.source_session =
+                metadata_value(line, "contextos_sources:", "contextos_sources：")
+                    .unwrap_or_default();
+        }
+        if metadata.project.is_empty() {
+            metadata.project = metadata_value(line, "project:", "project：").unwrap_or_default();
+        }
+        if metadata.processing_chain.is_empty() {
+            metadata.processing_chain =
+                metadata_value(line, "contextos_mode:", "contextos_mode：").unwrap_or_default();
+        }
+        if metadata.coverage.is_empty() {
+            metadata.coverage = metadata_value(line, "contextos_coverage:", "contextos_coverage：")
+                .unwrap_or_default();
+        }
+    }
+    metadata
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct JevConfig {
+    pub(crate) provider: wake_core::services::compression_settings::DecisionModelProvider,
+    pub(crate) model: String,
+    pub(crate) api_url: String,
+    pub(crate) api_key: String,
+    pub(crate) timeout_secs: u64,
+    pub(crate) laya_runtime_mode: wake_core::services::laya_runtime::LayaRuntimeMode,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompressionSettings {
+    pub(crate) llm_enabled: bool,
+    pub(crate) llm_api_url: String,
+    pub(crate) llm_api_key: String,
+    pub(crate) llm_model: String,
+    pub(crate) llm_provider_index: usize,
+    pub(crate) llm_provider_name: String,
+    pub(crate) llm_timeout_secs: u64,
+    pub(crate) llm_input_limit_chars: usize,
+    pub(crate) jev_enabled: bool,
+    pub(crate) single_strategy: String,
+    pub(crate) memory_generation_strategy: String,
+    pub(crate) multi_strategy: String,
+    pub(crate) tag_strategy: String,
+    pub(crate) tag_specific_strategies: HashMap<String, String>,
+    pub(crate) relation_strategy: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LlmProviderConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) api_url: String,
+    pub(crate) api_key: String,
+    pub(crate) model: String,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum JevConfigField {
+    Model,
+    JevApiUrl,
+    JevApiKey,
+    LayaApiUrl,
+    LayaApiKey,
+    TimeoutSecs,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CompressionConfigField {
+    LlmProviderName,
+    LlmApiUrl,
+    LlmApiKey,
+    LlmModel,
+    LlmTimeoutSecs,
+    LlmInputLimitChars,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CompressionStrategyField {
+    Single,
+    MemoryGeneration,
+    Multi,
+    Tags,
+    TagsGeneral,
+    TagSpecific(&'static str),
+    Relations,
+    LlmSystemMessage,
+    LlmTaskTemplate,
+    LlmUserPromptTemplate,
+    LlmMemoryCandidateContract,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MechanicalRuleKind {
+    EmptyOutput,
+    ErrorProtection,
+    Patch,
+    SourceListing,
+    SearchOutput,
+    ListingOutput,
+    InstructionAndToolSpec,
+    GenericLargeOutput,
+}
+
+impl MechanicalRuleKind {
+    fn key(self) -> &'static str {
+        match self {
+            Self::EmptyOutput => "empty_output_rule",
+            Self::ErrorProtection => "error_protection_rule",
+            Self::Patch => "patch_rule",
+            Self::SourceListing => "source_listing_rule",
+            Self::SearchOutput => "search_output_rule",
+            Self::ListingOutput => "listing_output_rule",
+            Self::InstructionAndToolSpec => "instruction_and_tool_spec_rule",
+            Self::GenericLargeOutput => "generic_large_output_rule",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::EmptyOutput => "空/低信息输出",
+            Self::ErrorProtection => "错误/失败保护",
+            Self::Patch => "Patch/Diff 证据",
+            Self::SourceListing => "源码/代码分析输出",
+            Self::SearchOutput => "搜索输出",
+            Self::ListingOutput => "列表/表格输出",
+            Self::InstructionAndToolSpec => "说明/工具规格",
+            Self::GenericLargeOutput => "通用大输出",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MechanicalFieldType {
+    Boolean,
+    Number,
+    TextList,
+}
+
+#[derive(Clone, Copy)]
+struct MechanicalFieldSpec {
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+    field_type: MechanicalFieldType,
+}
+
+fn mechanical_field_specs(rule: MechanicalRuleKind) -> &'static [MechanicalFieldSpec] {
+    use MechanicalFieldType::{Boolean, Number, TextList};
+    match rule {
+        MechanicalRuleKind::EmptyOutput => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "drop_empty_output",
+                label: "删除空 Output",
+                help: "删除没有正文的工具输出。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "success_output_max_chars",
+                label: "成功输出删除阈值",
+                help: "短于该字符数的普通成功输出可删除。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "write_stdin_max_chars",
+                label: "write_stdin 删除阈值",
+                help: "短于该字符数的 write_stdin 输出可删除。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_exit_code_line",
+                label: "保留退出码摘要",
+                help: "删除正文时仍保留退出码。",
+                field_type: Boolean,
+            },
+        ],
+        MechanicalRuleKind::ErrorProtection => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "head_chars",
+                label: "头部保留字符数",
+                help: "错误输出头部保留长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_chars",
+                label: "尾部保留字符数",
+                help: "错误输出尾部保留长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_command",
+                label: "保留执行命令",
+                help: "保留触发输出的命令。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_exit_code",
+                label: "保留退出码",
+                help: "保留非零退出码等结果。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_failure_lines",
+                label: "保留失败关键词行",
+                help: "额外保留命中失败关键词的行。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "failure_keywords",
+                label: "失败关键词",
+                help: "多个关键词用英文逗号分隔。",
+                field_type: TextList,
+            },
+        ],
+        MechanicalRuleKind::Patch => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "head_chars",
+                label: "头部保留字符数",
+                help: "Patch 头部保留长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_chars",
+                label: "尾部保留字符数",
+                help: "Patch 尾部保留长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_file_headers",
+                label: "保留文件头",
+                help: "保留修改文件的路径和头信息。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_hunk_headers",
+                label: "保留 Hunk 位置",
+                help: "保留 @@ 行等修改位置。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "max_hunks_per_file",
+                label: "每文件最多 Hunk 数",
+                help: "单个文件最多保留的修改片段数。",
+                field_type: Number,
+            },
+        ],
+        MechanicalRuleKind::SourceListing => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "max_lines",
+                label: "最多保留关键行数",
+                help: "源码或代码分析输出的关键行上限。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_query_summary",
+                label: "保留查询摘要",
+                help: "保留查询条件和范围。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_file_headers",
+                label: "保留文件/符号标题",
+                help: "保留路径、符号和分组标题。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_blast_radius",
+                label: "保留影响范围",
+                help: "保留调用链和 blast radius。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_staleness_warnings",
+                label: "保留索引状态提示",
+                help: "保留过期索引等警告。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "head_chars",
+                label: "兜底头部字符数",
+                help: "无法结构化裁剪时保留的头部长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_chars",
+                label: "兜底尾部字符数",
+                help: "无法结构化裁剪时保留的尾部长度。",
+                field_type: Number,
+            },
+        ],
+        MechanicalRuleKind::SearchOutput => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "max_matches",
+                label: "最多保留命中数",
+                help: "搜索命中总上限。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "head_matches",
+                label: "前部命中保留数",
+                help: "优先保留开头的命中数。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_matches",
+                label: "尾部命中保留数",
+                help: "优先保留末尾的命中数。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_truncated_notice",
+                label: "保留截断提示",
+                help: "保留结果被截断的事实。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "priority_keywords",
+                label: "优先保留关键词",
+                help: "多个关键词用英文逗号分隔。",
+                field_type: TextList,
+            },
+        ],
+        MechanicalRuleKind::ListingOutput => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "max_items",
+                label: "最多保留条目数",
+                help: "列表或表格条目总上限。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "head_items",
+                label: "前部条目保留数",
+                help: "优先保留开头条目数。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_items",
+                label: "尾部条目保留数",
+                help: "优先保留末尾条目数。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_count_summary",
+                label: "保留总数摘要",
+                help: "保留裁剪前后的条目数量。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "anomaly_keywords",
+                label: "异常条目关键词",
+                help: "多个关键词用英文逗号分隔。",
+                field_type: TextList,
+            },
+        ],
+        MechanicalRuleKind::InstructionAndToolSpec => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "max_headings",
+                label: "最多保留标题数",
+                help: "说明文档保留的标题上限。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "max_tool_names",
+                label: "最多保留工具名数",
+                help: "工具清单保留的名称上限。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "keep_required_fields",
+                label: "保留必填字段",
+                help: "保留 required 和输入约束。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_safety_hints",
+                label: "保留安全/权限提示",
+                help: "保留权限、风险和边界说明。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "keep_command_examples",
+                label: "保留命令示例",
+                help: "保留 CLI 或调用示例。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "head_chars",
+                label: "兜底头部字符数",
+                help: "无法结构化裁剪时保留的头部长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_chars",
+                label: "兜底尾部字符数",
+                help: "无法结构化裁剪时保留的尾部长度。",
+                field_type: Number,
+            },
+        ],
+        MechanicalRuleKind::GenericLargeOutput => &[
+            MechanicalFieldSpec {
+                key: "enabled",
+                label: "启用规则",
+                help: "填写 是 或 否。",
+                field_type: Boolean,
+            },
+            MechanicalFieldSpec {
+                key: "min_output_chars",
+                label: "裁剪触发字符数",
+                help: "超过该长度才应用通用裁剪。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "head_chars",
+                label: "头部保留字符数",
+                help: "保留输出开头的长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "tail_chars",
+                label: "尾部保留字符数",
+                help: "保留输出末尾的长度。",
+                field_type: Number,
+            },
+            MechanicalFieldSpec {
+                key: "mark_jev_candidate",
+                label: "标记为 Jev 候选",
+                help: "允许 Jev 对裁剪结果进一步评分。",
+                field_type: Boolean,
+            },
+        ],
+    }
+}
+
+fn jev_action_chinese(
+    action: wake_core::services::compression_settings::JevAction,
+) -> &'static str {
+    use wake_core::services::compression_settings::JevAction;
+    match action {
+        JevAction::Discard => "删除",
+        JevAction::Stub => "极简占位",
+        JevAction::UseMechanical => "机械裁剪",
+        JevAction::Evidence => "关键证据",
+        JevAction::Expanded => "扩展片段",
+        JevAction::Verbatim => "近全文",
+    }
+}
+
+fn parse_jev_action(value: &str) -> Option<wake_core::services::compression_settings::JevAction> {
+    use wake_core::services::compression_settings::JevAction;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "删除" | "discard" => Some(JevAction::Discard),
+        "极简占位" | "占位" | "stub" => Some(JevAction::Stub),
+        "机械裁剪" | "机械" | "use_mechanical" => Some(JevAction::UseMechanical),
+        "关键证据" | "证据" | "evidence" => Some(JevAction::Evidence),
+        "扩展片段" | "扩展" | "expanded" => Some(JevAction::Expanded),
+        "近全文" | "全文" | "verbatim" => Some(JevAction::Verbatim),
+        _ => None,
+    }
 }
 
 pub struct Workbench {
     focus_handle: FocusHandle,
+    runtime: Arc<BackgroundRuntime>,
     store: Arc<Store>,
+    workspace_store: Arc<WorkspaceStore>,
     /// 扫描/监听只含启用 location；管理面板另读 data_locations，停用行不消失。
     adapters: SharedAdapters,
     /// 与 adapters 同一次 roster 构造得到的全部 location 路径快照。
@@ -2100,6 +4725,11 @@ pub struct Workbench {
 
     selected_agent: Option<AgentId>,
     selected_project: Option<String>,
+    selected_tag: Option<String>,
+    /// Models 榜单下钻的筛选(单选,Insights 行点击落这里;侧栏没有这颗入口)
+    selected_model: Option<String>,
+    pending_link_parent: Option<(String, String)>,
+    pending_link_child: Option<(String, String)>,
     favorite_only: bool,
     sort_key: SortKey,
     sort_ascending: bool,
@@ -2109,8 +4739,13 @@ pub struct Workbench {
     /// 后台算、经 RemoteCacheBytes 送达,None = 还没算完
     remote_cache_bytes: Option<u64>,
     projects: Vec<ProjectInfo>,
+    tag_counts: Vec<(String, i64)>,
     agents_collapsed: bool,
     projects_collapsed: bool,
+    tags_collapsed: bool,
+    relationship_tree_collapsed: bool,
+    relationship_parents_collapsed: bool,
+    relationship_children_collapsed: bool,
     starred_count: i64,
     /// 后台扫描的最新状态,启动时的自动扫描与用户主动重扫共用。整份留存而不是
     /// 摊成几个字段:刷新入口的守卫、侧栏状态文案、按钮 busy 态全部从它派生,
@@ -2131,12 +4766,13 @@ pub struct Workbench {
     /// 同步进行中又被请求的 host(如 rsync 未收工就 add host):收工后只补
     /// 这几台(不升级成全量),不并发两组 rsync 打同一缓存树
     pending_sync: Vec<String>,
-    /// 远程同步线程直发事件用(ChannelEvents 只覆盖 ScanEvents 两个方法)
+    /// 远程同步线程直发事件用；后台事件由 BackgroundEvents 转发给当前窗口。
     bg_tx: futures::channel::mpsc::UnboundedSender<BgEvent>,
     /// Settings 是单例窗口；句柄不保活，关闭后下次点击会检测失败并重建。
     settings_window: Option<AnyWindowHandle>,
     settings_page: SettingsPage,
     update_status: UpdateStatus,
+    laya_external_capabilities: Option<wake_core::services::laya_runtime::LayaExternalCapabilities>,
     total_sessions: i64,
 
     list_state: Entity<ListState<SessionsDelegate>>,
@@ -2158,6 +4794,11 @@ pub struct Workbench {
     /// 文本拖选靠近详情视口边缘时，持续推动外层消息列表。
     detail_selection_auto_scroll: AutoScroll,
     detail: Option<DetailState>,
+    sidebar_collapsed: bool,
+    detail_outline_collapsed: bool,
+    detail_outline_mode: DetailOutlineMode,
+    detail_search_open: bool,
+    detail_search_input: Entity<InputState>,
     /// 图片操作反馈的全局递增代次。即使关闭后重新打开同一会话和图片，旧计时
     /// 器也不会误清新状态。
     image_action_feedback_generation: u64,
@@ -2165,22 +4806,86 @@ pub struct Workbench {
     /// 主区当前的页(侧栏单选模型):Insights / Memory 打开时替换中栏+右栏,
     /// 数据在 open/refresh 时后台重算
     page: Page,
+    compression_selected: Option<PathBuf>,
+    compression_query: Entity<InputState>,
+    compression_documents: Vec<CompressionDocumentEntry>,
+    compression_indexed_documents: usize,
+    compression_search_degraded: bool,
+    compression_search_loading: bool,
+    compression_search_error: Option<String>,
+    compression_last_query: String,
+    compression_search_task: Option<Task<()>>,
+    relationship_edges: Vec<SessionRelationEdge>,
+    skill_query: Entity<InputState>,
     cleanup: cleanup::CleanupState,
     /// Memory 页的数据与选中态(agent 自己写的记忆文档)
     memory: memory::MemoryState,
+    /// Skills 页直接读取各 agent 的用户级 Skill 目录，不经过会话索引库。
+    skills: skills::SkillsState,
     /// Insights 页数据,Rc 免深拷贝
     insights: Option<Rc<InsightsData>>,
+    /// Insights 侧栏当前选中的 Agent;不影响会话页的筛选状态
+    insights_agent: Option<AgentId>,
     insights_loading: bool,
+    insights_time_range: InsightsTimeRange,
+    /// 点击日期临时收窄范围前的选择;再次点击同一天恢复。
+    insights_range_before_day: Option<InsightsTimeRange>,
     insights_range: InsightsRange,
     /// 三个榜单各自的度量档,按 UsageBoard 序数索引
     insights_metrics: [InsightsMetric; 3],
-    /// "Agents asking Wake" 当前档位(All / MCP / CLI)
+    /// 三个榜单各自的行数上限档,按 UsageBoard 序数索引。Agents 榜全量列
+    /// (共十九家),该字段对它不生效
+    insights_top_n: [TopN; 3],
+    /// 热力图点选的某天:三档分布联动为该日所在周期的细分。None = 全历史
+    /// 聚合(默认);快照数据在 insights_period,加载中 insights_period_loading
+    insights_selected: Option<chrono::NaiveDate>,
+    insights_period: Option<Rc<PeriodBreakdown>>,
+    insights_period_loading: bool,
+    insights_period_task: Option<Task<()>>,
+    /// "Agents asking ContextOS" 当前档位(All / MCP / CLI)
     insights_lookup_view: LookupView,
     /// 进行中的统计查询;新查询覆盖旧值即取消,扫描风暴下不堆积读锁竞争
     insights_task: Option<Task<()>>,
 
+    insights_subview: InsightsSubview,
+    workspace_roots: Vec<WorkspaceRoot>,
+    workspace_change_project: Option<String>,
+    workspace_change_events: Vec<WorkspaceChangeEvent>,
+    session_change_groups: Vec<SessionChangeSessionGroup>,
+    session_change_events: Vec<SessionFileChangeEvent>,
+    session_change_loading: bool,
+    session_change_error: Option<String>,
+    session_change_selected: Option<i64>,
+    session_change_open_sessions: HashSet<String>,
+    session_change_inspector: Option<String>,
+    session_change_picker_open: bool,
+    session_change_picker_query: Entity<InputState>,
+    session_change_picker_sessions: Vec<SessionMeta>,
+    session_change_picker_total: i64,
+    session_change_picker_selected: HashSet<String>,
+    session_change_request: u64,
+    session_change_task: Option<Task<()>>,
+    workspace_change_range: WorkspaceChangeRange,
+    workspace_change_kind: Option<WorkspaceChangeKind>,
+    workspace_change_sort_ascending: bool,
+    session_change_range: WorkspaceChangeRange,
+    session_change_kind: Option<WorkspaceChangeKind>,
+    session_change_sort_ascending: bool,
+    workspace_change_open_folders: HashSet<String>,
+    workspace_change_open_files: HashSet<String>,
+    workspace_change_loading: bool,
+    workspace_change_has_more: bool,
+    workspace_change_error: Option<String>,
+    workspace_change_request: u64,
+    workspace_change_selected: Option<i64>,
+    workspace_change_detail: Option<WorkspaceChangeDetail>,
+    workspace_change_detail_loading: bool,
+    workspace_change_detail_error: Option<String>,
+    workspace_change_detail_request: u64,
+    workspace_change_task: Option<Task<()>>,
+    workspace_change_detail_task: Option<Task<()>>,
+
     scan_events: Arc<dyn ScanEvents>,
-    watcher: Option<SessionWatcher>,
     /// 终端 id → 提取好的应用图标 png(后台 JXA 提取,详情页 Open In 用)
     terminal_icons: HashMap<String, PathBuf>,
     /// Open In 上次选择(split 按钮左段直开目标),None = 已装列表首个
@@ -2202,6 +4907,85 @@ enum InsightsRange {
     Hour,
     Weekday,
     Month,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InsightsTimeRange {
+    All,
+    Days7,
+    Days30,
+    Days90,
+    Year,
+    Custom {
+        start_ms: i64,
+        end_ms: i64,
+        live_end: bool,
+    },
+}
+
+impl InsightsTimeRange {
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Days7,
+        Self::Days30,
+        Self::Days90,
+        Self::Year,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => t("All"),
+            Self::Days7 => t("Last 7 days"),
+            Self::Days30 => t("Last 30 days"),
+            Self::Days90 => t("Last 90 days"),
+            Self::Year => t("Last year"),
+            Self::Custom { .. } => t("Custom"),
+        }
+    }
+
+    fn bounds(self, today: NaiveDate) -> (Option<i64>, Option<i64>) {
+        if self == Self::All {
+            return (None, Some(Local::now().timestamp_millis()));
+        }
+        let days = match self {
+            Self::Days7 => 7,
+            Self::Days30 => 30,
+            Self::Days90 => 90,
+            Self::Year => 365,
+            Self::All => unreachable!(),
+            Self::Custom {
+                start_ms,
+                end_ms,
+                live_end,
+            } => {
+                return (
+                    Some(start_ms),
+                    Some(if live_end {
+                        Local::now().timestamp_millis()
+                    } else {
+                        end_ms
+                    }),
+                )
+            }
+        };
+        let start = today - chrono::Days::new(days - 1);
+        let start_ms = start
+            .and_hms_opt(0, 0, 0)
+            .and_then(|dt| Local.from_local_datetime(&dt).single())
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0);
+        (Some(start_ms), Some(Local::now().timestamp_millis()))
+    }
+
+    fn day_bounds(day: NaiveDate) -> (Option<i64>, Option<i64>) {
+        let to_ms = |date: NaiveDate| {
+            date.and_hms_opt(0, 0, 0)
+                .and_then(|dt| Local.from_local_datetime(&dt).single())
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0)
+        };
+        (Some(to_ms(day)), Some(to_ms(day + chrono::Days::new(1))))
+    }
 }
 
 impl InsightsRange {
@@ -2227,6 +5011,55 @@ impl InsightsRange {
             Self::Weekday => Self::Month,
             Self::Month => Self::Hour,
         }
+    }
+}
+
+/// 榜单行数上限档。All = 全量列(Agents 榜固定此档)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopN {
+    N5,
+    N10,
+    N20,
+    All,
+}
+
+impl TopN {
+    fn all() -> [TopN; 3] {
+        [Self::N5, Self::N10, Self::N20]
+    }
+
+    /// 循环:5 → 10 → 20 → 全部 → 5。单击一枚按钮即可,不做 ‹ › 双向
+    /// (度量那对箭头已在同一行,再添一对会看不过来)
+    fn next(self) -> Self {
+        match self {
+            Self::N5 => Self::N10,
+            Self::N10 => Self::N20,
+            Self::N20 => Self::All,
+            Self::All => Self::N5,
+        }
+    }
+
+    fn limit(self) -> usize {
+        match self {
+            Self::N5 => 5,
+            Self::N10 => 10,
+            Self::N20 => 20,
+            Self::All => usize::MAX,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::N5 => crate::tf!("Top {}", 5),
+            Self::N10 => crate::tf!("Top {}", 10),
+            Self::N20 => crate::tf!("Top {}", 20),
+            Self::All => t("All").to_string(),
+        }
+    }
+
+    /// 榜单头那枚循环按钮的 tooltip:说清按的是行数而不是度量
+    fn tooltip(self) -> &'static str {
+        t("Rows shown")
     }
 }
 
@@ -2265,7 +5098,7 @@ impl InsightsMetric {
     }
 }
 
-/// "Agents asking Wake" 的档位:两条接入合计,或只看其中一条。‹ › 循环,与榜单同形;
+/// "Agents asking ContextOS" 的档位:两条接入合计,或只看其中一条。‹ › 循环,与榜单同形;
 /// MCP 那一路按工具名认、天然精确,CLI 那一路按命令文本认,分开看才知道噪音在哪
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LookupView {
@@ -2335,11 +5168,12 @@ impl UsageBoard {
         }
     }
 
-    /// Agents 全量列出(总共十九家);项目/模型长尾长,取前 6
-    fn limit(self) -> usize {
+    /// 行元素 id 的前缀(元素 id 只要求同级唯一,带上榜单名更保险)
+    fn id(self) -> &'static str {
         match self {
-            Self::Agents => usize::MAX,
-            _ => 6,
+            Self::Agents => "agents",
+            Self::Projects => "projects",
+            Self::Models => "models",
         }
     }
 
@@ -2462,24 +5296,58 @@ struct PathFormSpec {
 }
 
 impl Workbench {
+    pub(crate) fn background_runtime_for_shutdown() -> Arc<BackgroundRuntime> {
+        Self::background_runtime()
+    }
+
+    fn background_runtime() -> Arc<BackgroundRuntime> {
+        static RUNTIME: OnceLock<Arc<BackgroundRuntime>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| {
+                let db_path = wake_core::db::default_db_path();
+                let (store, db_note) = match wake_core::db::open_or_rebuild(&db_path) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        terminal::show_fatal_alert(&crate::tf!(
+                            "ContextOS couldn't open or rebuild its index at {}. {}",
+                            db_path.display(),
+                            error
+                        ));
+                        std::process::exit(1);
+                    }
+                };
+                let store = Arc::new(store);
+                let workspace_store = match WorkspaceStore::open(
+                    &default_workspace_db_path(),
+                    &default_workspace_cas_path(),
+                ) {
+                    Ok(store) => Arc::new(store),
+                    Err(error) => {
+                        terminal::show_fatal_alert(&crate::tf!(
+                            "ContextOS couldn't open workspace history. {}",
+                            error
+                        ));
+                        std::process::exit(1);
+                    }
+                };
+                let (adapters, _) = Self::build_roster(&store);
+                Arc::new(BackgroundRuntime::new(
+                    store,
+                    workspace_store,
+                    adapters,
+                    db_note,
+                ))
+            })
+            .clone()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let db_path = wake_core::db::default_db_path();
-        // 库损坏时降级重建而不是崩掉:GUI 秒退什么都不告诉用户,他们也无从知道
-        // 删掉那个文件就能自愈。重建也失败说明是目录权限/磁盘问题,那才没救——
-        // 但至少要用系统弹窗把话说清楚再退。
-        let (store, db_note) = match wake_core::db::open_or_rebuild(&db_path) {
-            Ok(v) => v,
-            Err(e) => {
-                terminal::show_fatal_alert(&crate::tf!(
-                    "Wake couldn't open or rebuild its index at {}. {}",
-                    db_path.display(),
-                    e
-                ));
-                std::process::exit(1);
-            }
-        };
-        let store = Arc::new(store);
-        let (adapters, data_locations) = Self::build_roster(&store);
+        let runtime = Self::background_runtime();
+        let db_note = runtime.take_db_note();
+        let store = runtime.store.clone();
+        let workspace_store = runtime.workspace_store.clone();
+        let adapters = runtime.adapters();
+        let (_, data_locations) = Self::build_roster(&store);
 
         let list_state = cx.new(|cx| {
             ListState::new(
@@ -2505,19 +5373,26 @@ impl Workbench {
         let palette_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t("Search everything — prose or code"))
         });
+        let compression_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索压缩内容、标题或路径"));
+        let session_change_picker_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话标题或项目"));
+        let skill_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索 Skill 名称、内容或路径"));
+        let detail_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索当前会话"));
 
-        // 后台:全量扫描线程 + 文件监听 + 远程同步(彼此独立并行)
+        let workspace_roots = workspace_store.list_workspace_roots().unwrap_or_default();
+
+        // 每个窗口有自己的事件接收端；扫描、监听和同步本身由进程级
+        // BackgroundRuntime 持有，窗口关闭后不会被销毁或重复启动。
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<BgEvent>();
+        runtime.subscribe(tx.clone());
+        runtime.ensure_started();
         let bg_tx = tx.clone();
-        let events: Arc<dyn ScanEvents> = Arc::new(ChannelEvents(tx));
-        spawn_scan(adapters.clone(), store.clone(), events.clone(), false);
-        let syncing_hosts = store.enabled_remote_host_names();
-        spawn_remote_sync_thread(&store, bg_tx.clone(), syncing_hosts.clone());
-        {
-            let (store, bg_tx) = (store.clone(), bg_tx.clone());
-            std::thread::spawn(move || report_remote_cache_size(&store, &bg_tx));
-        }
-        let watcher = start_watcher(adapters.clone(), store.clone(), events.clone());
+        let events: Arc<dyn ScanEvents> = runtime.events.clone();
+        let initial_scan = runtime.events.current_progress();
+        let syncing_hosts = Vec::new();
         let scan_events = events.clone();
 
         // 事件泵跟 Workbench entity 走，而不是跟主窗口走：Settings 会在主窗口
@@ -2545,30 +5420,39 @@ impl Workbench {
             cx.subscribe_in(&list_state, window, Self::on_list_event),
             cx.subscribe_in(&palette_list, window, Self::on_palette_event),
             cx.subscribe_in(&palette_input, window, Self::on_palette_input_event),
+            cx.subscribe_in(&compression_query, window, Self::on_compression_query_event),
+            cx.subscribe_in(&skill_query, window, Self::on_skill_query_event),
+            cx.subscribe_in(&detail_search_input, window, Self::on_detail_search_event),
         ];
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
+            runtime,
             store,
+            workspace_store,
             adapters,
             data_locations,
             selected_agent: None,
             selected_project: None,
+            selected_tag: None,
+            selected_model: None,
+            pending_link_parent: None,
+            pending_link_child: None,
             sort_key: SortKey::Updated,
             sort_ascending: false,
             favorite_only: false,
             agent_counts: Vec::new(),
             remote_cache_bytes: None,
             projects: Vec::new(),
+            tag_counts: Vec::new(),
             agents_collapsed: false,
             projects_collapsed: false,
+            tags_collapsed: false,
+            relationship_tree_collapsed: true,
+            relationship_parents_collapsed: false,
+            relationship_children_collapsed: false,
             starred_count: 0,
-            // 扫描线程已在上面 spawn,首个 Progress 事件到达前先占位为"扫描中",
-            // 否则这个窗口内按 ⌘R 会起第二条并发全量扫描
-            scan: ScanProgress {
-                scanning: true,
-                ..Default::default()
-            },
+            scan: initial_scan,
             refreshing: false,
             pending_rescan: false,
             syncing_hosts,
@@ -2577,6 +5461,7 @@ impl Workbench {
             settings_window: None,
             settings_page: SettingsPage::General,
             update_status: UpdateStatus::Idle,
+            laya_external_capabilities: None,
             total_sessions: 0,
             list_state,
             palette_list,
@@ -2588,18 +5473,79 @@ impl Workbench {
             _calendar_task: None,
             detail_selection_auto_scroll: AutoScroll::default(),
             detail: None,
+            sidebar_collapsed: false,
+            detail_outline_collapsed: false,
+            detail_outline_mode: DetailOutlineMode::All,
+            detail_search_open: false,
+            detail_search_input,
             image_action_feedback_generation: 0,
             page: Page::Sessions,
+            compression_selected: None,
+            compression_query,
+            compression_documents: Vec::new(),
+            compression_indexed_documents: 0,
+            compression_search_degraded: false,
+            compression_search_loading: false,
+            compression_search_error: None,
+            compression_last_query: String::new(),
+            compression_search_task: None,
+            relationship_edges: Vec::new(),
+            skill_query,
             cleanup: cleanup::CleanupState::default(),
             memory: memory::MemoryState::default(),
+            skills: skills::SkillsState::default(),
             insights: None,
+            insights_agent: None,
             insights_loading: false,
+            insights_time_range: InsightsTimeRange::All,
+            insights_range_before_day: None,
             insights_range: InsightsRange::Hour,
             insights_metrics: [InsightsMetric::Sessions; 3],
+            insights_top_n: TopN::all(),
+            insights_selected: None,
+            insights_period: None,
+            insights_period_loading: false,
+            insights_period_task: None,
             insights_lookup_view: LookupView::All,
             insights_task: None,
+            insights_subview: InsightsSubview::Overview,
+            workspace_roots,
+            workspace_change_project: None,
+            workspace_change_events: Vec::new(),
+            session_change_groups: Vec::new(),
+            session_change_events: Vec::new(),
+            session_change_loading: false,
+            session_change_error: None,
+            session_change_selected: None,
+            session_change_open_sessions: HashSet::new(),
+            session_change_inspector: None,
+            session_change_picker_open: false,
+            session_change_picker_query,
+            session_change_picker_sessions: Vec::new(),
+            session_change_picker_total: 0,
+            session_change_picker_selected: HashSet::new(),
+            session_change_request: 0,
+            session_change_task: None,
+            workspace_change_range: WorkspaceChangeRange::Days7,
+            workspace_change_kind: None,
+            workspace_change_sort_ascending: false,
+            session_change_range: WorkspaceChangeRange::Days7,
+            session_change_kind: None,
+            session_change_sort_ascending: false,
+            workspace_change_open_folders: HashSet::new(),
+            workspace_change_open_files: HashSet::new(),
+            workspace_change_loading: false,
+            workspace_change_has_more: true,
+            workspace_change_error: None,
+            workspace_change_request: 0,
+            workspace_change_selected: None,
+            workspace_change_detail: None,
+            workspace_change_detail_loading: false,
+            workspace_change_detail_error: None,
+            workspace_change_detail_request: 0,
+            workspace_change_task: None,
+            workspace_change_detail_task: None,
             scan_events,
-            watcher,
             terminal_icons: HashMap::new(),
             preferred_terminal: HashMap::new(),
             last_terminal: None,
@@ -2608,11 +5554,26 @@ impl Workbench {
         this.load_open_in_prefs();
         this.load_cleanup_prefs();
         this.refresh(cx);
+        this.maybe_start_managed_laya();
         this._calendar_task = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(60))
                 .await;
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
+            if this
+                .update(cx, |this, cx| {
+                    if this.page == Page::Insights
+                        && matches!(
+                            this.insights_time_range,
+                            InsightsTimeRange::Custom { live_end: true, .. }
+                        )
+                        && this.insights_selected.is_none()
+                    {
+                        this.reload_insights(cx);
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
                 break;
             }
         }));
@@ -2660,6 +5621,8 @@ impl Workbench {
             offset: 0,
             updated_since: None,
             project_paths: self.selected_project.clone().into_iter().collect(),
+            tags: self.selected_tag.clone().into_iter().collect(),
+            models: self.selected_model.clone().into_iter().collect(),
             ignore_pins: false,
         }
     }
@@ -2715,7 +5678,13 @@ impl Workbench {
         counts.sort_by_key(|&(a, _)| a);
         self.agent_counts = counts;
         self.projects = self.store.list_projects(false).unwrap_or_default();
+        self.workspace_roots = self
+            .workspace_store
+            .list_workspace_roots()
+            .unwrap_or_default();
+        self.tag_counts = self.store.session_tag_counts(false).unwrap_or_default();
         self.starred_count = self.store.starred_count().unwrap_or(0);
+        self.relationship_edges = self.store.all_session_relationships().unwrap_or_default();
         // Insights / Memory 打开着就顺带重算:扫描增量/收藏变更等一切走 refresh 的
         // 路径都会让页面数据跟上,不设第二条失效通道
         self.reload_page(cx);
@@ -2767,10 +5736,13 @@ impl Workbench {
     /// 底部工具条的页切换(不是开关:再点当前页不退出)。回会话列表不动筛选;去整页
     /// 目的地时清掉三个会话筛选、Memory 的侧栏筛选也从全部开始——互斥单选,点任意
     /// 导航行都退回会话列表(`set_scope`)
-    fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
+    fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_cleanup(cx);
         if self.page == page {
             cx.notify();
+            return;
+        }
+        if self.page == Page::Skills && !self.allow_skill_navigation(window, cx) {
             return;
         }
         self.page = page;
@@ -2778,7 +5750,9 @@ impl Workbench {
             self.selected_agent = None;
             self.selected_project = None;
             self.favorite_only = false;
+            self.selected_model = None;
             self.reset_memory_scope();
+            self.reset_skills_scope(cx);
         }
         self.refresh(cx);
     }
@@ -2788,9 +5762,560 @@ impl Workbench {
     fn reload_page(&mut self, cx: &mut Context<Self>) {
         match self.page {
             Page::Sessions => {}
-            Page::Insights => self.reload_insights(cx),
+            Page::Insights => match self.insights_subview {
+                InsightsSubview::Overview => self.reload_insights(cx),
+                InsightsSubview::WorkspaceChanges => self.reload_workspace_changes(true, cx),
+                InsightsSubview::SessionChanges => self.reload_session_changes(cx),
+            },
             Page::Memory => self.reload_memories(cx),
+            Page::Skills => self.reload_skills(cx),
+            Page::Compressions => self.reload_compressions(cx),
+            Page::Relationships => {}
         }
+    }
+
+    fn set_insights_subview(&mut self, subview: InsightsSubview, cx: &mut Context<Self>) {
+        if self.insights_subview == subview {
+            return;
+        }
+        self.insights_subview = subview;
+        if subview == InsightsSubview::WorkspaceChanges {
+            self.reload_workspace_changes(true, cx);
+        } else if subview == InsightsSubview::SessionChanges {
+            self.reload_session_changes(cx);
+        }
+        cx.notify();
+    }
+
+    fn reload_session_changes(&mut self, cx: &mut Context<Self>) {
+        if self.page != Page::Insights || self.insights_subview != InsightsSubview::SessionChanges {
+            return;
+        }
+        self.session_change_loading = true;
+        self.session_change_error = None;
+        self.session_change_request = self.session_change_request.wrapping_add(1);
+        let request = self.session_change_request;
+        let store = self.workspace_store.clone();
+        let sessions = self.store.clone();
+        let task = cx.background_spawn(async move {
+            wake_core::services::session_changes::list_selected_activities(
+                &store,
+                &sessions,
+                None,
+                5000,
+            )
+        });
+        self.session_change_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if this.session_change_request != request {
+                    return;
+                }
+                match result {
+                    Ok(groups) => {
+                        this.session_change_events = groups
+                            .iter()
+                            .flat_map(|group| {
+                                group
+                                    .folders
+                                    .iter()
+                                    .flat_map(|folder| {
+                                        folder.files.iter().flat_map(|file| file.events.clone())
+                                    })
+                                    .chain(
+                                        group
+                                            .root_files
+                                            .iter()
+                                            .flat_map(|file| file.events.clone()),
+                                    )
+                            })
+                            .collect();
+                        this.session_change_groups = groups;
+                    }
+                    Err(error) => this.session_change_error = Some(format!("{error:#}")),
+                }
+                this.session_change_loading = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn toggle_session_change_event(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.session_change_selected = (self.session_change_selected != Some(id)).then_some(id);
+        cx.notify();
+    }
+
+    fn set_session_change_membership(
+        &mut self,
+        key: String,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace_store.clone();
+        let sessions = self.store.clone();
+        let query_key = key.clone();
+        let query = cx.background_spawn(async move {
+            if selected {
+                wake_core::services::session_changes::select_session(
+                    &workspace,
+                    &sessions,
+                    &query_key,
+                )
+            } else {
+                wake_core::services::session_changes::deselect_session(&workspace, &query_key)
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = query.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        this.session_change_inspector = None;
+                        this.reload_session_changes(cx);
+                    }
+                    Err(error) => {
+                        this.session_change_error = Some(format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_session_change_picker(&mut self, cx: &mut Context<Self>) {
+        let filter = SessionFilter {
+            sort: SortKey::Updated,
+            limit: 500,
+            ..SessionFilter::default()
+        };
+        match self.store.list_sessions(&filter) {
+            Ok((sessions, total)) => {
+                self.session_change_picker_sessions = sessions;
+                self.session_change_picker_total = total;
+                self.session_change_picker_selected = self
+                    .session_change_groups
+                    .iter()
+                    .map(|group| group.session_key.clone())
+                    .collect();
+                self.session_change_picker_open = true;
+            }
+            Err(error) => {
+                self.session_change_error = Some(format!("读取可选会话失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn load_more_session_change_picker(&mut self, cx: &mut Context<Self>) {
+        let offset = self.session_change_picker_sessions.len() as i64;
+        if offset >= self.session_change_picker_total {
+            return;
+        }
+        let filter = SessionFilter {
+            sort: SortKey::Updated,
+            limit: 500,
+            offset,
+            ..SessionFilter::default()
+        };
+        match self.store.list_sessions(&filter) {
+            Ok((sessions, total)) => {
+                self.session_change_picker_total = total;
+                self.session_change_picker_sessions.extend(sessions);
+            }
+            Err(error) => {
+                self.session_change_error = Some(format!("继续读取会话失败：{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_session_change_picker(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .session_change_groups
+            .iter()
+            .map(|group| group.session_key.clone())
+            .collect::<HashSet<_>>();
+        let selected = self.session_change_picker_selected.clone();
+        let changes = current
+            .iter()
+            .filter(|key| !selected.contains(*key))
+            .cloned()
+            .map(|key| (key, false))
+            .chain(
+                selected
+                    .iter()
+                    .filter(|key| !current.contains(*key))
+                    .cloned()
+                    .map(|key| (key, true)),
+            )
+            .collect::<Vec<_>>();
+        let first_added = changes
+            .iter()
+            .find_map(|(key, selected)| (*selected).then(|| key.clone()));
+        self.session_change_picker_open = false;
+        if changes.is_empty() {
+            cx.notify();
+            return;
+        }
+
+        let workspace = self.workspace_store.clone();
+        let sessions = self.store.clone();
+        let task = cx.background_spawn(async move {
+            for (key, selected) in changes {
+                if selected {
+                    wake_core::services::session_changes::select_session(
+                        &workspace, &sessions, &key,
+                    )?;
+                } else {
+                    wake_core::services::session_changes::deselect_session(&workspace, &key)?;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        if first_added.is_some() {
+                            this.session_change_range = WorkspaceChangeRange::All;
+                            this.session_change_kind = None;
+                            this.session_change_inspector = None;
+                        }
+                        this.reload_session_changes(cx);
+                    }
+                    Err(error) => {
+                        this.session_change_error = Some(format!("更新已选会话失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn add_workspace_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(t("Choose").into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match rx.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(path) = path else { return };
+            this.update(cx, |this, cx| {
+                let store = this.workspace_store.clone();
+                let task = cx.background_spawn(async move { store.add_workspace_root(&path) });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    this.update(cx, |this, cx| {
+                        match result {
+                            Ok(root) => {
+                                this.workspace_roots = this
+                                    .workspace_store
+                                    .list_workspace_roots()
+                                    .unwrap_or_default();
+                                this.runtime.request_workspace_refresh();
+                                this.select_workspace_change_project(root.path, cx);
+                                let _ = this.bg_tx.unbounded_send(BgEvent::WorkspaceChangesChanged);
+                            }
+                            Err(error) => {
+                                eprintln!("could not add workspace root: {error:#}");
+                                this.workspace_change_error =
+                                    Some(format!("无法添加监控目录：{error:#}"));
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn remove_workspace_root(&mut self, path: String, cx: &mut Context<Self>) {
+        let selected = self.workspace_change_project.as_deref() == Some(path.as_str());
+        // Update the view before touching SQLite. A large initial import can
+        // otherwise make this UI action wait behind the workspace write lock.
+        self.workspace_roots.retain(|root| root.path != path);
+        if selected {
+            self.workspace_change_project =
+                self.workspace_roots.first().map(|root| root.path.clone());
+            self.workspace_change_events.clear();
+            self.workspace_change_selected = None;
+            self.workspace_change_detail = None;
+        }
+        cx.notify();
+
+        let store = self.workspace_store.clone();
+        let removed_path = path.clone();
+        let task = cx.background_spawn(async move { store.remove_workspace_root(&removed_path) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.runtime.request_workspace_refresh();
+                        this.workspace_change_error = None;
+                        if selected {
+                            this.reload_workspace_changes(true, cx);
+                        }
+                        let _ = this.bg_tx.unbounded_send(BgEvent::WorkspaceChangesChanged);
+                    }
+                    Err(error) => {
+                        eprintln!("could not remove workspace root {path}: {error:#}");
+                        this.workspace_roots = this
+                            .workspace_store
+                            .list_workspace_roots()
+                            .unwrap_or_default();
+                        this.workspace_change_error = Some(format!("无法移除监控目录：{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn select_workspace_change_project(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.workspace_change_project.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        self.workspace_change_project = Some(path);
+        self.workspace_change_events.clear();
+        self.workspace_change_open_folders.clear();
+        self.workspace_change_open_files.clear();
+        self.workspace_change_selected = None;
+        self.workspace_change_detail = None;
+        self.workspace_change_detail_error = None;
+        self.workspace_change_detail_loading = false;
+        self.workspace_change_detail_request = self.workspace_change_detail_request.wrapping_add(1);
+        self.workspace_change_detail_task = None;
+        self.reload_workspace_changes(true, cx);
+        cx.notify();
+    }
+
+    fn reload_workspace_changes(&mut self, reset: bool, cx: &mut Context<Self>) {
+        if self.page != Page::Insights || self.insights_subview != InsightsSubview::WorkspaceChanges
+        {
+            return;
+        }
+        if self.workspace_change_loading && !reset {
+            return;
+        }
+        let project_path = self
+            .workspace_change_project
+            .clone()
+            .or_else(|| self.workspace_roots.first().map(|root| root.path.clone()));
+        let Some(project_path) = project_path.filter(|path| !path.trim().is_empty()) else {
+            self.workspace_change_request = self.workspace_change_request.wrapping_add(1);
+            self.workspace_change_events.clear();
+            self.workspace_change_project = None;
+            self.workspace_change_loading = false;
+            self.workspace_change_has_more = false;
+            self.workspace_change_error = None;
+            self.workspace_change_selected = None;
+            self.workspace_change_detail = None;
+            cx.notify();
+            return;
+        };
+        self.workspace_change_project = Some(project_path.clone());
+        self.workspace_change_loading = true;
+        self.workspace_change_error = None;
+        self.workspace_change_request = self.workspace_change_request.wrapping_add(1);
+        let request = self.workspace_change_request;
+        let before = if reset {
+            None
+        } else {
+            self.workspace_change_events
+                .last()
+                .map(|event| (event.observed_at, event.id))
+        };
+        let store = self.workspace_store.clone();
+        let query_project_path = project_path.clone();
+        let query = cx.background_spawn(async move {
+            store.list_workspace_change_events(&query_project_path, before, 100)
+        });
+        self.workspace_change_task = Some(cx.spawn(async move |this, cx| {
+            let result = query.await;
+            this.update(cx, |this, cx| {
+                if this.workspace_change_request != request
+                    || this.workspace_change_project.as_deref() != Some(project_path.as_str())
+                {
+                    return;
+                }
+                match result {
+                    Ok(events) => {
+                        this.workspace_change_has_more = events.len() == 100;
+                        if reset {
+                            if this
+                                .workspace_change_selected
+                                .is_some_and(|id| !events.iter().any(|event| event.id == id))
+                            {
+                                this.workspace_change_selected = None;
+                                this.workspace_change_detail = None;
+                                this.workspace_change_detail_error = None;
+                                this.workspace_change_detail_loading = false;
+                                this.workspace_change_detail_request =
+                                    this.workspace_change_detail_request.wrapping_add(1);
+                                this.workspace_change_detail_task = None;
+                            }
+                            this.workspace_change_events = events;
+                        } else {
+                            this.workspace_change_events.extend(events);
+                        }
+                    }
+                    Err(error) => this.workspace_change_error = Some(format!("{error:#}")),
+                }
+                this.workspace_change_loading = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn select_workspace_change_event(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.workspace_change_selected == Some(id) {
+            self.workspace_change_selected = None;
+            self.workspace_change_detail = None;
+            self.workspace_change_detail_error = None;
+            self.workspace_change_detail_request =
+                self.workspace_change_detail_request.wrapping_add(1);
+            self.workspace_change_detail_task = None;
+            cx.notify();
+            return;
+        }
+        self.workspace_change_selected = Some(id);
+        self.workspace_change_detail = None;
+        self.workspace_change_detail_loading = true;
+        self.workspace_change_detail_error = None;
+        self.workspace_change_detail_request = self.workspace_change_detail_request.wrapping_add(1);
+        let request = self.workspace_change_detail_request;
+        let store = self.workspace_store.clone();
+        let query = cx.background_spawn(async move { store.workspace_change_detail(id) });
+        self.workspace_change_detail_task = Some(cx.spawn(async move |this, cx| {
+            let result = query.await;
+            this.update(cx, |this, cx| {
+                if this.workspace_change_detail_request != request
+                    || this.workspace_change_selected != Some(id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(detail) => this.workspace_change_detail = detail,
+                    Err(error) => this.workspace_change_detail_error = Some(format!("{error:#}")),
+                }
+                this.workspace_change_detail_loading = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn toggle_workspace_folder(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.workspace_change_open_folders.remove(&key) {
+            self.workspace_change_open_folders.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn toggle_workspace_file(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.workspace_change_open_files.remove(&key) {
+            self.workspace_change_open_files.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn confirm_delete_workspace_change(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |dialog, _window, cx| {
+            let entity = entity.clone();
+            dialog
+                .title(
+                    div()
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("删除这条工作区改动记录？"),
+                )
+                .width(px(440.))
+                .confirm()
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text("删除")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
+                .child(
+                    div()
+                        .text_size(FONT_BODY)
+                        .text_color(cx.theme().foreground)
+                        .child(
+                            "只删除 ContextOS 时间线中的这条记录，不删除工作区文件、基线或快照。",
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.delete_workspace_change(id, window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn delete_workspace_change(&mut self, id: i64, _window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.workspace_store.clone();
+        let task = cx.background_spawn(async move { store.delete_workspace_change(id) });
+        self.workspace_change_loading = true;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(true) => {
+                        if this.workspace_change_selected == Some(id) {
+                            this.workspace_change_selected = None;
+                            this.workspace_change_detail = None;
+                            this.workspace_change_detail_error = None;
+                            this.workspace_change_detail_loading = false;
+                            this.workspace_change_detail_request =
+                                this.workspace_change_detail_request.wrapping_add(1);
+                            this.workspace_change_detail_task = None;
+                        }
+                        this.workspace_change_error = None;
+                        this.reload_workspace_changes(true, cx);
+                    }
+                    Ok(false) => {
+                        this.workspace_change_loading = false;
+                        this.workspace_change_error = Some(format!("找不到工作区改动记录：{id}"));
+                    }
+                    Err(error) => {
+                        this.workspace_change_loading = false;
+                        this.workspace_change_error =
+                            Some(format!("删除工作区改动失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// messages 全表分桶几十毫秒量级,走后台;已有数据时静默换新不闪 loading。
@@ -2805,22 +6330,314 @@ impl Workbench {
         }
         self.insights_loading = self.insights.is_none();
         let store = self.store.clone();
-        let task =
-            cx.background_spawn(async move { store.insights(chrono::Local::now().date_naive()) });
+        let agent = self.insights_agent;
+        let range = self.insights_time_range;
+        let selected = self.insights_selected;
+        let (start_ms, end_ms) = selected.map_or_else(
+            || range.bounds(Local::now().date_naive()),
+            InsightsTimeRange::day_bounds,
+        );
+        let task = cx.background_spawn(async move {
+            store.insights_for_agent_range(Local::now().date_naive(), agent, start_ms, end_ms)
+        });
         self.insights_task = Some(cx.spawn(async move |this, cx| {
             let data = task.await;
             this.update(cx, |this, cx| {
-                if let Ok(data) = data {
-                    this.insights = Some(Rc::new(data));
+                if this.insights_agent == agent
+                    && this.insights_time_range == range
+                    && this.insights_selected == selected
+                {
+                    if let Ok(data) = data {
+                        this.insights = Some(Rc::new(data));
+                    }
+                    this.insights_loading = false;
+                    cx.notify();
                 }
-                this.insights_loading = false;
-                cx.notify();
             })
             .ok();
         }));
+        // 选中态下的周期快照同样来自 messages,整库重扫后一并刷新——
+        // 否则热力图的格子变了、三档分布还停在旧数字
+        if self.insights_selected.is_some() {
+            self.reload_insights_period(cx);
+        }
     }
 
-    /// 手动全量重扫(菜单 File → Refresh Sessions,⌘R)。刷新中忽略重复触发。
+    fn set_insights_agent(&mut self, agent: Option<AgentId>, cx: &mut Context<Self>) {
+        if self.insights_agent == agent {
+            return;
+        }
+        self.insights_agent = agent;
+        self.insights = None;
+        self.insights_selected = None;
+        self.insights_range_before_day = None;
+        self.insights_period = None;
+        self.insights_period_loading = false;
+        self.insights_period_task = None;
+        self.reload_insights(cx);
+        cx.notify();
+    }
+
+    fn set_insights_time_range(&mut self, range: InsightsTimeRange, cx: &mut Context<Self>) {
+        if self.insights_time_range == range && self.insights_selected.is_none() {
+            return;
+        }
+        self.insights_time_range = range;
+        self.insights_selected = None;
+        self.insights_range_before_day = None;
+        self.insights = None;
+        self.insights_period = None;
+        self.insights_period_loading = false;
+        self.insights_period_task = None;
+        self.reload_insights(cx);
+        cx.notify();
+    }
+
+    fn open_insights_custom_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Local::now();
+        let (start_day, start_clock, end_day, end_clock, live_end) = match self.insights_time_range
+        {
+            InsightsTimeRange::Custom {
+                start_ms,
+                end_ms,
+                live_end,
+            } => {
+                let start = chrono::DateTime::from_timestamp_millis(start_ms)
+                    .map(|dt| dt.with_timezone(&Local))
+                    .unwrap_or(now);
+                let end = if live_end {
+                    now
+                } else {
+                    chrono::DateTime::from_timestamp_millis(end_ms)
+                        .map(|dt| dt.with_timezone(&Local))
+                        .unwrap_or(now)
+                };
+                (
+                    start.date_naive(),
+                    start.time(),
+                    end.date_naive(),
+                    end.time(),
+                    live_end,
+                )
+            }
+            _ => {
+                let start = now.date_naive() - chrono::Days::new(6);
+                (
+                    start,
+                    chrono::NaiveTime::MIN,
+                    now.date_naive(),
+                    now.time(),
+                    true,
+                )
+            }
+        };
+        let date_text = |date: NaiveDate| date.format("%Y-%m-%d").to_string();
+        let time_text = |time: chrono::NaiveTime| time.format("%H:%M").to_string();
+        let start_date_input = cx.new(|cx| InputState::new(window, cx));
+        let start_time_input = cx.new(|cx| InputState::new(window, cx));
+        let end_date_input = cx.new(|cx| InputState::new(window, cx));
+        let end_time_input = cx.new(|cx| InputState::new(window, cx));
+        start_date_input.update(cx, |state, cx| {
+            state.set_value(date_text(start_day), window, cx)
+        });
+        start_time_input.update(cx, |state, cx| {
+            state.set_value(time_text(start_clock), window, cx)
+        });
+        end_date_input.update(cx, |state, cx| {
+            state.set_value(date_text(end_day), window, cx)
+        });
+        end_time_input.update(cx, |state, cx| {
+            state.set_value(time_text(end_clock), window, cx)
+        });
+        let live_end_state = Rc::new(Cell::new(live_end));
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            let inset = BUTTON_SM_PX;
+            let start_date_value = start_date_input.clone();
+            let start_time_value = start_time_input.clone();
+            let end_date_value = end_date_input.clone();
+            let end_time_value = end_time_input.clone();
+            let live_end_value = live_end_state.clone();
+            let live_end_checkbox_value = live_end_state.clone();
+            let entity = entity.clone();
+            dialog
+                .title(
+                    div()
+                        .pl(inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(t("Custom date range")),
+                )
+                .w(px(520.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t("Apply")),
+                )
+                .child(
+                    v_flex()
+                        .gap(SPACE_MD)
+                        .child(
+                            h_flex()
+                                .px(inset)
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(px(72.))
+                                        .text_color(theme.muted_foreground)
+                                        .child(t("Start")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Input::new(&start_date_input)),
+                                )
+                                .child(div().w(px(96.)).child(Input::new(&start_time_input))),
+                        )
+                        .child(
+                            h_flex()
+                                .px(inset)
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(px(72.))
+                                        .text_color(theme.muted_foreground)
+                                        .child(t("End")),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&end_date_input)))
+                                .child(div().w(px(96.)).child(Input::new(&end_time_input))),
+                        )
+                        .child(
+                            h_flex().px(inset).items_center().child(
+                                gpui_component::checkbox::Checkbox::new("insights-live-end")
+                                    .label(t("End time follows now"))
+                                    .checked(live_end)
+                                    .on_click(move |checked, _, _| {
+                                        live_end_checkbox_value.set(*checked);
+                                    }),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .px(inset)
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(t("Use YYYY-MM-DD and 24-hour HH:mm format.")),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let parse_date_time = |date: &str, time: &str| {
+                        let date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok()?;
+                        let time = chrono::NaiveTime::parse_from_str(time.trim(), "%H:%M").ok()?;
+                        Local
+                            .from_local_datetime(&date.and_time(time))
+                            .single()
+                            .map(|datetime| datetime.timestamp_millis())
+                    };
+                    let Some(start_ms) = parse_date_time(
+                        &start_date_value.read(cx).text().to_string(),
+                        &start_time_value.read(cx).text().to_string(),
+                    ) else {
+                        window.push_notification(
+                            Notification::error(t("Enter a valid start date and time.")),
+                            cx,
+                        );
+                        return false;
+                    };
+                    let live_end = live_end_value.get();
+                    let end_ms = if live_end {
+                        Local::now().timestamp_millis()
+                    } else {
+                        let Some(end_ms) = parse_date_time(
+                            &end_date_value.read(cx).text().to_string(),
+                            &end_time_value.read(cx).text().to_string(),
+                        ) else {
+                            window.push_notification(
+                                Notification::error(t("Enter a valid end date and time.")),
+                                cx,
+                            );
+                            return false;
+                        };
+                        end_ms.saturating_add(60_000)
+                    };
+                    if start_ms >= end_ms {
+                        window.push_notification(
+                            Notification::error(t("Start must be earlier than end.")),
+                            cx,
+                        );
+                        return false;
+                    }
+                    entity.update(cx, |this, cx| {
+                        this.set_insights_time_range(
+                            InsightsTimeRange::Custom {
+                                start_ms,
+                                end_ms,
+                                live_end,
+                            },
+                            cx,
+                        );
+                    });
+                    true
+                })
+        });
+    }
+
+    /// 热力图点选某天:再点同一格取消。三档分布与趋势高亮都跟着
+    /// `insights_selected` 走,所以只在这里改状态 + 取一次周期数据
+    fn toggle_insights_day(&mut self, day: chrono::NaiveDate, cx: &mut Context<Self>) {
+        if self.insights_selected == Some(day) {
+            // 再点同一天:恢复点击前的预设范围。
+            self.insights_selected = None;
+            self.insights_time_range = self
+                .insights_range_before_day
+                .take()
+                .unwrap_or(self.insights_time_range);
+            self.insights = None;
+            self.insights_period = None;
+            self.insights_period_loading = false;
+            self.insights_period_task = None;
+            self.reload_insights(cx);
+            cx.notify();
+            return;
+        }
+        if self.insights_selected.is_none() {
+            self.insights_range_before_day = Some(self.insights_time_range);
+        }
+        self.insights_selected = Some(day);
+        self.insights = None;
+        self.insights_period = None;
+        self.reload_insights(cx);
+    }
+
+    /// 取选中日的周期细分。与 reload_insights 同形:后台查询 + 回主线程写快照;
+    /// 新选中覆盖旧任务即取消(连点多个日子不会堆积读锁竞争)
+    fn reload_insights_period(&mut self, cx: &mut Context<Self>) {
+        let Some(day) = self.insights_selected else {
+            return;
+        };
+        self.insights_period_loading = true;
+        let store = self.store.clone();
+        let agent = self.insights_agent;
+        let task = cx.background_spawn(async move { store.period_breakdown_for_agent(day, agent) });
+        self.insights_period_task = Some(cx.spawn(async move |this, cx| {
+            let data = task.await;
+            this.update(cx, |this, cx| {
+                // 只认当前选中日的快照:任务在途中用户又点了别的天或取消选中,
+                // 迟到的结果不得覆盖(与 insights_task 的"覆盖即取消"同效)
+                if this.insights_selected == Some(day) && this.insights_agent == agent {
+                    this.insights_period = data.ok().map(Rc::new);
+                    this.insights_period_loading = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// 手动刷新会话。刷新中忽略重复触发；未变化的文件不重新解析。
     /// 扫描在后台进行，侧栏持续显示进度；浏览、搜索和阅读不被阻断。
     fn refresh_sessions(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.scan.scanning {
@@ -2836,7 +6653,26 @@ impl Workbench {
             self.adapters.clone(),
             self.store.clone(),
             self.scan_events.clone(),
-            true,
+            false,
+        );
+        self.sync_all_remote_hosts(cx);
+    }
+
+    pub(crate) fn refresh_from_tray(&mut self, cx: &mut Context<Self>) {
+        if self.scan.scanning {
+            return;
+        }
+        self.scan = ScanProgress {
+            scanning: true,
+            ..Default::default()
+        };
+        self.refreshing = true;
+        cx.notify();
+        spawn_scan(
+            self.adapters.clone(),
+            self.store.clone(),
+            self.scan_events.clone(),
+            false,
         );
         self.sync_all_remote_hosts(cx);
     }
@@ -2917,6 +6753,34 @@ impl Workbench {
         }
     }
 
+    pub(crate) fn retention_settings_snapshot(
+        &self,
+    ) -> Vec<wake_core::services::session_retention::RetentionSnapshot> {
+        wake_core::services::session_retention::current_snapshots()
+    }
+
+    pub(crate) fn save_retention_period(
+        &self,
+        agent: wake_core::services::session_retention::RetentionAgent,
+        value: &str,
+    ) -> Result<Vec<wake_core::services::session_retention::RetentionSnapshot>, String> {
+        wake_core::services::session_retention::write_current(agent, value)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    pub(crate) fn codex_compression_snapshot(
+        &self,
+    ) -> wake_core::services::codex_session_compression::CodexCompressionSnapshot {
+        wake_core::services::codex_session_compression::current_snapshot()
+    }
+
+    pub(crate) fn set_codex_compression_enabled(
+        &self,
+        enabled: bool,
+    ) -> wake_core::services::codex_session_compression::CodexCompressionSnapshot {
+        wake_core::services::codex_session_compression::set_current_enabled(enabled)
+    }
+
     /// 库内会话总数(各 agent 计数之和;侧栏 All Sessions、Data / Connect 页共用)
     pub(crate) fn session_total(&self) -> i64 {
         self.agent_counts.iter().map(|(_, n)| n).sum()
@@ -2933,6 +6797,2270 @@ impl Workbench {
     pub(crate) fn select_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         self.settings_page = page;
         cx.notify();
+    }
+
+    pub(crate) fn jev_config(&self) -> JevConfig {
+        let service = wake_core::services::compression_settings::load_settings(&self.store).service;
+        let (api_url, api_key) = match (service.decision_provider, service.laya_runtime_mode) {
+            (
+                wake_core::services::compression_settings::DecisionModelProvider::Laya,
+                wake_core::services::laya_runtime::LayaRuntimeMode::External,
+            ) => (
+                service.external_laya_api_url.clone(),
+                service.external_laya_api_key.clone(),
+            ),
+            (
+                wake_core::services::compression_settings::DecisionModelProvider::Laya,
+                wake_core::services::laya_runtime::LayaRuntimeMode::Managed,
+            ) => (String::new(), String::new()),
+            _ => (service.jev_api_url.clone(), service.jev_api_key.clone()),
+        };
+        JevConfig {
+            provider: service.decision_provider,
+            model: service.decision_model,
+            api_url,
+            api_key,
+            timeout_secs: service.jev_timeout_secs,
+            laya_runtime_mode: service.laya_runtime_mode,
+        }
+    }
+
+    pub(crate) fn laya_external_capabilities(
+        &self,
+    ) -> Option<wake_core::services::laya_runtime::LayaExternalCapabilities> {
+        self.laya_external_capabilities.clone()
+    }
+
+    fn llm_providers(&self) -> Vec<LlmProviderConfig> {
+        let mut providers = wake_core::services::compression_settings::load_settings(&self.store)
+            .service
+            .llm_providers
+            .into_iter()
+            .map(|provider| LlmProviderConfig {
+                id: provider.id,
+                name: provider.name,
+                api_url: provider.api_url,
+                api_key: provider.api_key,
+                model: provider.model,
+            })
+            .collect::<Vec<_>>();
+        if providers.is_empty() {
+            providers.push(LlmProviderConfig {
+                id: "default".into(),
+                name: "Provider 1".into(),
+                api_url: String::new(),
+                api_key: String::new(),
+                model: "gpt-4.1-mini".to_string(),
+            });
+        }
+        providers
+    }
+
+    fn active_llm_provider_index(&self) -> usize {
+        let settings = wake_core::services::compression_settings::load_settings(&self.store);
+        settings
+            .service
+            .llm_providers
+            .iter()
+            .position(|provider| provider.id == settings.service.active_llm_provider_id)
+            .unwrap_or(0)
+    }
+
+    fn save_llm_providers(&self, providers: &[LlmProviderConfig]) -> anyhow::Result<()> {
+        let current_active = wake_core::services::compression_settings::load_settings(&self.store)
+            .service
+            .active_llm_provider_id;
+        let active = providers
+            .iter()
+            .find(|provider| provider.id == current_active)
+            .or_else(|| providers.first())
+            .map(|provider| provider.id.as_str())
+            .unwrap_or_default();
+        self.save_llm_providers_with_active(providers, active)
+    }
+
+    fn save_llm_providers_with_active(
+        &self,
+        providers: &[LlmProviderConfig],
+        active_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut service =
+            wake_core::services::compression_settings::load_settings(&self.store).service;
+        service.llm_providers = providers
+            .iter()
+            .map(
+                |provider| wake_core::services::compression_settings::LlmProviderConfig {
+                    id: provider.id.clone(),
+                    name: provider.name.clone(),
+                    api_url: provider.api_url.clone(),
+                    api_key: provider.api_key.clone(),
+                    model: provider.model.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        service.active_llm_provider_id = active_id.to_string();
+        wake_core::services::compression_settings::save_service_settings(
+            &self.store,
+            &service,
+            true,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn compression_strategy_settings(
+        &self,
+    ) -> wake_core::services::compression_settings::CompressionStrategySettings {
+        wake_core::services::compression_settings::load_settings(&self.store).strategy
+    }
+
+    fn update_compression_strategy(
+        &mut self,
+        patch: serde_json::Value,
+        success: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let data = serde_json::json!({ "strategy": patch });
+        match wake_core::services::compression_settings::update_settings(
+            &self.store,
+            Some(&data),
+            None,
+        ) {
+            Ok(()) => {
+                window.push_notification(Notification::success(success), cx);
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                window
+                    .push_notification(Notification::error(crate::tf!("保存失败：{}", error)), cx);
+                false
+            }
+        }
+    }
+
+    pub(crate) fn update_mechanical_compression_setting(
+        &mut self,
+        mechanical_patch: serde_json::Value,
+        success: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_compression_strategy(
+            serde_json::json!({ "mechanical": mechanical_patch }),
+            success,
+            window,
+            cx,
+        );
+    }
+
+    fn reset_compression_strategy_path(
+        &mut self,
+        path: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let resets = serde_json::json!([path]);
+        match wake_core::services::compression_settings::update_settings(
+            &self.store,
+            None,
+            Some(&resets),
+        ) {
+            Ok(()) => {
+                window.push_notification(Notification::success("已恢复默认设置"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("恢复默认失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    pub(crate) fn compression_settings(&self) -> CompressionSettings {
+        let llm_providers = self.llm_providers();
+        let llm_provider_index = self.active_llm_provider_index();
+        let active_provider = llm_providers
+            .get(llm_provider_index)
+            .cloned()
+            .unwrap_or_default();
+        let tag_specific_strategies = SESSION_TAGS
+            .iter()
+            .map(|tag| {
+                let value = self
+                    .store
+                    .pref_get(&compression_strategy_tag_key(tag))
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| default_specific_tag_compression_strategy(tag));
+                ((*tag).to_string(), value)
+            })
+            .collect();
+        CompressionSettings {
+            llm_enabled: self.store.pref_get("compression_llm_enabled").as_deref() != Some("false"),
+            llm_api_url: active_provider.api_url.clone(),
+            llm_api_key: active_provider.api_key.clone(),
+            llm_model: active_provider.model.clone(),
+            llm_provider_index,
+            llm_provider_name: active_provider.name.clone(),
+            llm_timeout_secs: self
+                .store
+                .pref_get("compression_llm_timeout_secs")
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| (30..=3600).contains(value))
+                .unwrap_or(600),
+            llm_input_limit_chars: self
+                .store
+                .pref_get("compression_llm_input_limit_chars")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_LLM_INPUT_LIMIT_CHARS),
+            jev_enabled: self.store.pref_get("compression_jev_enabled").as_deref() == Some("true"),
+            single_strategy: self
+                .store
+                .pref_get("compression_strategy_single")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(default_single_compression_strategy),
+            memory_generation_strategy: self
+                .store
+                .pref_get("compression_strategy_memory_generation")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(default_memory_generation_strategy),
+            multi_strategy: self
+                .store
+                .pref_get("compression_strategy_multi")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(default_multi_compression_strategy),
+            tag_strategy: self
+                .store
+                .pref_get("compression_strategy_tags")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(default_tag_compression_strategy),
+            tag_specific_strategies,
+            relation_strategy: self
+                .store
+                .pref_get("compression_strategy_relations")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(default_relation_compression_strategy),
+        }
+    }
+
+    fn pref_set_notify(
+        &mut self,
+        key: &str,
+        value: &str,
+        success: &'static str,
+        failed: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.store.pref_set(key, value.trim()) {
+            Ok(()) => {
+                window.push_notification(Notification::success(success), cx);
+                cx.notify();
+            }
+            Err(error) => window
+                .push_notification(Notification::error(crate::tf!("{}：{}", failed, error)), cx),
+        }
+    }
+
+    fn set_jev_config_value(
+        &mut self,
+        field: JevConfigField,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = match field {
+            JevConfigField::Model => wake_core::services::compression_settings::DECISION_MODEL_KEY,
+            JevConfigField::JevApiUrl => "jev_api_url",
+            JevConfigField::JevApiKey => "jev_api_key",
+            JevConfigField::LayaApiUrl => {
+                wake_core::services::compression_settings::EXTERNAL_LAYA_API_URL_KEY
+            }
+            JevConfigField::LayaApiKey => "compression_external_laya_api_key",
+            JevConfigField::TimeoutSecs => {
+                let secs = value.trim().parse::<u64>().unwrap_or(60).clamp(10, 1800);
+                self.pref_set_notify(
+                    "jev_timeout_secs",
+                    &secs.to_string(),
+                    "决策模型配置已保存",
+                    "决策模型配置保存失败",
+                    window,
+                    cx,
+                );
+                return;
+            }
+        };
+        self.pref_set_notify(
+            key,
+            value,
+            "决策模型配置已保存",
+            "决策模型配置保存失败",
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn set_decision_provider(
+        &mut self,
+        provider: wake_core::services::compression_settings::DecisionModelProvider,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.jev_config();
+        let previous_default = current.provider.default_model();
+        if let Err(error) = self.store.pref_set(
+            wake_core::services::compression_settings::DECISION_PROVIDER_KEY,
+            provider.as_str(),
+        ) {
+            window.push_notification(
+                Notification::error(crate::tf!("决策模型提供方保存失败：{}", error)),
+                cx,
+            );
+            return;
+        }
+        if provider == wake_core::services::compression_settings::DecisionModelProvider::Laya {
+            let _ = self.store.pref_set(
+                wake_core::services::compression_settings::LAYA_RUNTIME_MODE_KEY,
+                current.laya_runtime_mode.as_str(),
+            );
+        }
+        if current.model.trim().is_empty() || current.model == previous_default {
+            let _ = self.store.pref_set(
+                wake_core::services::compression_settings::DECISION_MODEL_KEY,
+                provider.default_model(),
+            );
+        }
+        window.push_notification(
+            Notification::success(crate::tf!("已切换到 {}", provider.display_name())),
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn set_laya_runtime_mode(
+        &mut self,
+        mode: wake_core::services::laya_runtime::LayaRuntimeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pref_set_notify(
+            wake_core::services::compression_settings::LAYA_RUNTIME_MODE_KEY,
+            mode.as_str(),
+            "Laya 运行方式已保存",
+            "Laya 运行方式保存失败",
+            window,
+            cx,
+        );
+        if mode == wake_core::services::laya_runtime::LayaRuntimeMode::Managed {
+            self.maybe_start_managed_laya();
+        }
+    }
+
+    pub(crate) fn install_managed_laya(&mut self, cx: &mut Context<Self>) {
+        let tx = self.bg_tx.clone();
+        std::thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let progress: wake_core::services::laya_runtime::ProgressSink =
+                std::sync::Arc::new(move |_| {
+                    let _ = progress_tx.unbounded_send(BgEvent::LayaRuntimeChanged);
+                });
+            let result = wake_core::services::laya_runtime::manager()
+                .install(Some(progress))
+                .map(|_| "Laya 安装与批量推理验证完成；请重启 ContextOS".to_string())
+                .map_err(|error| format!("Laya 安装失败：{error:#}"));
+            let _ = tx.unbounded_send(BgEvent::LayaRuntimeFinished(result));
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn start_managed_laya(&mut self, cx: &mut Context<Self>) {
+        self.spawn_laya_runtime_command(
+            || {
+                wake_core::services::laya_runtime::manager()
+                    .start()
+                    .map(|_| "Laya 已启动".to_string())
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn stop_managed_laya(&mut self, cx: &mut Context<Self>) {
+        self.spawn_laya_runtime_command(
+            || {
+                wake_core::services::laya_runtime::manager()
+                    .stop()
+                    .map(|_| "Laya 已停止".to_string())
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn uninstall_managed_laya(&mut self, delete_models: bool, cx: &mut Context<Self>) {
+        self.spawn_laya_runtime_command(
+            move || {
+                wake_core::services::laya_runtime::manager()
+                    .uninstall(delete_models)
+                    .map(|_| {
+                        if delete_models {
+                            "Laya 与模型文件已卸载"
+                        } else {
+                            "Laya 已卸载；模型缓存已保留"
+                        }
+                        .to_string()
+                    })
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn probe_external_laya(&mut self, cx: &mut Context<Self>) {
+        let config = self.jev_config();
+        let tx = self.bg_tx.clone();
+        self.laya_external_capabilities = None;
+        std::thread::spawn(move || {
+            let result = wake_core::services::laya_runtime::probe_external_service(
+                &config.api_url,
+                &config.api_key,
+                &config.model,
+                Duration::from_secs(config.timeout_secs),
+            )
+            .map_err(|error| format!("外部 Laya 能力检测失败：{error:#}"));
+            let _ = tx.unbounded_send(BgEvent::LayaExternalProbeFinished(result));
+        });
+        cx.notify();
+    }
+
+    fn spawn_laya_runtime_command(
+        &mut self,
+        operation: impl FnOnce() -> anyhow::Result<String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let tx = self.bg_tx.clone();
+        let _ = tx.unbounded_send(BgEvent::LayaRuntimeChanged);
+        std::thread::spawn(move || {
+            let result = operation().map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(BgEvent::LayaRuntimeFinished(result));
+        });
+        cx.notify();
+    }
+
+    fn maybe_start_managed_laya(&self) {
+        let service = wake_core::services::compression_settings::load_settings(&self.store).service;
+        if service.decision_provider
+            != wake_core::services::compression_settings::DecisionModelProvider::Laya
+            || service.laya_runtime_mode
+                != wake_core::services::laya_runtime::LayaRuntimeMode::Managed
+        {
+            return;
+        }
+        let status = wake_core::services::laya_runtime::manager().status();
+        if status.install_state != wake_core::services::laya_runtime::LayaInstallState::Installed
+            || status.service_state != wake_core::services::laya_runtime::LayaServiceState::Stopped
+        {
+            return;
+        }
+        let tx = self.bg_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.unbounded_send(BgEvent::LayaRuntimeChanged);
+            let result = wake_core::services::laya_runtime::manager()
+                .start()
+                .map(|_| "Laya 已就绪".to_string())
+                .map_err(|error| format!("托管 Laya 启动失败：{error:#}"));
+            let _ = tx.unbounded_send(BgEvent::LayaRuntimeFinished(result));
+        });
+    }
+
+    fn set_compression_config_value(
+        &mut self,
+        field: CompressionConfigField,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut providers = self.llm_providers();
+        let index = self.active_llm_provider_index();
+        let Some(provider) = providers.get_mut(index) else {
+            return;
+        };
+        let trimmed = value.trim();
+        match field {
+            CompressionConfigField::LlmProviderName => {
+                provider.name = if trimmed.is_empty() {
+                    format!("Provider {}", index + 1)
+                } else {
+                    trimmed.to_string()
+                };
+            }
+            CompressionConfigField::LlmApiUrl => provider.api_url = trimmed.to_string(),
+            CompressionConfigField::LlmApiKey => {
+                if trimmed.is_empty() && !provider.api_key.trim().is_empty() {
+                    window.push_notification(Notification::info("API Key 未变更"), cx);
+                    return;
+                }
+                provider.api_key = trimmed.to_string();
+            }
+            CompressionConfigField::LlmModel => provider.model = trimmed.to_string(),
+            CompressionConfigField::LlmTimeoutSecs => {
+                let secs = trimmed.parse::<u64>().unwrap_or(600).clamp(30, 3600);
+                self.pref_set_notify(
+                    "compression_llm_timeout_secs",
+                    &secs.to_string(),
+                    "压缩配置已保存",
+                    "压缩配置保存失败",
+                    window,
+                    cx,
+                );
+                return;
+            }
+            CompressionConfigField::LlmInputLimitChars => {
+                let chars = trimmed
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .unwrap_or(DEFAULT_LLM_INPUT_LIMIT_CHARS);
+                self.pref_set_notify(
+                    "compression_llm_input_limit_chars",
+                    &chars.to_string(),
+                    "压缩配置已保存",
+                    "压缩配置保存失败",
+                    window,
+                    cx,
+                );
+                return;
+            }
+        }
+        match self.save_llm_providers(&providers) {
+            Ok(()) => {
+                window.push_notification(Notification::success("压缩配置已保存"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("压缩配置保存失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    pub(crate) fn toggle_compression_llm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.compression_settings().llm_enabled;
+        self.pref_set_notify(
+            "compression_llm_enabled",
+            if enabled { "true" } else { "false" },
+            "压缩配置已保存",
+            "压缩配置保存失败",
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn select_next_llm_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let providers = self.llm_providers();
+        let next = if providers.is_empty() {
+            0
+        } else {
+            (self.active_llm_provider_index() + 1) % providers.len()
+        };
+        let Some(provider) = providers.get(next) else {
+            return;
+        };
+        match self.store.pref_set(
+            wake_core::services::compression_settings::ACTIVE_PROVIDER_ID_KEY,
+            &provider.id,
+        ) {
+            Ok(()) => {
+                let _ = self.save_llm_providers(&providers);
+                window.push_notification(Notification::success("LLM Provider 已切换"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("LLM Provider 切换失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    pub(crate) fn add_llm_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut providers = self.llm_providers();
+        let index = providers.len() + 1;
+        let id = format!("provider-{index}");
+        providers.push(LlmProviderConfig {
+            id: id.clone(),
+            name: format!("Provider {index}"),
+            api_url: String::new(),
+            api_key: String::new(),
+            model: "gpt-4.1-mini".to_string(),
+        });
+        match self.save_llm_providers(&providers).and_then(|_| {
+            self.store.pref_set(
+                wake_core::services::compression_settings::ACTIVE_PROVIDER_ID_KEY,
+                &id,
+            )?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                window.push_notification(Notification::success("LLM Provider 已新增"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("LLM Provider 新增失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    pub(crate) fn delete_current_llm_provider(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut providers = self.llm_providers();
+        if providers.len() <= 1 {
+            window.push_notification(Notification::info("至少保留一个 LLM Provider"), cx);
+            return;
+        }
+        let index = self.active_llm_provider_index().min(providers.len() - 1);
+        providers.remove(index);
+        match self.save_llm_providers(&providers) {
+            Ok(()) => {
+                window.push_notification(Notification::success("LLM Provider 已删除"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("LLM Provider 删除失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    pub(crate) fn open_llm_provider_manager(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(900.));
+            let dialog_height = compression_dialog_max_height(window);
+            let list_height = compression_dialog_body_height(window, px(430.), px(190.));
+            let providers = entity.read(cx).llm_providers();
+            let active_id =
+                wake_core::services::compression_settings::load_settings(&entity.read(cx).store)
+                    .service
+                    .active_llm_provider_id;
+            let add_entity = entity.clone();
+            let rows = providers
+                .into_iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    let is_active = provider.id == active_id;
+                    let key_status = if provider.api_key.trim().is_empty() {
+                        "Key 未配置"
+                    } else {
+                        "Key 已配置"
+                    };
+                    let activate_entity = entity.clone();
+                    let activate_id = provider.id.clone();
+                    let edit_entity = entity.clone();
+                    let edit_id = provider.id.clone();
+                    let duplicate_entity = entity.clone();
+                    let duplicate_id = provider.id.clone();
+                    let delete_entity = entity.clone();
+                    let delete_id = provider.id.clone();
+                    let test_entity = entity.clone();
+                    let test_id = provider.id.clone();
+                    v_flex()
+                        .id(("llm-provider-row", index))
+                        .gap(SPACE_SM)
+                        .px(SPACE_MD)
+                        .py(SPACE_SM)
+                        .rounded(RADIUS_BUTTON)
+                        .border_1()
+                        .border_color(if is_active {
+                            theme.accent
+                        } else {
+                            theme.border
+                        })
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap(SPACE_SM)
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .gap(px(3.))
+                                        .child(
+                                            h_flex()
+                                                .gap(SPACE_SM)
+                                                .child(
+                                                    div()
+                                                        .text_size(FONT_BODY)
+                                                        .font_semibold()
+                                                        .child(provider.name.clone()),
+                                                )
+                                                .when(is_active, |row| {
+                                                    row.child(
+                                                        div()
+                                                            .text_size(FONT_CAPTION)
+                                                            .text_color(theme.accent)
+                                                            .child("当前启用"),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(FONT_CAPTION)
+                                                .text_color(theme.muted_foreground)
+                                                .child(provider.api_url.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(FONT_CAPTION)
+                                                .text_color(theme.muted_foreground)
+                                                .child(crate::tf!(
+                                                    "模型：{} · {}",
+                                                    provider.model,
+                                                    key_status
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .justify_end()
+                                        .gap(SPACE_XS)
+                                        .when(!is_active, |actions| {
+                                            actions.child(
+                                                Button::new(("provider-activate", index))
+                                                    .label("启用")
+                                                    .outline()
+                                                    .on_click(move |_, window, cx| {
+                                                        activate_entity.update(cx, |this, cx| {
+                                                            this.activate_llm_provider(
+                                                                &activate_id,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                    }),
+                                            )
+                                        })
+                                        .child(
+                                            Button::new(("provider-edit", index))
+                                                .label("编辑")
+                                                .outline()
+                                                .on_click(move |_, window, cx| {
+                                                    edit_entity.update(cx, |this, cx| {
+                                                        this.open_llm_provider_form(
+                                                            Some(edit_id.clone()),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new(("provider-copy", index))
+                                                .label("复制")
+                                                .outline()
+                                                .on_click(move |_, window, cx| {
+                                                    duplicate_entity.update(cx, |this, cx| {
+                                                        this.duplicate_llm_provider(
+                                                            &duplicate_id,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new(("provider-test", index))
+                                                .label("测试")
+                                                .outline()
+                                                .on_click(move |_, window, cx| {
+                                                    test_entity.update(cx, |this, cx| {
+                                                        this.test_llm_provider(&test_id, window, cx)
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new(("provider-delete", index))
+                                                .label("删除")
+                                                .outline()
+                                                .on_click(move |_, window, cx| {
+                                                    delete_entity.update(cx, |this, cx| {
+                                                        this.delete_llm_provider(
+                                                            &delete_id, window, cx,
+                                                        )
+                                                    });
+                                                }),
+                                        ),
+                                ),
+                        )
+                })
+                .collect::<Vec<_>>();
+            dialog
+                .title(div().pl(field_inset).text_size(FONT_HEADING).font_semibold().child("模型配置"))
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .child(
+                    v_flex()
+                        .px(field_inset)
+                        .gap(SPACE_MD)
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("所有配置均使用 OpenAI-compatible Chat Completions 接口。"))
+                                .child(Button::new("provider-add").label("添加 Provider").primary().on_click(move |_, window, cx| {
+                                    add_entity.update(cx, |this, cx| this.open_llm_provider_form(None, window, cx));
+                                })),
+                        )
+                        .child(v_flex().id("llm-provider-list").h(list_height).overflow_y_scroll().gap(SPACE_SM).children(rows)),
+                )
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("关闭"))
+                .on_ok(|_, _, _| true)
+        });
+    }
+
+    fn open_llm_provider_form(
+        &mut self,
+        provider_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let provider = provider_id.as_ref().and_then(|id| {
+            self.llm_providers()
+                .into_iter()
+                .find(|provider| provider.id == *id)
+        });
+        let is_new = provider.is_none();
+        let initial = provider.unwrap_or_else(|| LlmProviderConfig {
+            id: format!(
+                "provider-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
+            name: String::new(),
+            api_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+        });
+        let name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("例如 OpenAI / DeepSeek / OpenRouter")
+        });
+        name.update(cx, |state, cx| {
+            state.set_value(initial.name.clone(), window, cx)
+        });
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://example.com/v1"));
+        url.update(cx, |state, cx| {
+            state.set_value(initial.api_url.clone(), window, cx)
+        });
+        let key = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(if initial.api_key.is_empty() {
+                "sk-..."
+            } else {
+                "已配置；留空保持不变"
+            })
+        });
+        let model = cx.new(|cx| InputState::new(window, cx).placeholder("model-name"));
+        model.update(cx, |state, cx| {
+            state.set_value(initial.model.clone(), window, cx)
+        });
+        let entity = cx.entity();
+        let stable_id = initial.id.clone();
+        let existing_key = initial.api_key.clone();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(680.));
+            let dialog_height = compression_dialog_max_height(window);
+            let save_entity = entity.clone();
+            let save_name = name.clone();
+            let save_url = url.clone();
+            let save_key = key.clone();
+            let save_model = model.clone();
+            let save_id = stable_id.clone();
+            let preserve_key = existing_key.clone();
+            let clear_entity = entity.clone();
+            let clear_id = stable_id.clone();
+            let form_row = |label: &'static str, help: &'static str, input: &Entity<InputState>| {
+                v_flex()
+                    .gap(SPACE_XS)
+                    .child(
+                        h_flex()
+                            .gap(SPACE_MD)
+                            .items_center()
+                            .child(div().w(px(110.)).flex_shrink_0().child(label))
+                            .child(div().flex_1().min_w_0().child(Input::new(input))),
+                    )
+                    .child(
+                        div()
+                            .pl(px(126.))
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .child(help),
+                    )
+            };
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(if is_new {
+                            "添加 Provider"
+                        } else {
+                            "编辑 Provider"
+                        }),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .child(
+                    v_flex()
+                        .px(field_inset)
+                        .gap(SPACE_MD)
+                        .child(form_row("名称", "用于在模型列表中识别这组配置。", &name))
+                        .child(form_row(
+                            "API URL",
+                            "OpenAI-compatible API 基址；程序自动补 /v1/chat/completions。",
+                            &url,
+                        ))
+                        .child(form_row(
+                            "API Key",
+                            "不会回填明文；留空保存保持现有 Key。",
+                            &key,
+                        ))
+                        .child(form_row("模型", "请求中发送的 model 名称。", &model)),
+                )
+                .footer(
+                    gpui_component::dialog::DialogFooter::new()
+                        .w_full()
+                        .px(field_inset)
+                        .when(!is_new && !existing_key.is_empty(), |footer| {
+                            footer.child(
+                                Button::new("provider-clear-key")
+                                    .label("清空 API Key")
+                                    .outline()
+                                    .on_click(move |_, window, cx| {
+                                        clear_entity.update(cx, |this, cx| {
+                                            this.clear_llm_provider_key(&clear_id, window, cx)
+                                        });
+                                        window.close_dialog(cx);
+                                    }),
+                            )
+                        })
+                        .child(
+                            gpui_component::dialog::DialogClose::new()
+                                .child(Button::new("provider-form-cancel").label("取消").outline()),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogAction::new()
+                                .child(Button::new("provider-form-save").label("保存").primary()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let name_value = save_name.read(cx).text().to_string();
+                    let url_value = save_url.read(cx).text().to_string();
+                    let key_value = save_key.read(cx).text().to_string();
+                    let model_value = save_model.read(cx).text().to_string();
+                    if name_value.trim().is_empty()
+                        || url_value.trim().is_empty()
+                        || model_value.trim().is_empty()
+                    {
+                        window.push_notification(
+                            Notification::error("名称、API URL 和模型不能为空"),
+                            cx,
+                        );
+                        return false;
+                    }
+                    let provider = LlmProviderConfig {
+                        id: save_id.clone(),
+                        name: name_value.trim().to_string(),
+                        api_url: url_value.trim().to_string(),
+                        api_key: if key_value.trim().is_empty() {
+                            preserve_key.clone()
+                        } else {
+                            key_value.trim().to_string()
+                        },
+                        model: model_value.trim().to_string(),
+                    };
+                    save_entity.update(cx, |this, cx| {
+                        this.upsert_llm_provider(provider, is_new, window, cx)
+                    })
+                })
+        });
+    }
+
+    fn upsert_llm_provider(
+        &mut self,
+        provider: LlmProviderConfig,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut providers = self.llm_providers();
+        if let Some(existing) = providers.iter_mut().find(|item| item.id == provider.id) {
+            *existing = provider.clone();
+        } else {
+            providers.push(provider.clone());
+        }
+        let result = if activate {
+            self.save_llm_providers_with_active(&providers, &provider.id)
+        } else {
+            self.save_llm_providers(&providers)
+        };
+        match result {
+            Ok(()) => {
+                window.push_notification(Notification::success("模型配置已保存"), cx);
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(crate::tf!("模型配置保存失败：{}", error)),
+                    cx,
+                );
+                false
+            }
+        }
+    }
+
+    fn activate_llm_provider(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let providers = self.llm_providers();
+        match self.save_llm_providers_with_active(&providers, id) {
+            Ok(()) => {
+                window.push_notification(Notification::success("当前模型已切换"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("模型切换失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    fn duplicate_llm_provider(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut providers = self.llm_providers();
+        let Some(mut copy) = providers.iter().find(|provider| provider.id == id).cloned() else {
+            return;
+        };
+        copy.id = format!(
+            "provider-copy-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        copy.name = format!("{} 副本", copy.name);
+        providers.push(copy);
+        match self.save_llm_providers(&providers) {
+            Ok(()) => {
+                window.push_notification(Notification::success("Provider 已复制"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("Provider 复制失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    fn delete_llm_provider(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut providers = self.llm_providers();
+        if providers.len() <= 1 {
+            window.push_notification(Notification::info("至少保留一个 Provider"), cx);
+            return;
+        }
+        providers.retain(|provider| provider.id != id);
+        let active = wake_core::services::compression_settings::load_settings(&self.store)
+            .service
+            .active_llm_provider_id;
+        let next_active = if active == id {
+            providers[0].id.clone()
+        } else {
+            active
+        };
+        match self.save_llm_providers_with_active(&providers, &next_active) {
+            Ok(()) => {
+                window.push_notification(Notification::success("Provider 已删除"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("Provider 删除失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    fn clear_llm_provider_key(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut providers = self.llm_providers();
+        if let Some(provider) = providers.iter_mut().find(|provider| provider.id == id) {
+            provider.api_key.clear();
+        }
+        match self.save_llm_providers(&providers) {
+            Ok(()) => {
+                window.push_notification(Notification::success("API Key 已清空"), cx);
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("API Key 清空失败：{}", error)),
+                cx,
+            ),
+        }
+    }
+
+    fn test_llm_provider(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(provider) = self
+            .llm_providers()
+            .into_iter()
+            .find(|provider| provider.id == id)
+        else {
+            return;
+        };
+        if provider.api_url.trim().is_empty()
+            || provider.api_key.trim().is_empty()
+            || provider.model.trim().is_empty()
+        {
+            window.push_notification(
+                Notification::error("请先完整配置 API URL、API Key 和模型"),
+                cx,
+            );
+            return;
+        }
+        window.push_notification(Notification::info("正在测试模型连接..."), cx);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let response = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()?
+                    .post(llm_endpoint(&provider.api_url))
+                    .bearer_auth(&provider.api_key)
+                    .json(&serde_json::json!({
+                        "model": provider.model,
+                        "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "max_tokens": 8,
+                        "temperature": 0
+                    }))
+                    .send()?;
+                if !response.status().is_success() {
+                    anyhow::bail!("HTTP {}", response.status());
+                }
+                Ok(())
+            })();
+            let _ = sender.send(result.map_err(|error| error.to_string()));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = receiver
+                .await
+                .unwrap_or_else(|_| Err("测试任务意外结束".to_string()));
+            this.update_in(cx, |_this, window, cx| match result {
+                Ok(()) => window.push_notification(Notification::success("模型连接测试成功"), cx),
+                Err(error) => window.push_notification(
+                    Notification::error(crate::tf!("模型连接测试失败：{}", error)),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_compression_jev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.compression_settings().jev_enabled;
+        self.pref_set_notify(
+            "compression_jev_enabled",
+            if enabled { "true" } else { "false" },
+            "压缩配置已保存",
+            "压缩配置保存失败",
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn open_jev_config_form(
+        &mut self,
+        field: JevConfigField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let config = self.jev_config();
+        let service = wake_core::services::compression_settings::load_settings(&self.store).service;
+        let provider_name = match field {
+            JevConfigField::LayaApiUrl | JevConfigField::LayaApiKey => "Laya",
+            JevConfigField::JevApiUrl | JevConfigField::JevApiKey => "Jev",
+            _ => config.provider.display_name(),
+        };
+        let (title, label, placeholder, initial, helper): (
+            SharedString,
+            &'static str,
+            &'static str,
+            String,
+            SharedString,
+        ) = match field {
+            JevConfigField::Model => (
+                crate::tf!("设置 {} 模型", provider_name).into(),
+                "Model",
+                config.provider.default_model(),
+                config.model,
+                "发送到 /v1/systemone 请求体中的模型名。".into(),
+            ),
+            JevConfigField::JevApiUrl | JevConfigField::LayaApiUrl => (
+                crate::tf!("设置 {} API URL", provider_name).into(),
+                "URL",
+                if matches!(field, JevConfigField::LayaApiUrl) {
+                    "http://127.0.0.1:1337"
+                } else {
+                    "https://api.typesafe.ai"
+                },
+                if matches!(field, JevConfigField::LayaApiUrl) {
+                    service.external_laya_api_url
+                } else {
+                    service.jev_api_url
+                },
+                "填 API 基址即可；程序会自动补 /v1/systemone。".into(),
+            ),
+            JevConfigField::JevApiKey | JevConfigField::LayaApiKey => (
+                crate::tf!("设置 {} API Key", provider_name).into(),
+                "Key",
+                if match field {
+                    JevConfigField::LayaApiKey => service.external_laya_api_key.trim().is_empty(),
+                    _ => service.jev_api_key.trim().is_empty(),
+                } {
+                    "sk-..."
+                } else {
+                    "已配置；输入新 Key 覆盖，留空保持不变"
+                },
+                String::new(),
+                if matches!(field, JevConfigField::JevApiKey) {
+                    "API Key 不会在弹窗中回填明文；留空保存会保持原 Key 不变。".into()
+                } else {
+                    "外部 Laya 未启用认证时可留空；已配置的 Key 不会回填明文。".into()
+                },
+            ),
+            JevConfigField::TimeoutSecs => (
+                crate::tf!("设置 {} Timeout", provider_name).into(),
+                "Seconds",
+                "60",
+                config.timeout_secs.to_string(),
+                "决策模型请求超时时间，单位秒；范围 10-1800。".into(),
+            ),
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        if !initial.is_empty() {
+            input.update(cx, |st, cx| st.set_value(initial, window, cx));
+        }
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(520.));
+            let dialog_height = compression_dialog_max_height(window);
+            let dirty = input.read(cx).text().chars().any(|c| !c.is_whitespace());
+            let ok_entity = entity.clone();
+            let ok_input = input.clone();
+            let dialog = dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(title.clone()),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("保存"))
+                .child(
+                    v_flex()
+                        .gap(SPACE_SM)
+                        .child(
+                            h_flex()
+                                .px(field_inset)
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(FORM_LABEL_W)
+                                        .flex_shrink_0()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(label),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&input))),
+                        )
+                        .child(
+                            div()
+                                .pl(field_inset + FORM_LABEL_W + SPACE_SM)
+                                .pr(field_inset)
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(helper.clone()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let value = ok_input.read(cx).text().to_string();
+                    ok_entity.update(cx, |this, cx| {
+                        let existing_key = match field {
+                            JevConfigField::JevApiKey => {
+                                wake_core::services::compression_settings::load_settings(
+                                    &this.store,
+                                )
+                                .service
+                                .jev_api_key
+                            }
+                            JevConfigField::LayaApiKey => {
+                                wake_core::services::compression_settings::load_settings(
+                                    &this.store,
+                                )
+                                .service
+                                .external_laya_api_key
+                            }
+                            _ => String::new(),
+                        };
+                        if matches!(
+                            field,
+                            JevConfigField::JevApiKey | JevConfigField::LayaApiKey
+                        ) && value.trim().is_empty()
+                            && !existing_key.trim().is_empty()
+                        {
+                            window.push_notification(
+                                Notification::info("决策模型 API Key 未变更"),
+                                cx,
+                            );
+                        } else {
+                            this.set_jev_config_value(field, &value, window, cx);
+                        }
+                    });
+                    true
+                });
+            if dirty {
+                dialog.footer(
+                    gpui_component::dialog::DialogFooter::new()
+                        .w_full()
+                        .px(field_inset)
+                        .child(
+                            gpui_component::dialog::DialogClose::new()
+                                .child(Button::new("jev-config-cancel").label("取消").outline()),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogAction::new()
+                                .child(Button::new("jev-config-save").label("保存").primary()),
+                        ),
+                )
+            } else {
+                dialog
+            }
+        });
+    }
+
+    pub(crate) fn open_compression_config_form(
+        &mut self,
+        field: CompressionConfigField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = self.compression_settings();
+        let (title, label, placeholder, initial) = match field {
+            CompressionConfigField::LlmProviderName => (
+                "设置 LLM Provider 名称",
+                "名称",
+                "OpenAI / DeepSeek / Qwen...",
+                settings.llm_provider_name,
+            ),
+            CompressionConfigField::LlmApiUrl => (
+                "设置 LLM API URL",
+                "URL",
+                "https://api.openai.com",
+                settings.llm_api_url,
+            ),
+            CompressionConfigField::LlmApiKey => (
+                "设置 LLM API Key",
+                "Key",
+                if settings.llm_api_key.trim().is_empty() {
+                    "sk-..."
+                } else {
+                    "已配置；输入新 Key 覆盖，留空保持不变"
+                },
+                String::new(),
+            ),
+            CompressionConfigField::LlmModel => (
+                "设置 LLM Model",
+                "Model",
+                "gpt-4.1-mini",
+                settings.llm_model,
+            ),
+            CompressionConfigField::LlmTimeoutSecs => (
+                "设置 LLM Timeout",
+                "Seconds",
+                "600",
+                settings.llm_timeout_secs.to_string(),
+            ),
+            CompressionConfigField::LlmInputLimitChars => (
+                "设置 LLM 输入字数上限",
+                "Chars",
+                "1000000",
+                settings.llm_input_limit_chars.to_string(),
+            ),
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        if !initial.is_empty() {
+            input.update(cx, |st, cx| st.set_value(initial, window, cx));
+        }
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(520.));
+            let dialog_height = compression_dialog_max_height(window);
+            let ok_entity = entity.clone();
+            let ok_input = input.clone();
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(title),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("保存"))
+                .child(
+                    h_flex()
+                        .px(field_inset)
+                        .gap(SPACE_SM)
+                        .items_center()
+                        .child(
+                            div()
+                                .w(FORM_LABEL_W)
+                                .flex_shrink_0()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(label),
+                        )
+                        .child(div().flex_1().min_w_0().child(Input::new(&input))),
+                )
+                .on_ok(move |_, window, cx| {
+                    let value = ok_input.read(cx).text().to_string();
+                    ok_entity.update(cx, |this, cx| {
+                        this.set_compression_config_value(field, &value, window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    pub(crate) fn open_mechanical_rule_form(
+        &mut self,
+        rule: MechanicalRuleKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let strategy = self.compression_strategy_settings();
+        let mechanical = serde_json::to_value(strategy.mechanical).unwrap_or_default();
+        let current = mechanical
+            .get(rule.key())
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let fields = mechanical_field_specs(rule)
+            .iter()
+            .map(|spec| {
+                let value = current.get(spec.key).cloned().unwrap_or_default();
+                let display = match spec.field_type {
+                    MechanicalFieldType::Boolean => {
+                        if value.as_bool().unwrap_or(false) {
+                            "是".to_string()
+                        } else {
+                            "否".to_string()
+                        }
+                    }
+                    MechanicalFieldType::Number => value.as_u64().unwrap_or_default().to_string(),
+                    MechanicalFieldType::TextList => value
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default(),
+                };
+                let input = cx.new(|cx| InputState::new(window, cx));
+                input.update(cx, |state, cx| state.set_value(display, window, cx));
+                (*spec, input)
+            })
+            .collect::<Vec<_>>();
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(720.));
+            let dialog_height = compression_dialog_max_height(window);
+            let body_height = compression_dialog_body_height(window, px(470.), px(140.));
+            let save_entity = entity.clone();
+            let save_fields = fields.clone();
+            let reset_entity = entity.clone();
+            let reset_path: &'static str = match rule {
+                MechanicalRuleKind::EmptyOutput => "strategy.mechanical.empty_output_rule",
+                MechanicalRuleKind::ErrorProtection => "strategy.mechanical.error_protection_rule",
+                MechanicalRuleKind::Patch => "strategy.mechanical.patch_rule",
+                MechanicalRuleKind::SourceListing => "strategy.mechanical.source_listing_rule",
+                MechanicalRuleKind::SearchOutput => "strategy.mechanical.search_output_rule",
+                MechanicalRuleKind::ListingOutput => "strategy.mechanical.listing_output_rule",
+                MechanicalRuleKind::InstructionAndToolSpec => {
+                    "strategy.mechanical.instruction_and_tool_spec_rule"
+                }
+                MechanicalRuleKind::GenericLargeOutput => {
+                    "strategy.mechanical.generic_large_output_rule"
+                }
+            };
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(crate::tf!("编辑{}", rule.title())),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .child(
+                    v_flex()
+                        .id("mechanical-rule-form-scroll")
+                        .h(body_height)
+                        .overflow_y_scrollbar()
+                        .px(field_inset)
+                        .gap(SPACE_MD)
+                        .children(fields.iter().enumerate().map(|(index, (spec, input))| {
+                            v_flex()
+                                .id(("mechanical-rule-field", index))
+                                .gap(SPACE_XS)
+                                .child(
+                                    h_flex()
+                                        .gap(SPACE_MD)
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(170.))
+                                                .flex_shrink_0()
+                                                .text_size(FONT_BODY)
+                                                .child(spec.label),
+                                        )
+                                        .child(div().flex_1().min_w_0().child(Input::new(input))),
+                                )
+                                .child(
+                                    div()
+                                        .pl(px(186.))
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(spec.help),
+                                )
+                        })),
+                )
+                .footer(
+                    gpui_component::dialog::DialogFooter::new()
+                        .w_full()
+                        .px(field_inset)
+                        .child(
+                            Button::new("mechanical-rule-reset")
+                                .label("恢复本组默认")
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    reset_entity.update(cx, |this, cx| {
+                                        this.reset_compression_strategy_path(
+                                            reset_path, window, cx,
+                                        );
+                                    });
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogClose::new().child(
+                                Button::new("mechanical-rule-cancel")
+                                    .label("取消")
+                                    .outline(),
+                            ),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogAction::new()
+                                .child(Button::new("mechanical-rule-save").label("保存").primary()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let mut rule_patch = serde_json::Map::new();
+                    for (spec, input) in &save_fields {
+                        let raw = input.read(cx).text().to_string();
+                        let raw = raw.trim().to_string();
+                        let value = match spec.field_type {
+                            MechanicalFieldType::Boolean => match raw.to_ascii_lowercase().as_str()
+                            {
+                                "是" | "true" | "1" | "yes" => serde_json::Value::Bool(true),
+                                "否" | "false" | "0" | "no" => serde_json::Value::Bool(false),
+                                _ => {
+                                    window.push_notification(
+                                        Notification::error(crate::tf!(
+                                            "{}：请填写 是 或 否",
+                                            spec.label
+                                        )),
+                                        cx,
+                                    );
+                                    return false;
+                                }
+                            },
+                            MechanicalFieldType::Number => match raw.parse::<u64>() {
+                                Ok(number) => serde_json::json!(number),
+                                Err(_) => {
+                                    window.push_notification(
+                                        Notification::error(crate::tf!(
+                                            "{}：请输入非负整数",
+                                            spec.label
+                                        )),
+                                        cx,
+                                    );
+                                    return false;
+                                }
+                            },
+                            MechanicalFieldType::TextList => serde_json::Value::Array(
+                                raw.replace('，', ",")
+                                    .split(',')
+                                    .map(str::trim)
+                                    .filter(|item| !item.is_empty())
+                                    .map(|item| serde_json::Value::String(item.to_string()))
+                                    .collect(),
+                            ),
+                        };
+                        rule_patch.insert(spec.key.to_string(), value);
+                    }
+                    let patch = serde_json::json!({
+                        "mechanical": { rule.key(): serde_json::Value::Object(rule_patch) }
+                    });
+                    save_entity.update(cx, |this, cx| {
+                        this.update_compression_strategy(patch, "机械压缩规则已保存", window, cx)
+                    })
+                })
+        });
+    }
+
+    pub(crate) fn open_mechanical_retention_limits_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mechanical = self.compression_strategy_settings().mechanical;
+        let expanded = cx.new(|cx| InputState::new(window, cx));
+        let evidence = cx.new(|cx| InputState::new(window, cx));
+        expanded.update(cx, |state, cx| {
+            state.set_value(mechanical.expanded_max_chars.to_string(), window, cx)
+        });
+        evidence.update(cx, |state, cx| {
+            state.set_value(mechanical.evidence_max_chars.to_string(), window, cx)
+        });
+        let entity = cx.entity();
+        let save_expanded = expanded.clone();
+        let save_evidence = evidence.clone();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let inset = BUTTON_SM_PX;
+            let ok_entity = entity.clone();
+            let ok_expanded = save_expanded.clone();
+            let ok_evidence = save_evidence.clone();
+            dialog
+                .title(div().pl(inset).text_size(FONT_HEADING).font_semibold().child("编辑恢复输出上限"))
+                .w(compression_dialog_width(window, px(620.)))
+                .max_h(compression_dialog_max_height(window))
+                .child(v_flex().px(inset).gap(SPACE_MD)
+                    .child(v_flex().gap(SPACE_XS)
+                        .child(div().text_size(FONT_BODY).child("扩展片段字符上限"))
+                        .child(Input::new(&expanded))
+                        .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("expanded 超出此上限时保留头尾片段。")))
+                    .child(v_flex().gap(SPACE_XS)
+                        .child(div().text_size(FONT_BODY).child("关键证据字符上限"))
+                        .child(Input::new(&evidence))
+                        .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("evidence 仅从本地输出中提取受限证据；无法提取时回退到机械结果。"))))
+                .footer(gpui_component::dialog::DialogFooter::new().w_full().px(inset)
+                    .child(gpui_component::dialog::DialogClose::new().child(Button::new("retention-limits-cancel").label("取消").outline()))
+                    .child(gpui_component::dialog::DialogAction::new().child(Button::new("retention-limits-save").label("保存").primary())))
+                .on_ok(move |_, window, cx| {
+                    let parse = |input: &Entity<InputState>| input.read(cx).text().to_string().trim().parse::<u64>().ok().filter(|value| *value > 0);
+                    let (Some(expanded), Some(evidence)) = (parse(&ok_expanded), parse(&ok_evidence)) else {
+                        window.push_notification(Notification::error("字符上限必须是大于 0 的整数"), cx);
+                        return false;
+                    };
+                    ok_entity.update(cx, |this, cx| this.update_mechanical_compression_setting(
+                        serde_json::json!({ "expanded_max_chars": expanded, "evidence_max_chars": evidence }),
+                        "恢复输出上限已保存", window, cx,
+                    ));
+                    true
+                })
+        });
+    }
+
+    pub(crate) fn open_jev_strategy_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.compression_strategy_settings().jev;
+        let prompt = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(12)
+                .placeholder("说明评分范围、判断依据和 JSON 输出格式...")
+                .default_value(current.jev_prompt_template.clone())
+        });
+        let request_limit = cx.new(|cx| InputState::new(window, cx));
+        request_limit.update(cx, |state, cx| {
+            state.set_value(current.jev_request_char_limit.to_string(), window, cx)
+        });
+        let candidate_min = cx.new(|cx| InputState::new(window, cx));
+        candidate_min.update(cx, |state, cx| {
+            state.set_value(current.jev_candidate_min_chars.to_string(), window, cx)
+        });
+        let fallback = cx.new(|cx| InputState::new(window, cx));
+        fallback.update(cx, |state, cx| {
+            let value = match current.jev_fallback_on_error {
+                wake_core::services::compression_settings::JevFallback::UseMechanical => {
+                    "使用机械结果"
+                }
+                wake_core::services::compression_settings::JevFallback::Fail => "压缩失败",
+            };
+            state.set_value(value, window, cx)
+        });
+        let scoring_mode = cx.new(|cx| InputState::new(window, cx));
+        scoring_mode.update(cx, |state, cx| {
+            let value = match current.scoring_mode {
+                wake_core::services::compression_settings::DecisionScoringMode::Absolute => {
+                    "绝对评分"
+                }
+                wake_core::services::compression_settings::DecisionScoringMode::Relative => {
+                    "相对评分"
+                }
+            };
+            state.set_value(value, window, cx)
+        });
+        let levels = current
+            .jev_score_levels
+            .iter()
+            .map(|level| {
+                let label = cx.new(|cx| InputState::new(window, cx));
+                label.update(cx, |state, cx| {
+                    state.set_value(level.label.clone(), window, cx)
+                });
+                let score = cx.new(|cx| InputState::new(window, cx));
+                score.update(cx, |state, cx| {
+                    state.set_value(format!("{:.2}", level.max_score), window, cx)
+                });
+                let action = cx.new(|cx| InputState::new(window, cx));
+                action.update(cx, |state, cx| {
+                    state.set_value(jev_action_chinese(level.action), window, cx)
+                });
+                (level.id.clone(), label, score, action)
+            })
+            .collect::<Vec<_>>();
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(860.));
+            let dialog_height = compression_dialog_max_height(window);
+            let body_height = compression_dialog_body_height(window, px(590.), px(140.));
+            let save_entity = entity.clone();
+            let save_prompt = prompt.clone();
+            let save_request_limit = request_limit.clone();
+            let save_candidate_min = candidate_min.clone();
+            let save_fallback = fallback.clone();
+            let save_scoring_mode = scoring_mode.clone();
+            let save_levels = levels.clone();
+            let reset_entity = entity.clone();
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("决策模型评分提示词"),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .child(
+                    v_flex()
+                        .id("jev-strategy-form-scroll")
+                        .h(body_height)
+                        .overflow_y_scrollbar()
+                        .px(field_inset)
+                        .gap(SPACE_MD)
+                        .child(div().text_size(FONT_LABEL).font_semibold().child("评分提示词"))
+                        .child(div().h(px(230.)).child(Textarea::new(&prompt).h_full()))
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child("提示词应要求返回 score、reason 和 evidence_hints，并解释 0.0 到 1.0 的评分依据。"),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(SPACE_MD)
+                                .child(v_flex().flex_1().gap(SPACE_XS).child("单次请求最大字符数").child(Input::new(&request_limit)))
+                                .child(v_flex().flex_1().gap(SPACE_XS).child("候选最小字符数").child(Input::new(&candidate_min)))
+                                .child(v_flex().flex_1().gap(SPACE_XS).child("失败降级行为").child(Input::new(&fallback))),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .child("最终分档方式")
+                                .child(Input::new(&scoring_mode))
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child("可填“相对评分”或“绝对评分”。相对评分会在整份导出完成评估后统一排序，同时保留绝对安全下限。"),
+                                ),
+                        )
+                        .child(div().pt(SPACE_SM).text_size(FONT_LABEL).font_semibold().child("评分等级"))
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child("固定六级；最高分必须递增，最后一级必须为 1.0。动作可填：删除、极简占位、机械裁剪、关键证据、扩展片段、近全文。"),
+                        )
+                        .children(levels.iter().enumerate().map(|(index, (id, label, score, action))| {
+                            h_flex()
+                                .id(("jev-score-level", index))
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(div().w(px(86.)).flex_shrink_0().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(id.clone()))
+                                .child(v_flex().flex_1().gap(px(3.)).child("中文说明").child(Input::new(label)))
+                                .child(v_flex().w(px(120.)).gap(px(3.)).child("最高分").child(Input::new(score)))
+                                .child(v_flex().w(px(150.)).gap(px(3.)).child("对应动作").child(Input::new(action)))
+                        }))
+                        .child(div().pt(SPACE_SM).text_size(FONT_LABEL).font_semibold().child("示例"))
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child("0.10：重复的成功轮询，没有接手价值，删除。")
+                                .child("0.68：包含编译失败行和文件路径，保留关键证据。")
+                                .child("0.95：完整 Patch 是唯一修改证据且难以摘要，预算允许时近全文保留。"),
+                        ),
+                )
+                .footer(
+                    gpui_component::dialog::DialogFooter::new()
+                        .w_full()
+                        .px(field_inset)
+                        .child(
+                            Button::new("jev-strategy-reset")
+                                .label("恢复全部默认")
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    reset_entity.update(cx, |this, cx| {
+                                        this.reset_compression_strategy_path("strategy.jev", window, cx);
+                                    });
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(gpui_component::dialog::DialogClose::new().child(Button::new("jev-strategy-cancel").label("取消").outline()))
+                        .child(gpui_component::dialog::DialogAction::new().child(Button::new("jev-strategy-save").label("保存").primary())),
+                )
+                .on_ok(move |_, window, cx| {
+                    let mut parse_positive = |input: &Entity<InputState>, label: &str| -> Option<usize> {
+                        let value = input.read(cx).text().to_string();
+                        match value.trim().parse::<usize>().ok().filter(|value| *value > 0) {
+                            Some(value) => Some(value),
+                            None => {
+                                window.push_notification(Notification::error(crate::tf!("{}：请输入大于 0 的整数", label)), cx);
+                                None
+                            }
+                        }
+                    };
+                    let Some(request_chars) = parse_positive(&save_request_limit, "单次请求最大字符数") else { return false; };
+                    let Some(candidate_chars) = parse_positive(&save_candidate_min, "候选最小字符数") else { return false; };
+                    let fallback_text = save_fallback.read(cx).text().to_string();
+                    let fallback_value = match fallback_text.trim().to_ascii_lowercase().as_str() {
+                        "使用机械结果" | "use_mechanical" => wake_core::services::compression_settings::JevFallback::UseMechanical,
+                        "压缩失败" | "fail" => wake_core::services::compression_settings::JevFallback::Fail,
+                        _ => {
+                            window.push_notification(Notification::error("失败降级行为只能填写“使用机械结果”或“压缩失败”"), cx);
+                            return false;
+                        }
+                    };
+                    let scoring_mode_text = save_scoring_mode.read(cx).text().to_string();
+                    let scoring_mode_value = match scoring_mode_text.trim().to_ascii_lowercase().as_str() {
+                        "相对评分" | "relative" => wake_core::services::compression_settings::DecisionScoringMode::Relative,
+                        "绝对评分" | "absolute" => wake_core::services::compression_settings::DecisionScoringMode::Absolute,
+                        _ => {
+                            window.push_notification(Notification::error("最终分档方式只能填写“相对评分”或“绝对评分”"), cx);
+                            return false;
+                        }
+                    };
+                    let mut score_levels = Vec::with_capacity(save_levels.len());
+                    for (id, label, score, action) in &save_levels {
+                        let label_value = label.read(cx).text().to_string();
+                        if label_value.trim().is_empty() {
+                            window.push_notification(Notification::error("评分等级的中文说明不能为空"), cx);
+                            return false;
+                        }
+                        let score_text = score.read(cx).text().to_string();
+                        let Ok(max_score) = score_text.trim().parse::<f64>() else {
+                            window.push_notification(Notification::error("评分等级最高分必须是 0.0 到 1.0 的数字"), cx);
+                            return false;
+                        };
+                        let action_text = action.read(cx).text().to_string();
+                        let Some(action_value) = parse_jev_action(&action_text) else {
+                            window.push_notification(Notification::error("评分动作不在固定白名单中"), cx);
+                            return false;
+                        };
+                        score_levels.push(wake_core::services::compression_settings::JevScoreLevel {
+                            id: id.clone(),
+                            label: label_value.trim().to_string(),
+                            max_score,
+                            action: action_value,
+                        });
+                    }
+                    let prompt_value = save_prompt.read(cx).value().to_string();
+                    let jev = wake_core::services::compression_settings::JevStrategySettings {
+                        jev_request_char_limit: request_chars,
+                        jev_candidate_min_chars: candidate_chars,
+                        jev_prompt_template: prompt_value,
+                        jev_fallback_on_error: fallback_value,
+                        scoring_mode: scoring_mode_value,
+                        jev_score_levels: score_levels,
+                    };
+                    let patch = serde_json::json!({ "jev": serde_json::to_value(jev).unwrap_or_default() });
+                    save_entity.update(cx, |this, cx| {
+                        this.update_compression_strategy(
+                            patch,
+                            "决策模型评分策略已保存",
+                            window,
+                            cx,
+                        )
+                    })
+                })
+        });
+    }
+
+    pub(crate) fn open_llm_temperature_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.compression_strategy_settings().llm.llm_temperature;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("0.2"));
+        input.update(cx, |state, cx| {
+            state.set_value(current.to_string(), window, cx)
+        });
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, _cx| {
+            let save_entity = entity.clone();
+            let save_input = input.clone();
+            let dialog_width = compression_dialog_width(window, px(480.));
+            let dialog_height = compression_dialog_max_height(window);
+            dialog
+                .title("设置 LLM Temperature")
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .child(
+                    v_flex()
+                        .px(BUTTON_SM_PX)
+                        .gap(SPACE_SM)
+                        .child(Input::new(&input))
+                        .child("允许范围 0.0 到 2.0。"),
+                )
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("保存"))
+                .on_ok(move |_, window, cx| {
+                    let value = save_input.read(cx).text().to_string();
+                    let Ok(temperature) = value.trim().parse::<f64>() else {
+                        window.push_notification(Notification::error("Temperature 必须是数字"), cx);
+                        return false;
+                    };
+                    save_entity.update(cx, |this, cx| {
+                        this.update_compression_strategy(
+                            serde_json::json!({ "llm": { "llm_temperature": temperature } }),
+                            "LLM Temperature 已保存",
+                            window,
+                            cx,
+                        )
+                    })
+                })
+        });
+    }
+
+    pub(crate) fn open_compression_strategy_form(
+        &mut self,
+        field: CompressionStrategyField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(field, CompressionStrategyField::Tags) {
+            self.open_compression_tag_strategies_form(window, cx);
+            return;
+        }
+        let settings = self.compression_settings();
+        let llm = self.compression_strategy_settings().llm;
+        let (title, key, initial, reset_path) = match field {
+            CompressionStrategyField::Single => (
+                "编辑单会话压缩策略".to_string(),
+                "compression_strategy_single".to_string(),
+                settings.single_strategy,
+                None,
+            ),
+            CompressionStrategyField::MemoryGeneration => (
+                "编辑压缩并生成记忆提示词".to_string(),
+                "compression_strategy_memory_generation".to_string(),
+                llm.memory_generation_strategy.clone(),
+                None,
+            ),
+            CompressionStrategyField::Multi => (
+                "编辑多会话压缩策略".to_string(),
+                "compression_strategy_multi".to_string(),
+                settings.multi_strategy,
+                None,
+            ),
+            CompressionStrategyField::Tags => unreachable!(),
+            CompressionStrategyField::TagsGeneral => (
+                "编辑通用标签压缩策略".to_string(),
+                "compression_strategy_tags".to_string(),
+                settings.tag_strategy,
+                None,
+            ),
+            CompressionStrategyField::TagSpecific(tag) => (
+                format!("编辑{}标签压缩策略", session_tag_label(tag)),
+                compression_strategy_tag_key(tag),
+                settings
+                    .tag_specific_strategies
+                    .get(tag)
+                    .cloned()
+                    .unwrap_or_else(|| default_specific_tag_compression_strategy(tag)),
+                None,
+            ),
+            CompressionStrategyField::Relations => (
+                "编辑关系压缩策略".to_string(),
+                "compression_strategy_relations".to_string(),
+                settings.relation_strategy,
+                None,
+            ),
+            CompressionStrategyField::LlmSystemMessage => (
+                "编辑 LLM System Message".to_string(),
+                "llm_system_message".to_string(),
+                llm.llm_system_message,
+                Some("strategy.llm.llm_system_message"),
+            ),
+            CompressionStrategyField::LlmTaskTemplate => (
+                "编辑 LLM Task 模板".to_string(),
+                "llm_task_template".to_string(),
+                llm.llm_task_template,
+                Some("strategy.llm.llm_task_template"),
+            ),
+            CompressionStrategyField::LlmUserPromptTemplate => (
+                "编辑 LLM 用户提示词模板".to_string(),
+                "llm_user_prompt_template".to_string(),
+                llm.llm_user_prompt_template,
+                Some("strategy.llm.llm_user_prompt_template"),
+            ),
+            CompressionStrategyField::LlmMemoryCandidateContract => (
+                "编辑记忆候选输出契约".to_string(),
+                "llm_memory_candidate_contract".to_string(),
+                llm.llm_memory_candidate_contract,
+                Some("strategy.llm.llm_memory_candidate_contract"),
+            ),
+        };
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(10)
+                .placeholder("写入压缩策略...")
+                .default_value(initial)
+        });
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, _cx| {
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(720.));
+            let dialog_height = compression_dialog_max_height(window);
+            let body_height = compression_dialog_body_height(window, px(300.), px(140.));
+            let ok_entity = entity.clone();
+            let ok_input = input.clone();
+            let ok_key = key.clone();
+            let reset_entity = entity.clone();
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(title.clone()),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("保存"))
+                .child(
+                    div()
+                        .px(field_inset)
+                        .h(body_height)
+                        .child(Textarea::new(&input).h_full()),
+                )
+                .footer(
+                    gpui_component::dialog::DialogFooter::new()
+                        .w_full()
+                        .px(field_inset)
+                        .when_some(reset_path, move |footer, path| {
+                            footer.child(
+                                Button::new("compression-strategy-reset")
+                                    .label("恢复默认")
+                                    .outline()
+                                    .on_click(move |_, window, cx| {
+                                        reset_entity.update(cx, |this, cx| {
+                                            this.reset_compression_strategy_path(path, window, cx);
+                                        });
+                                        window.close_dialog(cx);
+                                    }),
+                            )
+                        })
+                        .child(
+                            gpui_component::dialog::DialogClose::new().child(
+                                Button::new("compression-strategy-cancel")
+                                    .label("取消")
+                                    .outline(),
+                            ),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogAction::new().child(
+                                Button::new("compression-strategy-save")
+                                    .label("保存")
+                                    .primary(),
+                            ),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let value = ok_input.read(cx).value().to_string();
+                    let field_key = ok_key.clone();
+                    let is_llm_template = field_key.starts_with("llm_");
+                    ok_entity.update(cx, move |this, cx| {
+                        if is_llm_template {
+                            let mut llm_patch = serde_json::Map::new();
+                            llm_patch.insert(field_key.clone(), serde_json::Value::String(value));
+                            this.update_compression_strategy(
+                                serde_json::json!({ "llm": serde_json::Value::Object(llm_patch) }),
+                                "LLM 提示词模板已保存",
+                                window,
+                                cx,
+                            )
+                        } else {
+                            this.pref_set_notify(
+                                &field_key,
+                                &value,
+                                "压缩策略已保存",
+                                "压缩策略保存失败",
+                                window,
+                                cx,
+                            );
+                            true
+                        }
+                    })
+                })
+        });
+    }
+
+    fn open_compression_tag_strategies_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            let dialog_width = compression_dialog_width(window, px(720.));
+            let dialog_height = compression_dialog_max_height(window);
+            let body_height = compression_dialog_body_height(window, px(420.), px(140.));
+            let edit_button =
+                |id: &'static str, field: CompressionStrategyField, entity: Entity<Self>| {
+                    Button::new(id)
+                        .label("编辑")
+                        .outline()
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.open_compression_strategy_form(field, window, cx);
+                            });
+                        })
+                };
+            let row =
+                |title: &'static str, description: &'static str, button: Button| -> AnyElement {
+                    h_flex()
+                        .w_full()
+                        .gap(SPACE_MD)
+                        .items_center()
+                        .px(SPACE_MD)
+                        .py(SPACE_SM)
+                        .rounded(RADIUS_BUTTON)
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .text_size(FONT_BODY)
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(description),
+                                ),
+                        )
+                        .child(button)
+                        .into_any_element()
+                };
+            let tag_rows = compression_strategy_tag_options()
+                .into_iter()
+                .map(|(tag, label)| {
+                    row(
+                        label,
+                        "仅当当前会话带有这个标签时追加到 LLM 压缩提示词。",
+                        edit_button(
+                            compression_strategy_tag_button_id(tag),
+                            CompressionStrategyField::TagSpecific(tag),
+                            entity.clone(),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("标签策略"),
+                )
+                .w(dialog_width)
+                .max_h(dialog_height)
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("关闭"))
+                .child(
+                    v_flex()
+                        .id("compression-tag-strategies-scroll")
+                        .h(body_height)
+                        .overflow_y_scroll()
+                        .px(field_inset)
+                        .gap(SPACE_SM)
+                        .child(row(
+                            "通用标签策略",
+                            "所有带标签的压缩都会使用这一段。",
+                            edit_button(
+                                "compression-strategy-tags-general",
+                                CompressionStrategyField::TagsGeneral,
+                                entity.clone(),
+                            ),
+                        ))
+                        .children(tag_rows),
+                )
+                .on_ok(|_, _, _| true)
+        });
     }
 
     pub(crate) fn open_about(&mut self, cx: &mut Context<Self>) {
@@ -3016,7 +9144,7 @@ impl Workbench {
             }
         } else {
             TitlebarOptions {
-                title: Some(t("Wake Settings").into()),
+                title: Some(t("ContextOS Settings").into()),
                 appears_transparent: false,
                 traffic_light_position: None,
             }
@@ -3028,7 +9156,7 @@ impl Workbench {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(720.), px(520.))),
                 display_id,
-                app_id: Some("wake-settings".into()),
+                app_id: Some("contextos-settings".into()),
                 window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },
@@ -3048,7 +9176,7 @@ impl Workbench {
                 workbench.update(cx, |this, _| this.settings_window = Some(handle.into()));
                 cx.activate(true);
             }
-            Err(error) => eprintln!("failed to open Wake settings: {error}"),
+            Err(error) => eprintln!("failed to open ContextOS settings: {error}"),
         }
     }
 
@@ -3063,8 +9191,8 @@ impl Workbench {
     /// 新旧两份实例不共存(不变量 8 的运行时补充:"单实例"指任一时刻只有一份
     /// 在服务,换代必须整体换、所有消费方跟随新 Arc)
     fn rebuild_roster(&mut self, cx: &mut Context<Self>) {
-        self.watcher = None;
         (self.adapters, self.data_locations) = Self::build_roster(&self.store);
+        self.runtime.replace_adapters(self.adapters.clone());
         self.remount_watcher();
         cx.notify();
     }
@@ -3073,12 +9201,7 @@ impl Workbench {
     /// 先 drop 并等旧线程退出(SessionWatcher::Drop 内 join)——旧线程持旧
     /// roster 在写库,不等收尾,已移除根的会话可能在补扫后被写回复活
     fn remount_watcher(&mut self) {
-        self.watcher = None;
-        self.watcher = start_watcher(
-            self.adapters.clone(),
-            self.store.clone(),
-            self.scan_events.clone(),
-        );
+        self.runtime.remount_watcher();
     }
 
     /// location 表单(添加/编辑共用一套 UI,2026-08-24 定稿):agent 下拉 +
@@ -3750,7 +9873,7 @@ impl Workbench {
             });
         if covered {
             window.push_notification(
-                Notification::info(t("This folder is already in Wake's session locations")),
+                Notification::info(t("This folder is already in ContextOS's session locations")),
                 cx,
             );
             return false;
@@ -4036,7 +10159,7 @@ impl Workbench {
                 });
         if duplicate {
             window.push_notification(
-                Notification::info(t("This path is already in Wake's memory locations")),
+                Notification::info(t("This path is already in ContextOS's memory locations")),
                 cx,
             );
             return false;
@@ -4393,6 +10516,21 @@ impl Workbench {
                 cx.notify();
                 None
             }
+            BgEvent::WorkspaceChangesChanged => {
+                self.workspace_roots = self
+                    .workspace_store
+                    .list_workspace_roots()
+                    .unwrap_or_default();
+                if self.page == Page::Insights
+                {
+                    match self.insights_subview {
+                        InsightsSubview::WorkspaceChanges => self.reload_workspace_changes(true, cx),
+                        InsightsSubview::SessionChanges => self.reload_session_changes(cx),
+                        InsightsSubview::Overview => {}
+                    }
+                }
+                None
+            }
             BgEvent::RemoteSyncDone => {
                 self.syncing_hosts.clear();
                 // 同步期间被排队的 host(如 add host)接着跑;与下面的收编
@@ -4403,12 +10541,12 @@ impl Workbench {
                 // 出现了监听集(watcher 报的真实挂载根)之外的新根才重挂;
                 // 稳态下 rsync 落盘由现有监听收编,不白付 drop+join(watcher
                 // 正忙时是一整个去抖批次)的等待
-                let watched = self.watcher.as_ref().map(|w| w.watched_roots());
+                let watched = self.runtime.watched_roots();
                 let grown = self
                     .adapters
                     .iter()
                     .flat_map(|a| a.watch_paths())
-                    .any(|p| watched.is_none_or(|w| !w.contains(&p)) && p.is_dir());
+                    .any(|p| watched.as_ref().is_none_or(|w| !w.contains(&p)) && p.is_dir());
                 if grown {
                     self.remount_watcher();
                 }
@@ -4417,6 +10555,40 @@ impl Workbench {
                 self.kick_incremental_scan(cx);
                 cx.notify();
                 None
+            }
+            BgEvent::LayaRuntimeChanged => {
+                cx.notify();
+                None
+            }
+            BgEvent::LayaRuntimeFinished(result) => {
+                cx.notify();
+                Some(match result {
+                    Ok(message) => Notification::success(message),
+                    Err(message) => Notification::error(message),
+                })
+            }
+            BgEvent::LayaExternalProbeFinished(result) => {
+                let note = match result {
+                    Ok(capabilities) => {
+                        let single = capabilities.single;
+                        let batch = capabilities.batch;
+                        self.laya_external_capabilities = Some(capabilities);
+                        if single && batch {
+                            Notification::success("外部 Laya Single 兼容与原生 Batch 均可用")
+                        } else if single {
+                            Notification::success(
+                                "外部 Laya Single 兼容可用；Batch 不可用，不影响压缩",
+                            )
+                        } else {
+                            Notification::error(
+                                "外部服务不支持 /v1/systemone；当前压缩流程不能使用",
+                            )
+                        }
+                    }
+                    Err(message) => Notification::error(message),
+                };
+                cx.notify();
+                Some(note)
             }
         }
     }
@@ -4444,6 +10616,11 @@ impl Workbench {
             delegate.row_key(ix).map(str::to_string)
         };
         if let Some(key) = key {
+            if matches!(ev, ListEvent::Confirm(_)) && self.pending_link_parent.is_some() {
+                self._list_seek_task = None;
+                self.select_relationship_child(&key, window, cx);
+                return;
+            }
             if matches!(ev, ListEvent::Confirm(_))
                 && self
                     .detail
@@ -4486,7 +10663,6 @@ impl Workbench {
         let this = cx.entity();
         open_closable_dialog(window, cx, move |dialog, window, cx| {
             let theme = cx.theme();
-            let has_query = input.read(cx).text().len() > 0;
             // 输入框尺寸;清除钮的 suffix 补偿 margin 从它派生,改档自动跟随
             let input_size = gpui_component::Size::Large;
             dialog
@@ -4523,56 +10699,12 @@ impl Workbench {
                                 .px(SPACE_SM)
                                 .border_b_1()
                                 .border_color(theme.border)
-                                .child(
-                                    Input::new(&input)
-                                        .with_size(input_size)
-                                        .prefix(
-                                            icon("icons/search.svg")
-                                                .with_size(px(16.))
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                        // 清除钮自绘,不用内置 cleanable:内置钮固定
-                                        // xsmall(实渲 10.5px 图标)且无尺寸配置口
-                                        .when(has_query, |i| {
-                                            i.suffix(
-                                                div()
-                                                    .id("palette-clear")
-                                                    .size(px(24.))
-                                                    // 抵消组件对 suffix 区强加的
-                                                    // pr(input_px(size)),它在 p_0
-                                                    // 之后应用盖不掉;不抵消则清除钮
-                                                    // 右缩进与左侧放大镜不对称
-                                                    .mr(-input_size.input_px())
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded(theme.radius)
-                                                    .cursor_pointer()
-                                                    .text_color(theme.muted_foreground)
-                                                    // 图标-only:尺寸走 with_size,
-                                                    // hover 裸改色不踩 text 替换陷阱
-                                                    .hover(|s| {
-                                                        s.bg(theme.secondary_hover)
-                                                            .text_color(theme.foreground)
-                                                    })
-                                                    .on_click({
-                                                        let input = input.clone();
-                                                        move |_, window, cx| {
-                                                            input.update(cx, |st, cx| {
-                                                                st.set_value("", window, cx);
-                                                                st.focus(window, cx);
-                                                            });
-                                                        }
-                                                    })
-                                                    .child(
-                                                        icon("icons/circle-x.svg")
-                                                            .with_size(px(16.)),
-                                                    ),
-                                            )
-                                        })
-                                        .p_0()
-                                        .appearance(false),
-                                ),
+                                .child(search_input_control(
+                                    &input,
+                                    input_size,
+                                    "palette-clear",
+                                    cx,
+                                )),
                         )
                         .child(
                             List::new(&list)
@@ -4674,6 +10806,9 @@ impl Workbench {
 
     /// 打开第 row 条搜索命中(回车与鼠标点击共用),定位到命中消息
     fn open_palette_hit(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::Skills && !self.allow_skill_navigation(window, cx) {
+            return;
+        }
         let hit = self
             .palette_list
             .read(cx)
@@ -4735,6 +10870,245 @@ impl Workbench {
         cx.notify();
     }
 
+    fn toggle_session_tag(
+        &mut self,
+        tag: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        let key = detail.meta.key.clone();
+        let enabled = !detail.tags.contains(tag);
+        let label = session_tag_label(tag);
+        match self.store.set_session_tag(&key, tag, enabled) {
+            Ok(()) => {
+                if enabled {
+                    detail.tags.insert(tag.to_string());
+                    window.push_notification(
+                        Notification::success(crate::tf!("已添加标签：{}", label)),
+                        cx,
+                    );
+                } else {
+                    detail.tags.remove(tag);
+                    window.push_notification(
+                        Notification::success(crate::tf!("已移除标签：{}", label)),
+                        cx,
+                    );
+                }
+                self.refresh(cx);
+                cx.notify();
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(crate::tf!("无法更新标签：{}", format!("{error:#}"))),
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn mark_relationship_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        self.pending_link_parent = Some((detail.meta.key.clone(), detail.meta.title.clone()));
+        self.pending_link_child = None;
+        window.push_notification(
+            Notification::success(t("请在会话列表中选择要连接的会话")),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn select_relationship_child(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((parent_key, parent_title)) = self.pending_link_parent.clone() else {
+            return false;
+        };
+        if parent_key == key {
+            window.push_notification(Notification::warning(t("不能把会话连接到自己")), cx);
+            return true;
+        }
+        let Ok(Some(child)) = self.store.get_session(key) else {
+            return false;
+        };
+        self.pending_link_child = Some((child.key.clone(), child.title.clone()));
+        window.push_notification(
+            Notification::success(crate::tf!(
+                "已选择连接：{} → {}",
+                clip_display(&parent_title, 18),
+                clip_display(&child.title, 18)
+            )),
+            cx,
+        );
+        cx.notify();
+        true
+    }
+
+    fn cancel_pending_relationship(&mut self, cx: &mut Context<Self>) {
+        self.pending_link_parent = None;
+        self.pending_link_child = None;
+        cx.notify();
+    }
+
+    fn connect_pending_relationship(
+        &mut self,
+        relation: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((parent_key, parent_title)) = self.pending_link_parent.clone() else {
+            return;
+        };
+        let Some((child_key, child_title)) = self.pending_link_child.clone() else {
+            window.push_notification(
+                Notification::warning(t("请先在会话列表中选择要连接的会话")),
+                cx,
+            );
+            return;
+        };
+        if parent_key == child_key {
+            window.push_notification(Notification::warning(t("不能把会话连接到自己")), cx);
+            return;
+        }
+        match self
+            .store
+            .set_session_link(&parent_key, &child_key, relation)
+        {
+            Ok(()) => {
+                if let Some(detail) = &mut self.detail {
+                    if detail.meta.key == parent_key {
+                        if let Ok((parents, children)) =
+                            self.store.session_relationships(&parent_key)
+                        {
+                            detail.link_parent_count = parents.len() as i64;
+                            detail.link_child_count = children.len() as i64;
+                            detail.link_parents = parents;
+                            detail.link_children = children;
+                        }
+                        if let Ok((parents, children)) =
+                            self.store.session_relationship_tree(&parent_key, 3)
+                        {
+                            detail.link_parent_tree = parents;
+                            detail.link_child_tree = children;
+                        }
+                        self.relationship_edges =
+                            self.store.all_session_relationships().unwrap_or_default();
+                    }
+                }
+                self.pending_link_parent = None;
+                self.pending_link_child = None;
+                window.push_notification(
+                    Notification::success(crate::tf!(
+                        "已建立{}关系：{} → {}",
+                        session_relation_label(relation),
+                        clip_display(&parent_title, 16),
+                        clip_display(&child_title, 16)
+                    )),
+                    cx,
+                );
+                cx.notify();
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(crate::tf!("无法建立关系：{}", format!("{error:#}"))),
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn refresh_detail_relationships(&mut self, key: &str) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        if detail.meta.key != key {
+            return;
+        }
+        if let Ok((parents, children)) = self.store.session_relationships(key) {
+            detail.link_parent_count = parents.len() as i64;
+            detail.link_child_count = children.len() as i64;
+            detail.link_parents = parents;
+            detail.link_children = children;
+        }
+        if let Ok((parents, children)) = self.store.session_relationship_tree(key, 3) {
+            detail.link_parent_tree = parents;
+            detail.link_child_tree = children;
+        }
+    }
+
+    fn update_relationship_edge(
+        &mut self,
+        parent: &str,
+        child: &str,
+        old_relation: &str,
+        new_relation: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self
+            .store
+            .update_session_link_relation(parent, child, old_relation, new_relation)
+        {
+            Ok(()) => {
+                let current_key = self.detail.as_ref().map(|detail| detail.meta.key.clone());
+                if let Some(key) = current_key {
+                    self.refresh_detail_relationships(&key);
+                }
+                self.relationship_edges =
+                    self.store.all_session_relationships().unwrap_or_default();
+                window.push_notification(
+                    Notification::success(crate::tf!(
+                        "已改为{}关系",
+                        session_relation_label(new_relation)
+                    )),
+                    cx,
+                );
+                cx.notify();
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(crate::tf!("无法修改关系：{}", format!("{error:#}"))),
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn delete_relationship_edge(
+        &mut self,
+        parent: &str,
+        child: &str,
+        relation: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.store.delete_session_link(parent, child, relation) {
+            Ok(()) => {
+                let current_key = self.detail.as_ref().map(|detail| detail.meta.key.clone());
+                if let Some(key) = current_key {
+                    self.refresh_detail_relationships(&key);
+                }
+                self.relationship_edges =
+                    self.store.all_session_relationships().unwrap_or_default();
+                window.push_notification(Notification::success(t("已删除关系")), cx);
+                cx.notify();
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(crate::tf!("无法删除关系：{}", format!("{error:#}"))),
+                    cx,
+                );
+            }
+        }
+    }
+
     fn open_detail(
         &mut self,
         key: &str,
@@ -4748,7 +11122,25 @@ impl Workbench {
         let Ok(Some(meta)) = self.store.get_session(key) else {
             return;
         };
-        let detail = DetailState::loading(meta.clone(), jump_seq);
+        let mut detail = DetailState::loading(meta.clone(), jump_seq);
+        detail.tags = self
+            .store
+            .session_tags(key)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        if let Ok((parents, children)) = self.store.session_link_counts(key) {
+            detail.link_parent_count = parents;
+            detail.link_child_count = children;
+        }
+        if let Ok((parents, children)) = self.store.session_relationships(key) {
+            detail.link_parents = parents;
+            detail.link_children = children;
+        }
+        if let Ok((parents, children)) = self.store.session_relationship_tree(key, 3) {
+            detail.link_parent_tree = parents;
+            detail.link_child_tree = children;
+        }
         let load_id = detail.load_id;
         self.detail = Some(detail);
         // 搜索路径:中栏列表同步选中并滚到该会话。
@@ -4783,10 +11175,11 @@ impl Workbench {
 
         let adapters = self.adapters.clone();
         let task = cx.background_spawn(async move {
-            let result = load_visible_transcript(&adapters, &meta).map(|mut messages| {
-                let images = take_image_slots(&mut messages);
-                (messages, images)
-            });
+            let result =
+                load_visible_transcript(&adapters, &meta).map(|(mut messages, usage_events)| {
+                    let images = take_image_slots(&mut messages);
+                    (messages, images, usage_events)
+                });
             (meta.key.clone(), result)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -4801,27 +11194,54 @@ impl Workbench {
                 if let Some(detail) = detail {
                     detail.loading = false;
                     match result {
-                        Ok((messages, images)) => {
-                            detail.msg_list = gpui::ListState::new(
-                                messages.len(),
-                                gpui::ListAlignment::Bottom,
-                                px(512.),
-                            );
+                        Ok((messages, images, usage_events)) => {
+                            detail.reader_turns = build_detail_turns(&messages, &usage_events);
+                            detail.transcript = Rc::new(messages);
+                            rebuild_detail_reader_view(detail, this.detail_outline_mode);
                             // 搜索跳转:seq → 可见消息下标,滚到视口顶。
                             // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
                             // 其后最近一条;找不到(尾部被滤)则保持默认落底。
                             // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
                             // 渲染,不归一则命中被滤时滚动与高亮指向不同行
                             if let Some(seq) = detail.jump_seq {
-                                if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
-                                    detail.jump_seq = Some(messages[ix].seq);
-                                    detail.msg_list.scroll_to(gpui::ListOffset {
-                                        item_ix: ix,
-                                        offset_in_item: px(0.),
-                                    });
+                                if let Some(transcript_ix) =
+                                    detail.transcript.iter().position(|m| m.seq >= seq)
+                                {
+                                    detail.jump_seq = Some(detail.transcript[transcript_ix].seq);
+                                    if let Some(ix) = detail
+                                        .reader_visible_indices
+                                        .iter()
+                                        .position(|&index| index == transcript_ix)
+                                    {
+                                        detail.msg_list.scroll_to(gpui::ListOffset {
+                                            item_ix: ix,
+                                            offset_in_item: px(0.),
+                                        });
+                                    }
                                 }
                             }
-                            detail.transcript = Rc::new(messages);
+                            let query = this
+                                .detail_search_input
+                                .read(cx)
+                                .value()
+                                .trim()
+                                .to_lowercase();
+                            detail.search_matches = if query.is_empty() {
+                                Vec::new()
+                            } else {
+                                detail
+                                    .reader_visible_indices
+                                    .iter()
+                                    .copied()
+                                    .filter(|&index| {
+                                        transcript_message_matches(
+                                            &detail.transcript[index],
+                                            &query,
+                                        )
+                                    })
+                                    .collect()
+                            };
+                            detail.search_cursor = 0;
                             detail.images = images;
                             detail.zoom = None;
                             detail.error = None;
@@ -4855,7 +11275,53 @@ impl Workbench {
         self.leave_cleanup(cx);
         self.selected_agent = agent;
         self.selected_project = project;
+        self.selected_tag = None;
+        self.selected_model = None;
         self.favorite_only = favorite;
+        self.page = Page::Sessions;
+        self.refresh(cx);
+    }
+
+    fn set_tag_scope(&mut self, tag: Option<String>, cx: &mut Context<Self>) {
+        self.leave_cleanup(cx);
+        self.selected_agent = None;
+        self.selected_project = None;
+        self.favorite_only = false;
+        self.selected_tag = tag;
+        self.selected_model = None;
+        self.page = Page::Sessions;
+        self.refresh(cx);
+    }
+
+    /// Insights 榜单行下钻:回会话页,按行所属的组筛好,token 从高到低。
+    /// 三个筛选槽互斥——落自己的、清别的,与 set_scope 同一写入纪律
+    fn drill_into_usage(
+        &mut self,
+        board: UsageBoard,
+        key: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.leave_cleanup(cx);
+        self.selected_agent = None;
+        self.selected_project = None;
+        self.selected_tag = None;
+        self.favorite_only = false;
+        self.selected_model = None;
+        match board {
+            UsageBoard::Agents => {
+                self.selected_agent = AgentId::from_str(key);
+                // 未识别的 agent_id(异常数据)不下钻,免得给出无筛选的列表
+                if self.selected_agent.is_none() {
+                    cx.notify();
+                    return;
+                }
+            }
+            UsageBoard::Projects => self.selected_project = Some(key.to_string()),
+            UsageBoard::Models => self.selected_model = Some(key.to_string()),
+        }
+        self.sort_key = SortKey::Tokens;
+        self.sort_ascending = false;
         self.page = Page::Sessions;
         self.refresh(cx);
     }
@@ -4893,6 +11359,16 @@ impl Workbench {
         if !self.select_list_key(key, true, window, cx) {
             self.seek_list_key(key, window, cx);
         }
+    }
+
+    fn open_relationship_session_in_sessions(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_list_selection(key, window, cx);
+        self.open_detail(key, None, window, cx);
     }
 
     /// 搜索命中可能落在尚未加载的页。后台逐页补齐到命中项，再用分组后的
@@ -5228,6 +11704,434 @@ impl Workbench {
         .detach();
     }
 
+    fn do_conversation_export(
+        &mut self,
+        include_thinking: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = &self.detail else { return };
+        let meta = detail.meta.clone();
+        let adapters = self.adapters.clone();
+        let suffix = if include_thinking {
+            "conversation-thinking"
+        } else {
+            "conversation"
+        };
+        let mut name = exporter::default_file_name(&meta, "md");
+        name = name.trim_end_matches(".md").to_string();
+        name.push('-');
+        name.push_str(suffix);
+        name.push_str(".md");
+        save_as(
+            window,
+            cx,
+            self.store.clone(),
+            name,
+            t("Exported"),
+            t("Export failed"),
+            move |path| {
+                let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)
+                    .ok_or_else(|| anyhow::anyhow!("no adapter for this session"))?;
+                std::fs::write(
+                    path,
+                    exporter::render_conversation_markdown(adapter, &meta, include_thinking)?,
+                )?;
+                Ok(())
+            },
+        )
+        .detach();
+    }
+
+    fn do_changed_files_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let meta = detail.meta.clone();
+        let adapters = self.adapters.clone();
+        let mut name = exporter::default_file_name(&meta, "md");
+        name = name.trim_end_matches(".md").to_string();
+        name.push_str("-changes.md");
+        save_as(
+            window,
+            cx,
+            self.store.clone(),
+            name,
+            t("Exported"),
+            t("Export failed"),
+            move |path| {
+                let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)
+                    .ok_or_else(|| anyhow::anyhow!("no adapter for this session"))?;
+                std::fs::write(
+                    path,
+                    exporter::render_changed_files_markdown(adapter, &meta)?,
+                )?;
+                Ok(())
+            },
+        )
+        .detach();
+    }
+
+    pub(crate) fn export_contextos_skill_package(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(skill_dir) = contextos_skill_dir() else {
+            window.push_notification(
+                Notification::error("找不到 skills/contextos，无法导出 Skill 包"),
+                cx,
+            );
+            return;
+        };
+        save_as(
+            window,
+            cx,
+            self.store.clone(),
+            "contextos-skill.zip".to_string(),
+            "已导出 ContextOS Skill",
+            "导出 ContextOS Skill 失败",
+            move |path| {
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
+                let temp_root = std::env::temp_dir()
+                    .join(format!("contextos-skill-export-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&temp_root);
+                let staged_skill = temp_root.join("contextos");
+                std::fs::create_dir_all(&staged_skill)?;
+                copy_dir_contents(&skill_dir, &staged_skill)?;
+                inject_skill_binary_paths(&staged_skill.join("SKILL.md"))?;
+                let script = format!(
+                    "$ErrorActionPreference = 'Stop'\n\
+                     Compress-Archive -Path '{}' -DestinationPath '{}' -Force\n",
+                    staged_skill.to_string_lossy().replace('\'', "''"),
+                    path.to_string_lossy().replace('\'', "''"),
+                );
+                let output = std::process::Command::new("powershell.exe")
+                    .arg("-NoProfile")
+                    .arg("-ExecutionPolicy")
+                    .arg("Bypass")
+                    .arg("-Command")
+                    .arg(script)
+                    .output()?;
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "{}{}{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        if output.stderr.is_empty() { "" } else { "\n" },
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                let _ = std::fs::remove_dir_all(&temp_root);
+                Ok(())
+            },
+        )
+        .detach();
+    }
+
+    fn do_compressed_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.do_compressed_export_with_mode(CompressionExportMode::Plain, window, cx);
+    }
+
+    fn do_memory_compressed_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.do_compressed_export_with_mode(CompressionExportMode::WithMemory, window, cx);
+    }
+
+    fn add_candidate_to_memory(
+        &mut self,
+        candidate: ContextosMemoryCandidate,
+        meta: SessionMeta,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match write_contextos_memory_candidate(&candidate, &meta) {
+            Ok(path) => {
+                window.push_notification(
+                    Notification::success(crate::tf!("已加入记忆：{}", path.display())),
+                    cx,
+                );
+                self.refresh_memories(window, cx);
+            }
+            Err(error) => window.push_notification(
+                Notification::error(crate::tf!("加入记忆失败：{}", format!("{error:#}"))),
+                cx,
+            ),
+        }
+    }
+
+    fn open_memory_candidates_dialog(
+        &mut self,
+        candidates: Vec<ContextosMemoryCandidate>,
+        meta: SessionMeta,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workbench = cx.entity();
+        let candidates_count = candidates.len();
+        cx.defer(move |cx| {
+            Self::show_memory_candidates_window(workbench, candidates, meta, cx);
+        });
+        window.push_notification(
+            Notification::info(crate::tf!("已打开 {} 条记忆候选窗口", candidates_count)),
+            cx,
+        );
+    }
+
+    fn show_memory_candidates_window(
+        workbench: Entity<Self>,
+        candidates: Vec<ContextosMemoryCandidate>,
+        meta: SessionMeta,
+        cx: &mut App,
+    ) {
+        let (bounds, display_id) =
+            crate::main_window::centered_over_main(size(px(820.), px(640.)), cx);
+        let titlebar = if cfg!(target_os = "macos") {
+            TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.), px(11.))),
+            }
+        } else {
+            TitlebarOptions {
+                title: Some(t("ContextOS Memory Candidates").into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            }
+        };
+        match cx.open_window(
+            WindowOptions {
+                titlebar: Some(titlebar),
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(720.), px(520.))),
+                display_id,
+                app_id: Some("contextos-memory-candidates".into()),
+                window_decorations: Some(WindowDecorations::Client),
+                ..Default::default()
+            },
+            move |window, cx| {
+                window
+                    .observe_window_appearance(|window, cx| {
+                        crate::theme::sync_appearance(Some(window), cx);
+                    })
+                    .detach();
+                crate::theme::sync_appearance(Some(window), cx);
+                let view = cx.new(|cx| {
+                    MemoryCandidatesView::new(workbench.clone(), candidates, meta, window, cx)
+                });
+                window.focus(&view.read(cx).focus_handle(cx), cx);
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        ) {
+            Ok(_) => cx.activate(true),
+            Err(error) => eprintln!("failed to open ContextOS memory candidates: {error}"),
+        }
+    }
+
+    fn do_compressed_export_with_mode(
+        &mut self,
+        mode: CompressionExportMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = &self.detail else { return };
+        let settings = self.compression_settings();
+        if mode == CompressionExportMode::WithMemory && !settings.llm_enabled {
+            window.push_notification(
+                Notification::error("压缩并生成记忆需要启用 LLM；普通压缩导出仍可只用基础机械压缩"),
+                cx,
+            );
+            return;
+        }
+        let meta = detail.meta.clone();
+        let adapters = self.adapters.clone();
+        let name = {
+            let mut name = exporter::default_file_name(&meta, "md");
+            name = name.trim_end_matches(".md").to_string();
+            format!("{name}-{}.md", mode.file_suffix())
+        };
+        let store = self.store.clone();
+        let start = export_dir(&store);
+        let rx = cx.prompt_for_new_path(&start, Some(&name));
+        let entity = cx.entity();
+        window
+            .spawn(cx, async move |cx| {
+                let path = match rx.await {
+                    Ok(Ok(Some(path))) => path,
+                    Ok(Err(_)) => start.join(&name),
+                    _ => return,
+                };
+                cx.update(|window, cx| {
+                    window.push_notification(Notification::info(mode.start_message()), cx);
+                })
+                .ok();
+                cx.update(|window, cx| {
+                    window.push_notification(Notification::info(if settings.llm_enabled {
+                        mode.llm_message()
+                    } else {
+                        "正在执行基础机械压缩…"
+                    }), cx);
+                })
+                .ok();
+                let dialog_meta = meta.clone();
+                let compression_store = store.clone();
+                let result = cx
+                    .background_spawn({
+                        let path = path.clone();
+                        async move {
+                            let session_keys = vec![meta.key.clone()];
+                            let covered_until = wake_core::services::compression::list_turns(
+                                &compression_store,
+                                &adapters,
+                                &meta.key,
+                            )?
+                            .last()
+                            .map(|turn| turn.number)
+                            .unwrap_or_default();
+                            let mut coverage = serde_json::Map::new();
+                            coverage.insert(meta.key.clone(), serde_json::json!(covered_until));
+                            let compressed = wake_core::services::compression::run(
+                                &compression_store,
+                                &adapters,
+                                &session_keys,
+                                &wake_core::services::compression::RunOverrides {
+                                    jev_enabled: None,
+                                    llm_enabled: None,
+                                    generate_memory_candidates: mode
+                                        == CompressionExportMode::WithMemory,
+                                    continuation_context: None,
+                                },
+                            )?;
+                            let output = format!(
+                                "{}{}\n\n<!--\ncontextos_document: true\ncontextos_sources: {}\ncontextos_coverage: {}\ncontextos_mode: {}\n-->\n",
+                                compressed.processing_report_markdown(),
+                                compressed.markdown,
+                                meta.key,
+                                serde_json::Value::Object(coverage),
+                                compressed.mode,
+                            );
+                            std::fs::write(&path, output)?;
+                            let candidates = compressed
+                                .memory_candidates
+                                .into_iter()
+                                .collect::<Vec<ContextosMemoryCandidate>>();
+                            Ok::<_, anyhow::Error>((compressed.mode, candidates))
+                        }
+                    })
+                    .await;
+                cx.update(|window, cx| {
+                    let note = match result {
+                        Ok((compression_mode, candidates)) => {
+                            if let Some(dir) = path.parent() {
+                                let _ = store.pref_set("export_dir", &dir.to_string_lossy());
+                            }
+                            if mode == CompressionExportMode::WithMemory {
+                                let candidate_count = candidates.len();
+                                entity.update(cx, |this, cx| {
+                                    this.open_memory_candidates_dialog(
+                                        candidates,
+                                        dialog_meta.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                Notification::success(crate::tf!(
+                                    "{}（{}，记忆候选 {} 条） to {}",
+                                    mode.success_title(),
+                                    compression_mode,
+                                    candidate_count,
+                                    path.display()
+                                ))
+                            } else {
+                                Notification::success(crate::tf!(
+                                    "{}（{}） to {}",
+                                    mode.success_title(),
+                                    compression_mode,
+                                    path.display()
+                                ))
+                            }
+                        }
+                        Err(error) => {
+                            Notification::error(crate::tf!("压缩导出失败：{}", format!("{error:#}")))
+                        }
+                    };
+                    window.push_notification(note, cx);
+                })
+                .ok();
+            })
+            .detach();
+    }
+
+    fn do_export_relationships(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        let adapters = self.adapters.clone();
+        let current = detail.meta.clone();
+        let mut sessions = Vec::new();
+        let mut seen = HashSet::new();
+        for rel in detail.link_parent_tree.iter().rev() {
+            if seen.insert(rel.session.key.clone()) {
+                sessions.push((Some(rel.relation.clone()), rel.session.clone()));
+            }
+        }
+        if seen.insert(current.key.clone()) {
+            sessions.push((
+                detail.link_parents.first().map(|rel| rel.relation.clone()),
+                current.clone(),
+            ));
+        }
+        for rel in &detail.link_child_tree {
+            if seen.insert(rel.session.key.clone()) {
+                sessions.push((Some(rel.relation.clone()), rel.session.clone()));
+            }
+        }
+        let name = {
+            let mut name = exporter::default_file_name(&current, "md");
+            name = name.trim_end_matches(".md").to_string();
+            format!("{name}-relationships.md")
+        };
+        save_as(
+            window,
+            cx,
+            self.store.clone(),
+            name,
+            "已导出关系文档",
+            "导出关系文档失败",
+            move |path| {
+                let mut out = String::new();
+                out.push_str(&format!("# 关系树：{}\n\n", current.title));
+                out.push_str(&format!(
+                    "- 起点/当前：{}\n- 会话数：{}\n\n",
+                    current.key,
+                    sessions.len()
+                ));
+                for (ix, (relation, meta)) in sessions.iter().enumerate() {
+                    out.push_str("\n---\n\n");
+                    out.push_str(&format!("## {}. {}\n\n", ix + 1, meta.title));
+                    if let Some(relation) = relation {
+                        out.push_str(&format!("关系：{}\n\n", session_relation_label(relation)));
+                    } else {
+                        out.push_str("关系：起点\n\n");
+                    }
+                    out.push_str(&format!(
+                        "Agent：{}  \nProject：{}  \nKey：{}\n\n",
+                        meta.agent.display_name(),
+                        if meta.project_name.is_empty() {
+                            meta.project_path.as_str()
+                        } else {
+                            meta.project_name.as_str()
+                        },
+                        meta.key
+                    ));
+                    let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)
+                        .ok_or_else(|| anyhow::anyhow!("no adapter for {}", meta.key))?;
+                    out.push_str(&exporter::render_markdown(adapter, meta)?);
+                    out.push('\n');
+                }
+                std::fs::write(path, out)?;
+                Ok(())
+            },
+        )
+        .detach();
+    }
+
     /// 执行删除:文件进废纸篓 + 自库 tombstone。trash_paths 可能长阻塞
     /// (契约见 terminal/mod.rs,平台缘由见各实现 doc)——必须离开 UI 线程,
     /// 否则界面在授权框弹出的整段时间里完全冻结。
@@ -5384,6 +12288,9 @@ impl Workbench {
         if self.favorite_only {
             return t("Starred").to_string();
         }
+        if let Some(tag) = &self.selected_tag {
+            return crate::tf!("标签：{}", session_tag_label(tag));
+        }
         if let Some(p) = &self.selected_project {
             // 项目显示名以侧栏列表(store 的 ProjectInfo)为准,不再重推
             return self
@@ -5401,10 +12308,32 @@ impl Workbench {
 
     // ---------- 渲染 ----------
 
-    fn render_sidebar(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        if self.sidebar_collapsed {
+            let entity = cx.entity();
+            return v_flex()
+                .w(SIDEBAR_COLLAPSED_WIDTH)
+                .h_full()
+                .flex_shrink_0()
+                .items_center()
+                .pt(WINDOW_TITLEBAR_HEIGHT)
+                .bg(theme.sidebar)
+                .child(
+                    Button::new("expand-sidebar")
+                        .ghost()
+                        .small()
+                        .icon(icon("icons/chevron-right.svg").with_size(px(15.)))
+                        .tooltip("展开导航栏")
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.toggle_sidebar(cx));
+                        }),
+                )
+                .into_any_element();
+        }
         let all_active = self.selected_agent.is_none()
             && self.selected_project.is_none()
+            && self.selected_tag.is_none()
             && !self.favorite_only
             && self.page == Page::Sessions
             && !self.cleanup.open;
@@ -5472,7 +12401,7 @@ impl Workbench {
                     .child(div().min_w_0().truncate().child(note))
                     .into_any_element(),
             )
-        } else if self.watcher.is_none() {
+        } else if !self.runtime.watcher_available() {
             Some(
                 h_flex()
                     .w_full()
@@ -5512,33 +12441,91 @@ impl Workbench {
                 this.child(TitleBar::new().h(WINDOW_TITLEBAR_HEIGHT))
             })
             .child(
-                div()
+                h_flex()
                     .flex_shrink_0()
                     .h(WINDOW_TITLEBAR_HEIGHT)
                     .px(SIDEBAR_EDGE)
                     .pt(SPACE_XS)
                     .pb(SPACE_LG)
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
                             .pl(TITLE_INSET)
+                            .min_w_0()
+                            .flex_1()
                             .pr(SIDEBAR_EDGE)
+                            .truncate()
                             .text_size(FONT_HEADING)
                             .font_semibold()
                             .text_color(theme.foreground)
-                            // Memory 页标题换成 Memory:侧栏顶上就说明现在管的是什么,
+                            // Memory/Relationships/Compressions 页标题直接说明当前库,
                             // 不另加模式标题行(用户 2026-09-21)
-                            .child(if self.page == Page::Memory {
-                                t("Memory")
+                            .child(if self.page == Page::Skills {
+                                h_flex()
+                                    .items_center()
+                                    .gap(SPACE_SM)
+                                    .child(
+                                        Button::new("skills-mode-button")
+                                            .small()
+                                            .label("Skills")
+                                            .when(!self.is_mcp_mode(), |button| button.primary())
+                                            .when(self.is_mcp_mode(), |button| button.ghost())
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.set_skills_mode(
+                                                    skills::SkillsMode::Skills,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                    .child(div().w(px(1.)).h(px(16.)).bg(theme.sidebar_border))
+                                    .child(
+                                        Button::new("mcp-mode-button")
+                                            .small()
+                                            .label("MCP")
+                                            .when(self.is_mcp_mode(), |button| button.primary())
+                                            .when(!self.is_mcp_mode(), |button| button.ghost())
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.set_skills_mode(
+                                                    skills::SkillsMode::Mcp,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
                             } else {
-                                "Wake"
+                                div().child(match self.page {
+                                    Page::Memory => t("Memory"),
+                                    Page::Skills => t("Skills"),
+                                    Page::Relationships => "关系",
+                                    Page::Compressions => "压缩文件",
+                                    _ => "ContextOS",
+                                })
                             }),
+                    )
+                    .child(
+                        Button::new("collapse-sidebar")
+                            .ghost()
+                            .small()
+                            .icon(icon("icons/chevron-left.svg").with_size(px(14.)))
+                            .tooltip("收起导航栏")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                     ),
             )
-            // 导航按页切换:Memory 页是记忆的导航(All Memory / Agents / Projects,按记忆
-            // 计数),其余是会话的(搜索框 + All Sessions / Starred + Agents / Projects)
+            // 导航按页切换:Insights 使用 Agent 统计范围;Memory / Skills / 关系各用
+            // 自己的导航,会话页保留搜索与会话筛选
             .child(match self.page {
                 Page::Memory => self.render_memory_nav(cx),
+                Page::Skills if self.is_mcp_mode() => self.render_mcp_nav(cx),
+                Page::Skills => self.render_skills_nav(cx),
+                Page::Relationships => self.render_relationships_nav(cx),
+                Page::Compressions => self.render_compressions_nav(cx),
+                Page::Insights => self.render_insights_nav(cx),
                 _ => self.render_sessions_nav(all_active, cx),
+            })
+            .when(self.page == Page::Sessions && !self.cleanup.open, |this| {
+                this.child(self.render_relationship_tree_panel(cx))
             })
             // 底部工具条:次要操作(数据源、刷新)与扫描状态同处一区,与上方
             // 导航行只用一条 border 分隔。按钮透明底、hover 才出色,不跟导航
@@ -5576,16 +12563,1736 @@ impl Workbench {
                                 "settings",
                                 t("Settings"),
                                 false,
-                                "icons/settings.svg",
+                                SidebarGlyph::Icon("icons/settings.svg"),
                                 cx.listener(|this, _, _window, cx| this.open_settings(cx)),
                                 cx,
                             ))),
                     ),
             )
+            .into_any_element()
     }
 
-    /// 会话导航(Insights 页也画它——点任何一行都回会话列表):搜索框(搜的是会话,
-    /// ⌘K 同一条路)、All Sessions / Starred 两行,再接 Agents / Projects 两组
+    /// 统计导航只选择统计范围,不改变会话页的筛选或目的地。
+    fn render_insights_nav(&self, cx: &Context<Self>) -> AnyElement {
+        if self.insights_subview == InsightsSubview::WorkspaceChanges {
+            return self.render_workspace_changes_nav(cx);
+        }
+        let dark = cx.theme().mode.is_dark();
+        v_flex()
+            .id("insights-sidebar-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(SIDEBAR_EDGE)
+            .pt(SPACE_XS)
+            .pb(SPACE_LG)
+            .gap(SPACE_XS)
+            .child(sidebar_row(
+                "insights-all-agents",
+                RowLead::Icon(icon("icons/chart-column.svg")),
+                t("All agents"),
+                None,
+                self.insights_agent.is_none(),
+                RowLevel::Primary,
+                cx.listener(|this, _, _window, cx| this.set_insights_agent(None, cx)),
+                cx,
+            ))
+            .child(group_header(
+                "insights-agents-header",
+                t("Agents"),
+                self.agents_collapsed,
+                cx.listener(|this, _, _window, cx| {
+                    this.agents_collapsed = !this.agents_collapsed;
+                    cx.notify();
+                }),
+                cx,
+            ))
+            .when(!self.agents_collapsed, |this| {
+                this.children(self.agent_counts.iter().map(|(agent, _count)| {
+                    let selected_agent = *agent;
+                    let active = self.insights_agent == Some(selected_agent);
+                    sidebar_row(
+                        selected_agent.as_str(),
+                        RowLead::Brand(selected_agent.brand_icon(dark)),
+                        selected_agent.display_name(),
+                        None,
+                        active,
+                        RowLevel::Sub,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.set_insights_agent((!active).then_some(selected_agent), cx)
+                        }),
+                        cx,
+                    )
+                }))
+            })
+            .into_any_element()
+    }
+
+    fn render_workspace_changes_nav(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        v_flex()
+            .id("workspace-changes-sidebar-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(SIDEBAR_EDGE)
+            .pt(SPACE_XS)
+            .pb(SPACE_LG)
+            .gap(SPACE_XS)
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .px(SPACE_MD)
+                    .py(SPACE_SM)
+                    .child(
+                        div()
+                            .text_size(FONT_CAPTION)
+                            .font_medium()
+                            .text_color(theme.muted_foreground)
+                            .child("监控目录"),
+                    )
+                    .child(
+                        Button::new("workspace-root-add")
+                            .small()
+                            .ghost()
+                            .label("添加")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_workspace_root(window, cx)
+                            })),
+                    ),
+            )
+            .when(self.workspace_roots.is_empty(), |nav| {
+                nav.child(
+                    div()
+                        .px(SPACE_MD)
+                        .py(SPACE_SM)
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.muted_foreground)
+                        .child("尚未添加监控目录"),
+                )
+            })
+            .children(self.workspace_roots.iter().map(|root| {
+                let path = root.path.clone();
+                let active = self.workspace_change_project.as_deref() == Some(path.as_str());
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(sidebar_row(
+                        SharedString::from(format!("workspace-project-{}", root.path)),
+                        RowLead::Icon(icon("icons/folder.svg")),
+                        root.name.clone(),
+                        None,
+                        active,
+                        RowLevel::Sub,
+                        cx.listener({
+                            let path = path.clone();
+                            move |this, _, _window, cx| {
+                                this.select_workspace_change_project(path.clone(), cx)
+                            }
+                        }),
+                        cx,
+                    ))
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "workspace-root-remove-{}",
+                            root.path
+                        )))
+                        .small()
+                        .ghost()
+                        .label("移除")
+                        .tooltip("停止监控此目录")
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.remove_workspace_root(path.clone(), cx)
+                            },
+                        )),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    fn render_session_changes_content(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let compact_layout = window.bounds().size.width < px(1320.);
+        let since = self.session_change_range.since_ms();
+        let has_active_filter = self.session_change_range != WorkspaceChangeRange::All
+            || self.session_change_kind.is_some();
+        let matches_event = |event: &SessionFileChangeEvent| {
+            since.is_none_or(|since| event.observed_at >= since)
+                && self
+                    .session_change_kind
+                    .is_none_or(|kind| event.kind == kind)
+        };
+        let has_visible_events = |group: &SessionChangeSessionGroup| {
+            group
+                .folders
+                .iter()
+                .flat_map(|folder| folder.files.iter())
+                .flat_map(|file| file.events.iter())
+                .chain(group.root_files.iter().flat_map(|file| file.events.iter()))
+                .any(&matches_event)
+        };
+        let count_visible_events = |group: &SessionChangeSessionGroup| {
+            group
+                .folders
+                .iter()
+                .flat_map(|folder| folder.files.iter())
+                .flat_map(|file| file.events.iter())
+                .chain(group.root_files.iter().flat_map(|file| file.events.iter()))
+                .filter(|event| matches_event(event))
+                .count()
+        };
+        let mut groups = self
+            .session_change_groups
+            .iter()
+            .filter(|group| !has_active_filter || has_visible_events(group))
+            .collect::<Vec<_>>();
+        if self.session_change_sort_ascending {
+            groups.reverse();
+        }
+        let selected_session_count = groups
+            .iter()
+            .map(|group| group.session_key.as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        let selected_group = self
+            .session_change_inspector
+            .as_ref()
+            .and_then(|key| {
+                groups
+                    .iter()
+                    .find(|group| session_change_activity_key(group) == key.as_str())
+            })
+            .or_else(|| groups.first());
+        let manage_session_key = selected_group.map(|group| group.session_key.clone());
+        let format_time = |timestamp: i64| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp)
+                .map(|time| time.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "未知时间".to_string())
+        };
+        let selected_group_created_time = selected_group
+            .and_then(|group| group.metadata.as_ref().map(|meta| meta.created_at))
+            .filter(|timestamp| *timestamp > 0)
+            .map(format_time)
+            .unwrap_or_else(|| "未知时间".to_string());
+        const SESSION_ACTIVITY_WINDOW_MS: i64 = 10 * 60 * 1000;
+        let mut activity_window_latest: Option<i64> = None;
+        let session_rows = groups.iter().enumerate().map(|(index, group)| {
+            let row_key = session_change_activity_key(group);
+            let is_open = self.session_change_open_sessions.contains(&row_key);
+            let metadata = group.metadata.as_ref();
+            let title = metadata
+                .map(|meta| meta.title.as_str())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("未命名会话");
+            let agent = metadata
+                .map(|meta| meta.agent.display_name().to_string())
+                .unwrap_or_else(|| "Agent".to_string());
+            let project = metadata
+                .map(|meta| {
+                    if meta.project_name.trim().is_empty() {
+                        "全局会话".to_string()
+                    } else {
+                        meta.project_name.clone()
+                    }
+                })
+                .unwrap_or_else(|| "会话信息不可用".to_string());
+            let timestamp = group
+                .latest_change_at
+                .map(format_time)
+                .unwrap_or_else(|| "未知时间".to_string());
+            let session_created_time = metadata
+                .map(|meta| meta.created_at)
+                .filter(|timestamp| *timestamp > 0)
+                .map(format_time)
+                .unwrap_or_else(|| "未知时间".to_string());
+            let visible_change_count = count_visible_events(group);
+            let visible_file_count = group
+                .folders
+                .iter()
+                .flat_map(|folder| folder.files.iter())
+                .chain(group.root_files.iter())
+                .filter(|file| file.events.iter().any(&matches_event))
+                .count();
+            let agent_identity = metadata
+                .map(|meta| {
+                    h_flex()
+                        .items_center()
+                        .gap(SPACE_XS)
+                        .child(
+                            img(meta.agent.brand_icon(theme.mode.is_dark()))
+                                .size(px(14.))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.info)
+                                .child(agent.clone()),
+                        )
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| outline_badge(agent.clone(), theme.info).into_any_element());
+            let inspector_key = row_key.clone();
+            let toggle_key = row_key.clone();
+            let card_title = title.to_string();
+            let selected = selected_group
+                .is_some_and(|selected| session_change_activity_key(selected) == row_key);
+            let mut detail_rows = Vec::<AnyElement>::new();
+            for folder in &group.folders {
+                if !folder
+                    .files
+                    .iter()
+                    .any(|file| file.events.iter().any(&matches_event))
+                {
+                    continue;
+                }
+                let visible_file_count = folder
+                    .files
+                    .iter()
+                    .filter(|file| file.events.iter().any(&matches_event))
+                    .count();
+                let folder_key = format!("session:{}:{}", row_key, folder.path);
+                let folder_open = self.workspace_change_open_folders.contains(&folder_key);
+                detail_rows.push(
+                    v_flex()
+                        .w_full()
+                        .pl(px(18.))
+                        .child(
+                            h_flex()
+                                .h(px(36.))
+                                .items_center()
+                                .gap(SPACE_SM)
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "session-folder-{index}-{}",
+                                        folder.path
+                                    )))
+                                    .ghost()
+                                    .icon(icon(if folder_open {
+                                        "icons/chevron-down.svg"
+                                    } else {
+                                        "icons/chevron-right.svg"
+                                    })
+                                    .with_size(px(14.)))
+                                    .label(format!("{}  /", folder.path))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this
+                                            .workspace_change_open_folders
+                                            .remove(&folder_key)
+                                        {
+                                            this.workspace_change_open_folders
+                                                .insert(folder_key.clone());
+                                        }
+                                        cx.notify();
+                                    })),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("{} 个文件", visible_file_count)),
+                                ),
+                        )
+                        .when(folder_open, |row| {
+                            row.children(folder.files.iter().filter(|file| file.events.iter().any(&matches_event)).map(|file| {
+                                let file_name = file
+                                    .path
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(&file.path)
+                                    .to_string();
+                                let file_key = format!("session:{}:{}", row_key, file.path);
+                                let file_open =
+                                    self.workspace_change_open_files.contains(&file_key);
+                                let toggle_key = file_key.clone();
+                                v_flex()
+                                    .w_full()
+                                    .pl(px(22.))
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "session-file-{index}-{}",
+                                            file.path
+                                        )))
+                                        .h(px(34.))
+                                        .w_full()
+                                        .ghost()
+                                        .justify_start()
+                                        .icon(icon(if file_open {
+                                            "icons/chevron-down.svg"
+                                        } else {
+                                            "icons/chevron-right.svg"
+                                        })
+                                        .with_size(px(13.)))
+                                        .label(file_name)
+                                        .tooltip(file.path.clone())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if !this
+                                                .workspace_change_open_files
+                                                .remove(&toggle_key)
+                                            {
+                                                this.workspace_change_open_files
+                                                    .insert(toggle_key.clone());
+                                            }
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .when(file_open, |row| {
+                                        row.children(file.events.iter().filter(|event| matches_event(event)).map(|event| {
+                                            let (label, color) = match event.kind {
+                                                WorkspaceChangeKind::Created => ("新增", theme.success),
+                                                WorkspaceChangeKind::Modified => ("修改", theme.primary),
+                                                WorkspaceChangeKind::Deleted => ("删除", theme.danger),
+                                            };
+                                            h_flex()
+                                                .h(px(28.))
+                                                .pl(px(26.))
+                                                .items_center()
+                                                .gap(SPACE_SM)
+                                                .text_size(FONT_LABEL)
+                                                .text_color(theme.muted_foreground)
+                                                .child(div().text_color(color).child(label))
+                                                .child(format_time(event.observed_at))
+                                                .into_any_element()
+                                        }))
+                                    })
+                                    .into_any_element()
+                            }))
+                        })
+                        .into_any_element(),
+                );
+            }
+            for file in &group.root_files {
+                if !file.events.iter().any(&matches_event) {
+                    continue;
+                }
+                let file_name = file.path.rsplit('/').next().unwrap_or(&file.path).to_string();
+                let file_key = format!("session:{}:{}", row_key, file.path);
+                let file_open = self.workspace_change_open_files.contains(&file_key);
+                let toggle_key = file_key.clone();
+                detail_rows.push(
+                    v_flex()
+                        .w_full()
+                        .pl(px(18.))
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "session-root-file-{index}-{}",
+                                file.path
+                            )))
+                            .h(px(34.))
+                            .w_full()
+                            .ghost()
+                            .justify_start()
+                            .icon(icon(if file_open {
+                                "icons/chevron-down.svg"
+                            } else {
+                                "icons/chevron-right.svg"
+                            })
+                            .with_size(px(13.)))
+                            .label(file_name)
+                            .tooltip(file.path.clone())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.workspace_change_open_files.remove(&toggle_key) {
+                                    this.workspace_change_open_files.insert(toggle_key.clone());
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        .when(file_open, |row| {
+                            row.children(file.events.iter().filter(|event| matches_event(event)).map(|event| {
+                                let (label, color) = match event.kind {
+                                    WorkspaceChangeKind::Created => ("新增", theme.success),
+                                    WorkspaceChangeKind::Modified => ("修改", theme.primary),
+                                    WorkspaceChangeKind::Deleted => ("删除", theme.danger),
+                                };
+                                h_flex()
+                                    .h(px(28.))
+                                    .pl(px(44.))
+                                    .items_center()
+                                    .gap(SPACE_SM)
+                                    .text_size(FONT_LABEL)
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().text_color(color).child(label))
+                                    .child(format_time(event.observed_at))
+                                    .into_any_element()
+                            }))
+                        })
+                        .into_any_element(),
+                );
+            }
+            let toggle = cx.listener(move |this, _, _, cx| {
+                this.session_change_inspector = Some(inspector_key.clone());
+                if !this.session_change_open_sessions.remove(&toggle_key) {
+                    this.session_change_open_sessions.insert(toggle_key.clone());
+                }
+                cx.notify();
+            });
+            let starts_time_window = group.latest_change_at.is_some_and(|timestamp| {
+                activity_window_latest.is_none_or(|latest| {
+                    let starts = latest.max(timestamp).saturating_sub(latest.min(timestamp))
+                        >= SESSION_ACTIVITY_WINDOW_MS;
+                    if starts {
+                        activity_window_latest = Some(timestamp);
+                    }
+                    starts
+                })
+            });
+            if activity_window_latest.is_none() {
+                activity_window_latest = group.latest_change_at;
+            }
+            let activity_row = h_flex()
+                .w_full()
+                .items_stretch()
+                .gap(SPACE_XL)
+                .child(
+                    h_flex()
+                        .w(px(200.))
+                        .flex_shrink_0()
+                        .items_start()
+                        .gap(SPACE_MD)
+                        .child(
+                            div()
+                                .w(px(156.))
+                                .pt(px(8.))
+                                .text_right()
+                                .text_size(FONT_BODY)
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(timestamp.clone()),
+                        )
+                        .child(
+                            v_flex()
+                                .w(px(14.))
+                                .items_center()
+                                .pt(px(10.))
+                                .child(div().size(px(12.)).rounded_full().bg(theme.primary))
+                                .when(index + 1 < groups.len(), |rail| {
+                                    rail.child(div().w(px(2.)).flex_1().min_h(px(28.)).bg(theme.border))
+                                }),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(SPACE_XS)
+                        .p(SPACE_MD)
+                        .border_1()
+                        .border_color(if selected {
+                            theme.primary.opacity(0.58)
+                        } else {
+                            theme.border
+                        })
+                        .rounded(theme.radius)
+                        .bg(if selected {
+                            theme.list_active
+                        } else {
+                            theme.popover
+                        })
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(SPACE_SM)
+                                .child(
+                                    Button::new(SharedString::from(format!("session-change-{index}")))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h(px(38.))
+                                        .ghost()
+                                        .justify_start()
+                                        .icon(icon(if is_open {
+                                            "icons/chevron-down.svg"
+                                        } else {
+                                            "icons/chevron-right.svg"
+                                        })
+                                        .with_size(px(14.)))
+                                        .tooltip(card_title.clone())
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(card_title),
+                                        )
+                                        .on_click(toggle),
+                                )
+                                .child(outline_badge(
+                                    format!("{visible_change_count} 条改动"),
+                                    theme.primary,
+                                )),
+                        )
+                        .child(
+                            h_flex()
+                                .pl(px(34.))
+                                .items_center()
+                                .flex_wrap()
+                                .gap(SPACE_SM)
+                                .child(agent_identity)
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(project))
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("{visible_file_count} 个文件 · 最近改动 {timestamp}"))),
+                        )
+                        .when(is_open, |row| {
+                            row.children(detail_rows)
+                                .child(div().pl(px(18.)).pt(SPACE_XS).text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("会话创建时间：{session_created_time}")))
+                        }),
+                )
+                .into_any_element();
+            v_flex()
+                .w_full()
+                .gap(SPACE_XS)
+                .when(starts_time_window, |row| {
+                    row.child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(SPACE_SM)
+                            .pt(if index == 0 { px(0.) } else { SPACE_SM })
+                            .child(div().h(px(1.)).flex_1().bg(theme.border))
+                            .child(
+                                div()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("时间段 · {}", timestamp)),
+                            )
+                            .child(div().h(px(1.)).flex_1().bg(theme.border)),
+                    )
+                })
+                .child(activity_row)
+                .into_any_element()
+        });
+
+        let inspector = selected_group.map(|group| {
+            let key = group.session_key.clone();
+            let metadata = group.metadata.as_ref();
+            let title = metadata
+                .map(|meta| meta.title.as_str())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("未命名会话");
+            let agent = metadata
+                .map(|meta| meta.agent.display_name().to_string())
+                .unwrap_or_else(|| "Agent".to_string());
+            let project = metadata
+                .map(|meta| meta.project_name.clone())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "全局会话".to_string());
+            let file_paths = group
+                .folders
+                .iter()
+                .flat_map(|folder| folder.files.iter())
+                .chain(group.root_files.iter())
+                .filter(|file| file.events.iter().any(&matches_event))
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>();
+            let visible_change_count = count_visible_events(group);
+            let open_key = key.clone();
+            let remove_key = key.clone();
+            v_flex()
+                .w(px(360.))
+                .flex_shrink_0()
+                .min_h_0()
+                .when(compact_layout, |panel| {
+                    panel.w_full().h(px(260.))
+                })
+                .border_1()
+                .border_color(theme.border)
+                .rounded(theme.radius)
+                .bg(theme.popover)
+                .child(
+                    h_flex()
+                        .h(px(48.))
+                        .flex_shrink_0()
+                        .px(SPACE_MD)
+                        .items_center()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(div().font_semibold().child("会话详情"))
+                        .child(
+                            Button::new("session-change-inspector-open")
+                                .small()
+                                .primary()
+                                .label("打开会话")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_relationship_session_in_sessions(
+                                        &open_key, window, cx,
+                                    )
+                                })),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p(SPACE_MD)
+                        .gap(SPACE_MD)
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .child(div().font_semibold().child(title.to_string()))
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("{agent} · {project}")),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .pt(SPACE_MD)
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("文件改动"))
+                                .child(div().text_size(FONT_BODY).child(format!("{} 个文件 · {} 次记录", file_paths.len(), visible_change_count)))
+                                .children(file_paths.into_iter().map(|path| {
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(path)
+                                        .into_any_element()
+                                })),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .pt(SPACE_MD)
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("导入来源"))
+                                .child(div().text_size(FONT_BODY).child("用户手动选入"))
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("会话创建时间：{selected_group_created_time}")))
+                                .child(
+                                    Button::new("session-change-remove-selection")
+                                        .small()
+                                        .ghost()
+                                        .label("移出已导入会话")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_session_change_membership(remove_key.clone(), false, cx)
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let session_filters = h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .gap(SPACE_SM)
+            .pb(SPACE_MD)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(3.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .children(WorkspaceChangeRange::ALL.into_iter().map(|range| {
+                        let selected = self.session_change_range == range;
+                        Button::new(SharedString::from(format!("session-range-{range:?}")))
+                            .small()
+                            .label(range.label())
+                            .when(selected, |button| button.primary())
+                            .when(!selected, |button| button.ghost())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session_change_range = range;
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(3.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .children(
+                        [
+                            (None, "全部"),
+                            (Some(WorkspaceChangeKind::Created), "新增"),
+                            (Some(WorkspaceChangeKind::Modified), "修改"),
+                            (Some(WorkspaceChangeKind::Deleted), "删除"),
+                        ]
+                        .into_iter()
+                        .map(|(kind, label)| {
+                            let selected = self.session_change_kind == kind;
+                            Button::new(SharedString::from(format!("session-kind-{label}")))
+                                .small()
+                                .label(label)
+                                .when(selected, |button| button.primary())
+                                .when(!selected, |button| button.ghost())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.session_change_kind = kind;
+                                    cx.notify();
+                                }))
+                        }),
+                    ),
+            )
+            .child(
+                Button::new("session-change-sort")
+                    .small()
+                    .ghost()
+                    .icon(icon("icons/arrow-up-down.svg").with_size(px(14.)))
+                    .label(if self.session_change_sort_ascending {
+                        "时间正序"
+                    } else {
+                        "时间倒序"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.session_change_sort_ascending = !this.session_change_sort_ascending;
+                        cx.notify();
+                    })),
+            );
+        let picker_query = self
+            .session_change_picker_query
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        let picker_rows = self
+            .session_change_picker_sessions
+            .iter()
+            .filter(|session| {
+                picker_query.is_empty()
+                    || session.title.to_lowercase().contains(&picker_query)
+                    || session.project_name.to_lowercase().contains(&picker_query)
+            })
+            .map(|session| {
+                let key = session.key.clone();
+                let selected = self.session_change_picker_selected.contains(&key);
+                let title = if session.title.trim().is_empty() {
+                    "未命名会话".to_string()
+                } else {
+                    session.title.clone()
+                };
+                let date = format_time(session.updated_at);
+                let agent = session.agent.display_name().to_string();
+                let project = if session.project_name.trim().is_empty() {
+                    "全局会话".to_string()
+                } else {
+                    session.project_name.clone()
+                };
+                h_flex()
+                    .id(SharedString::from(format!("session-change-picker-{key}")))
+                    .w_full()
+                    .min_h(px(64.))
+                    .px(SPACE_MD)
+                    .gap(SPACE_MD)
+                    .items_center()
+                    .border_1()
+                    .border_color(if selected { theme.primary } else { theme.border })
+                    .rounded(theme.radius)
+                    .bg(if selected { theme.list_active } else { theme.background })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.secondary_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.session_change_picker_selected.remove(&key) {
+                            this.session_change_picker_selected.insert(key.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .size(px(18.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_1()
+                            .border_color(if selected { theme.primary } else { theme.border })
+                            .rounded(px(3.))
+                            .bg(if selected { theme.primary } else { theme.background })
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.background)
+                            .child(if selected { "✓" } else { "" }),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(div().truncate().text_size(FONT_BODY).child(title))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{date}  ·  {agent}  ·  {project}")),
+                            ),
+                    )
+                    .when(selected, |row| {
+                        row.child(div().text_size(FONT_CAPTION).text_color(theme.primary).child("已选入"))
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let picker_empty = picker_rows.is_empty();
+        let picker_overlay = div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(SPACE_XXL)
+            .bg(gpui::black().opacity(0.28))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.session_change_picker_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(820.))
+                    .max_h(px(680.))
+                    .min_h(px(360.))
+                    .flex_1()
+                    .min_w_0()
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .bg(theme.background)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .px(SPACE_LG)
+                            .py(SPACE_MD)
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(
+                                v_flex()
+                                    .gap(SPACE_XS)
+                                    .child(div().text_size(FONT_BODY).font_semibold().child("选择会话"))
+                                    .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("从索引会话中选择；列表显示标题、时间和 Agent")),
+                            )
+                            .child(
+                                Button::new("session-change-picker-close")
+                                    .small()
+                                    .ghost()
+                                    .icon(icon("icons/close.svg").with_size(px(14.)))
+                                    .tooltip("关闭")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.session_change_picker_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px(SPACE_LG)
+                            .pt(SPACE_MD)
+                            .child(Input::new(&self.session_change_picker_query)),
+                    )
+                    .child(
+                        h_flex()
+                            .px(SPACE_LG)
+                            .py(SPACE_SM)
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_size(FONT_CAPTION).font_medium().child("最近活动"))
+                            .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("按时间倒序 · 显示 {} / {} 个会话", self.session_change_picker_sessions.len(), self.session_change_picker_total))),
+                    )
+                    .child(
+                        v_flex()
+                            .id("session-change-picker-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px(SPACE_LG)
+                            .gap(SPACE_XS)
+                            .children(picker_rows)
+                            .when(picker_empty, |list| {
+                                list.child(div().py(SPACE_XL).text_size(FONT_BODY).text_color(theme.muted_foreground).child("没有匹配的会话"))
+                            })
+                            .when(
+                                self.session_change_picker_sessions.len()
+                                    < self.session_change_picker_total as usize,
+                                |list| {
+                                    list.child(
+                                        Button::new("session-change-picker-load-more")
+                                            .w_full()
+                                            .small()
+                                            .ghost()
+                                            .label("加载更多会话")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.load_more_session_change_picker(cx);
+                                            })),
+                                    )
+                                },
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .px(SPACE_LG)
+                            .py(SPACE_MD)
+                            .items_center()
+                            .justify_between()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("已选 {} 个会话", self.session_change_picker_selected.len())))
+                            .child(
+                                Button::new("session-change-picker-apply")
+                                    .primary()
+                                    .label("完成选择")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.apply_session_change_picker(cx)
+                                    })),
+                            ),
+                    ),
+            );
+
+        h_flex()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .items_stretch()
+            .gap(SPACE_MD)
+            .when(compact_layout, |root| root.flex_col())
+            .child(div()
+            .id("session-changes-scroll")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .when(!compact_layout, |content| content.h_full())
+            .overflow_y_scroll()
+            .child(
+                v_flex()
+                    .w_full()
+                    .px(SPACE_XXL)
+                    .pt(SPACE_MD)
+                    .pb(px(40.))
+                    .gap(SPACE_LG)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap(SPACE_MD)
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(div().text_size(FONT_DISPLAY).font_semibold().child("会话改动"))
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap(SPACE_MD)
+                                            .child(div().text_size(FONT_LABEL).text_color(theme.muted_foreground).child(format!("{} 个已选会话", selected_session_count)))
+                                            .child(
+                                                Button::new("session-change-manage-sessions")
+                                                    .small()
+                                                    .ghost()
+                                                  .label("会话详情")
+                                                  .disabled(manage_session_key.is_none())
+                                                  .on_click(cx.listener(move |this, _, window, cx| {
+                                                      if let Some(key) = manage_session_key.as_deref() {
+                                                          this.open_relationship_session_in_sessions(
+                                                              key, window, cx,
+                                                          );
+                                                      }
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("session-change-add-session")
+                                                    .small()
+                                                    .primary()
+                                                    .icon(icon("icons/plus.svg").with_size(px(14.)))
+                                                    .label("选择会话")
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.open_session_change_picker(cx);
+                                                    })),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap(SPACE_LG)
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .pb(SPACE_MD)
+                                    .child(div().text_color(theme.foreground).child(format!("{} 个会话", selected_session_count)))
+                                    .child(div().text_color(theme.muted_foreground).child(format!("{} 条文件记录", groups.iter().map(|group| count_visible_events(group)).sum::<usize>())))
+                                    .child(div().text_color(theme.muted_foreground).child(format!("{} 个 Agent", groups.iter().filter_map(|group| group.metadata.as_ref().map(|meta| meta.agent.display_name())).collect::<HashSet<_>>().len()))),
+                            ),
+                    )
+                    .child(session_filters)
+                    .when(self.session_change_loading && groups.is_empty(), |content| {
+                        content.child(div().py(SPACE_XXL).flex().justify_center().child(Spinner::new()))
+                    })
+                    .when_some(self.session_change_error.as_ref(), |content, error| {
+                        content.child(div().py(SPACE_MD).text_color(theme.danger).child(format!("读取会话改动失败：{error}")))
+                    })
+                    .when(groups.is_empty() && !self.session_change_loading && self.session_change_error.is_none(), |content| {
+                        content.child(div().py(SPACE_XXL).text_size(FONT_BODY).text_color(theme.muted_foreground).child(if has_active_filter { "当前筛选条件下没有改动记录" } else { "暂无会话改动。请从会话列表手动选入相关会话。" }))
+                    })
+                    .children(session_rows),
+            ))
+            .children(inspector)
+            .when(self.session_change_picker_open, |root| root.child(picker_overlay))
+            .into_any_element()
+    }
+
+    fn render_workspace_changes_content(
+        &self,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        if self.insights_subview == InsightsSubview::SessionChanges {
+            return self.render_session_changes_content(window, cx);
+        }
+        let theme = cx.theme();
+        let current_project = self
+            .workspace_roots
+            .iter()
+            .find(|root| Some(root.path.as_str()) == self.workspace_change_project.as_deref());
+        let session_changes_active = self.insights_subview == InsightsSubview::SessionChanges;
+        let project_name = if session_changes_active {
+            "会话改动"
+        } else {
+            current_project.map(|root| root.name.as_str()).unwrap_or("工作区改动")
+        };
+        let project_path = self.workspace_change_project.as_deref().unwrap_or("");
+        let has_projects = !self.workspace_roots.is_empty();
+        let since = self.workspace_change_range.since_ms();
+        let display_events = self
+            .workspace_change_events
+            .iter()
+            .filter(|event| since.is_none_or(|since| event.observed_at >= since))
+            .filter(|event| self.workspace_change_kind.is_none_or(|kind| event.kind == kind))
+            .cloned()
+            .collect::<Vec<_>>();
+        let loading = self.workspace_change_loading;
+        let error = self.workspace_change_error.as_ref();
+        let empty = display_events.is_empty() && !loading && error.is_none();
+        let changed_files = display_events
+            .iter()
+            .map(|event| event.file_path.as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        let changed_folders = display_events
+            .iter()
+            .filter_map(|event| event.file_path.rsplit_once('/').map(|(folder, _)| folder))
+            .collect::<HashSet<_>>()
+            .len();
+        let summary = h_flex()
+            .w_full()
+            .items_center()
+            .gap(SPACE_LG)
+            .border_b_1()
+            .border_color(theme.border)
+            .pb(SPACE_MD)
+            .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(if session_changes_active { "导入的会话" } else { "最近活动" }))
+            .child(div().text_size(FONT_BODY).child(format!("{} 条记录", display_events.len())))
+            .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("{} 个文件", changed_files)))
+            .when(!session_changes_active, |row| row.child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(format!("{} 个目录组", changed_folders))));
+        let mut timeline_groups = workspace_change_groups(&display_events);
+        if self.workspace_change_sort_ascending {
+            timeline_groups.reverse();
+        }
+        let render_file_group = |file_group: &WorkspaceChangeFileGroup<'_>,
+                                 parent_key: &str|
+         -> AnyElement {
+            let file_key = format!("{parent_key}:{}", file_group.path);
+            let is_open = self.workspace_change_open_files.contains(&file_key);
+            let file_name = file_group
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&file_group.path);
+            let latest = file_group.events.first().map(|event| event.observed_at);
+            let latest = latest
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                .map(|time| time.with_timezone(&Local).format("%H:%M").to_string())
+                .unwrap_or_else(|| "未知时间".to_string());
+            let change_rows =
+                file_group.events.iter().map(|event| {
+                    let event_id = event.id;
+                    let selected = if session_changes_active {
+                        self.session_change_selected == Some(event_id)
+                    } else {
+                        self.workspace_change_selected == Some(event_id)
+                    };
+                    let (kind_label, marker, kind_color) = match event.kind {
+                        WorkspaceChangeKind::Created => ("新增", "+", theme.success),
+                        WorkspaceChangeKind::Modified => ("修改", "~", theme.primary),
+                        WorkspaceChangeKind::Deleted => ("删除", "−", theme.danger),
+                    };
+                    let timestamp =
+                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(event.observed_at)
+                            .map(|time| {
+                                time.with_timezone(&Local)
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string()
+                            })
+                            .unwrap_or_else(|| "未知时间".to_string());
+                    v_flex()
+                        .id(SharedString::from(format!("workspace-event-{event_id}")))
+                        .w_full()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(SPACE_SM)
+                                .child(
+                                    div()
+                                        .text_size(FONT_BODY)
+                                        .font_semibold()
+                                        .text_color(kind_color)
+                                        .child(marker),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "workspace-event-toggle-{event_id}"
+                                    )))
+                                    .ghost()
+                                    .h(px(34.))
+                                    .icon(
+                                        icon(if selected {
+                                            "icons/chevron-down.svg"
+                                        } else {
+                                            "icons/chevron-right.svg"
+                                        })
+                                        .with_size(px(12.)),
+                                    )
+                                    .label(format!("{kind_label}  ·  {timestamp}"))
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        if session_changes_active {
+                                            this.toggle_session_change_event(event_id, cx)
+                                        } else {
+                                            this.select_workspace_change_event(event_id, cx)
+                                        }
+                                    })),
+                                )
+                                .when(!session_changes_active, |row| row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "workspace-change-delete-{event_id}"
+                                    )))
+                                    .small()
+                                    .ghost()
+                                    .icon(icon("icons/trash-2.svg").with_size(px(13.)))
+                                    .tooltip("删除这条改动记录")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.confirm_delete_workspace_change(event_id, window, cx)
+                                    })),
+                                )),
+                        )
+                        .into_any_element()
+                });
+            v_flex()
+                .w_full()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap(SPACE_SM)
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child(icon("icons/file-text.svg").with_size(px(14.))),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("workspace-file-{file_key}")))
+                                .ghost()
+                                .h(px(38.))
+                                .icon(
+                                    icon(if is_open {
+                                        "icons/chevron-down.svg"
+                                    } else {
+                                        "icons/chevron-right.svg"
+                                    })
+                                    .with_size(px(12.)),
+                                )
+                                .label(file_name.to_string())
+                                .tooltip(file_group.path.clone())
+                                .on_click(cx.listener({
+                                    let file_key = file_key.clone();
+                                    move |this, _, _window, cx| {
+                                        this.toggle_workspace_file(file_key.clone(), cx)
+                                    }
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{} 条 · {latest}", file_group.events.len())),
+                        ),
+                )
+                .when(is_open, |file| {
+                    file.child(v_flex().pl(SPACE_XL).children(change_rows))
+                })
+                .into_any_element()
+        };
+        let timeline_sections = timeline_groups.iter().enumerate().map(|(index, timeline)| {
+            let folder = &timeline.folder;
+            let folder_key = format!(
+                "workspace:{}:{}:{}",
+                timeline.latest, timeline.earliest, folder.path
+            );
+            let is_open = self.workspace_change_open_folders.contains(&folder_key);
+            let change_count = folder
+                .files
+                .iter()
+                .map(|file| file.events.len())
+                .sum::<usize>();
+            let folder_path = if folder.path.is_empty() {
+                "项目根目录"
+            } else {
+                folder.path.as_str()
+            };
+            let files = folder.files.iter().map(|file| {
+                div()
+                    .pl(SPACE_LG)
+                    .child(render_file_group(
+                        file,
+                        &format!(
+                            "timeline:{}:{}:{}",
+                            timeline.latest, timeline.earliest, folder.path
+                        ),
+                    ))
+                    .into_any_element()
+            });
+            let fmt = |timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp)
+                .map(|time| time.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "未知时间".to_string());
+            let label = if timeline.latest == timeline.earliest { fmt(timeline.latest) }
+                else { format!("{} – {}", fmt(timeline.earliest), fmt(timeline.latest)) };
+            h_flex().w_full().items_stretch().gap(SPACE_XL)
+                .child(h_flex().w(px(200.)).flex_shrink_0().items_start().gap(SPACE_MD)
+                    .child(div().w(px(152.)).pt(px(2.)).text_right().text_size(FONT_BODY).font_medium().text_color(theme.foreground).child(label))
+                    .child(v_flex().w(px(14.)).items_center().pt(px(4.))
+                        .child(div().size(px(13.)).rounded_full().bg(theme.primary))
+                        .when(index + 1 < timeline_groups.len(), |rail| rail.child(div().w(px(2.)).flex_1().min_h(px(32.)).bg(theme.border)))))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(SPACE_XS)
+                        .p(SPACE_MD)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .bg(theme.popover)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(SPACE_SM)
+                                .child(
+                                    icon("icons/folder.svg")
+                                        .with_size(px(18.))
+                                        .text_color(theme.warning),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "timeline-folder-{index}-{}",
+                                        folder.path
+                                    )))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(40.))
+                                    .ghost()
+                                    .icon(
+                                        icon(if is_open {
+                                            "icons/chevron-down.svg"
+                                        } else {
+                                            "icons/chevron-right.svg"
+                                        })
+                                        .with_size(px(14.)),
+                                    )
+                                    .justify_start()
+                                    .label(folder_path.to_string())
+                                    .tooltip(folder_path.to_string())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_workspace_folder(folder_key.clone(), cx)
+                                    })),
+                                )
+                                .child(outline_badge(
+                                    format!("{} 个文件 · {} 次改动", folder.files.len(), change_count),
+                                    theme.muted_foreground,
+                                )),
+                        )
+                        .when(is_open, |card| card.children(files)),
+                )
+                .into_any_element()
+        }).collect::<Vec<_>>();
+        let selected_event = self
+            .workspace_change_selected
+            .and_then(|id| display_events.iter().find(|event| event.id == id));
+        let inspector = selected_event.map(|event| {
+            let file_name = event.file_path.rsplit('/').next().unwrap_or(&event.file_path);
+            let (kind_label, color) = match event.kind {
+                WorkspaceChangeKind::Created => ("文件已新增", theme.success),
+                WorkspaceChangeKind::Modified => ("文件已修改", theme.primary),
+                WorkspaceChangeKind::Deleted => ("文件已删除", theme.danger),
+            };
+            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(event.observed_at)
+                .map(|time| time.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "未知时间".to_string());
+            let event_id = event.id;
+            v_flex()
+                .w(px(390.))
+                .flex_shrink_0()
+                .min_h_0()
+                .border_1()
+                .border_color(theme.border)
+                .rounded(theme.radius)
+                .bg(theme.popover)
+                .child(
+                    h_flex()
+                        .h(px(48.))
+                        .flex_shrink_0()
+                        .px(SPACE_MD)
+                        .items_center()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(div().font_semibold().child("改动详情"))
+                        .child(
+                            Button::new("workspace-change-inspector-close")
+                                .small()
+                                .ghost()
+                                .icon(icon("icons/close.svg").with_size(px(14.)))
+                                .tooltip("关闭详情")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.workspace_change_selected = None;
+                                    this.workspace_change_detail = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p(SPACE_MD)
+                        .gap(SPACE_MD)
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .child(div().text_color(color).child(kind_label))
+                                .child(div().text_size(FONT_HEADING).font_medium().child(file_name.to_string()))
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(event.file_path.clone()))
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(timestamp)),
+                        )
+                        .child(self.render_workspace_change_detail(event_id, cx))
+                        .child(
+                            v_flex()
+                                .gap(SPACE_XS)
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .pt(SPACE_MD)
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("所在工作区"))
+                                .child(div().text_size(FONT_BODY).child(project_name.to_string()))
+                                .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child(project_path.to_string())),
+                        ),
+                )
+                .into_any_element()
+        });
+        let workspace_filters = h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .gap(SPACE_SM)
+            .pb(SPACE_MD)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(3.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .children(WorkspaceChangeRange::ALL.into_iter().map(|range| {
+                        let selected = self.workspace_change_range == range;
+                        Button::new(SharedString::from(format!("workspace-range-{range:?}")))
+                            .small()
+                            .label(range.label())
+                            .when(selected, |button| button.primary())
+                            .when(!selected, |button| button.ghost())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_change_range = range;
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(3.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .children(
+                        [
+                            (None, "全部"),
+                            (Some(WorkspaceChangeKind::Created), "新增"),
+                            (Some(WorkspaceChangeKind::Modified), "修改"),
+                            (Some(WorkspaceChangeKind::Deleted), "删除"),
+                        ]
+                        .into_iter()
+                        .map(|(kind, label)| {
+                            let selected = self.workspace_change_kind == kind;
+                            Button::new(SharedString::from(format!("workspace-kind-{label}")))
+                                .small()
+                                .label(label)
+                                .when(selected, |button| button.primary())
+                                .when(!selected, |button| button.ghost())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.workspace_change_kind = kind;
+                                    cx.notify();
+                                }))
+                        }),
+                    ),
+            )
+            .child(
+                Button::new("workspace-change-sort")
+                    .small()
+                    .ghost()
+                    .icon(icon("icons/arrow-up-down.svg").with_size(px(14.)))
+                    .label(if self.workspace_change_sort_ascending {
+                        "时间正序"
+                    } else {
+                        "时间倒序"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace_change_sort_ascending = !this.workspace_change_sort_ascending;
+                        cx.notify();
+                    })),
+            );
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .items_stretch()
+            .gap(SPACE_MD)
+            .child(div()
+            .id("workspace-changes-scroll")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .overflow_y_scroll()
+            .child(
+                div().w_full().flex().justify_center().px(SPACE_XXL).child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(1440.))
+                        .px(SPACE_XL)
+                        .pt(SPACE_MD)
+                        .pb(px(40.))
+                        .gap(SPACE_LG)
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .gap(SPACE_XS)
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(div().text_size(FONT_DISPLAY).font_semibold().child(if session_changes_active { "会话改动" } else { "工作区改动" }))
+                                        .when(!session_changes_active, |row| {
+                                            row.child(
+                                                h_flex()
+                                                    .gap(SPACE_SM)
+                                                    .child(
+                                                        Button::new("workspace-add-directory")
+                                                            .small()
+                                                            .primary()
+                                                            .icon(icon("icons/plus.svg").with_size(px(14.)))
+                                                            .label("添加目录")
+                                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                                this.add_workspace_root(window, cx)
+                                                            })),
+                                                    )
+                                                    .when(has_projects, |actions| {
+                                                        actions.child(
+                                                            Button::new("workspace-changes-refresh")
+                                                                .small()
+                                                                .ghost()
+                                                                .icon(icon("icons/refresh-cw.svg").with_size(px(14.)))
+                                                                .label("刷新")
+                                                                .disabled(self.workspace_change_loading)
+                                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                                    this.reload_workspace_changes(true, cx)
+                                                                })),
+                                                        )
+                                                    }),
+                                            )
+                                        })
+                                )
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child(if session_changes_active { "已导入会话中记录的文件改动，按发生时间独立展示。".to_string() } else if has_projects { project_path.to_string() } else { "按时间查看本机监控目录中的文件变化。".to_string() }),
+                                )
+                                .when(
+                                    !session_changes_active && !self.runtime.workspace_watcher_available() && has_projects,
+                                    |header| header.child(
+                                        div()
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.danger)
+                                            .child("文件系统监控未能启动，当前不会记录新的工作区改动。"),
+                                    ),
+                                ),
+                        )
+                        .child(workspace_filters)
+                        .when(!display_events.is_empty(), |content| content.child(summary))
+                        .when(!has_projects && !session_changes_active, |content| {
+                            content.child(
+                                div()
+                                    .py(SPACE_XXL)
+                                    .text_size(FONT_BODY)
+                                    .text_color(theme.muted_foreground)
+                                    .child("添加要监控的工作区目录后，文件变化会显示在这里。"),
+                            )
+                        })
+                        .when(loading && display_events.is_empty(), |content| {
+                            content.child(div().py(SPACE_XXL).flex().justify_center().child(Spinner::new()))
+                        })
+                        .when_some(error, |content, error| {
+                            content.child(
+                                div()
+                                    .py(SPACE_MD)
+                                    .text_color(theme.danger)
+                                    .child(format!("读取工作区改动失败：{error}")),
+                            )
+                        })
+                        .when(empty, |content| {
+                            content.child(
+                                div()
+                                    .py(SPACE_XXL)
+                                    .text_size(FONT_BODY)
+                                    .text_color(theme.muted_foreground)
+                                    .child("暂无改动记录"),
+                            )
+                        })
+                        .when(!display_events.is_empty(), |content| {
+                            content.child(v_flex().w_full().gap(SPACE_LG).children(timeline_sections))
+                        })
+                        .when(!session_changes_active && self.workspace_change_has_more && !self.workspace_change_events.is_empty(), |content| {
+                            content.child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_center()
+                                    .child(
+                                        Button::new("workspace-changes-load-more")
+                                            .small()
+                                            .label(if self.workspace_change_loading { "读取中…" } else { "更早的改动" })
+                                            .disabled(self.workspace_change_loading)
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.reload_workspace_changes(false, cx)
+                                            })),
+                                    ),
+                            )
+                        }),
+                ),
+            ))
+            .children(inspector)
+            .into_any_element()
+    }
+
+    fn render_workspace_change_detail(&self, event_id: i64, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        if self.workspace_change_detail_loading {
+            return div()
+                .pl(SPACE_XXL)
+                .py(SPACE_SM)
+                .child(Spinner::new().with_size(px(14.)))
+                .into_any_element();
+        }
+        if let Some(error) = &self.workspace_change_detail_error {
+            return div()
+                .pl(SPACE_XXL)
+                .py(SPACE_SM)
+                .text_color(theme.danger)
+                .child(error.clone())
+                .into_any_element();
+        }
+        let Some(detail) = self
+            .workspace_change_detail
+            .as_ref()
+            .filter(|detail| detail.event.id == event_id)
+        else {
+            return div().into_any_element();
+        };
+        let preview_text = |text: &str| {
+            let (preview, truncated) = workspace_change_markdown_preview(text);
+            if truncated {
+                format!("{preview}\n\n…预览已截断（仅显示前 32 KiB）。")
+            } else {
+                preview.to_string()
+            }
+        };
+        let before_text = detail.before_text.as_deref().map(preview_text);
+        let after_text = detail.after_text.as_deref().map(preview_text);
+        let before_hash = detail.event.before_hash.clone();
+        let after_hash = detail.event.after_hash.clone();
+        v_flex()
+            .gap(SPACE_MD)
+            .children(before_text.map(|text| {
+                v_flex()
+                    .gap(SPACE_XS)
+                    .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("变更前"))
+                    .child(TextView::markdown(SharedString::from(format!("workspace-change-before-{event_id}")), text).selectable(true))
+                    .into_any_element()
+            }))
+            .children(after_text.map(|text| {
+                v_flex()
+                    .gap(SPACE_XS)
+                    .child(div().text_size(FONT_CAPTION).text_color(theme.muted_foreground).child("变更后"))
+                    .child(TextView::markdown(SharedString::from(format!("workspace-change-after-{event_id}")), text).selectable(true))
+                    .into_any_element()
+            }))
+            .when(detail.before_text.is_none() && detail.after_text.is_none(), |detail| {
+                detail.child(
+                    v_flex()
+                        .gap(SPACE_XS)
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.muted_foreground)
+                        .child("此文件没有可预览的文本快照；可能是敏感文件、二进制文件或超过快照大小限制。")
+                        .when_some(before_hash, |row, hash| {
+                            row.child(div().child(format!("变更前哈希：{}", &hash[..hash.len().min(16)])))
+                        })
+                        .when_some(after_hash, |row, hash| {
+                            row.child(div().child(format!("变更后哈希：{}", &hash[..hash.len().min(16)])))
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 会话导航:搜索框(搜的是会话,⌘K 同一条路)、All Sessions / Starred,再接 Agents / Projects
     fn render_sessions_nav(&self, all_active: bool, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         v_flex()
@@ -5688,6 +14395,996 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn render_relationships_nav(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let entity = cx.entity();
+        let roots = relationship_roots(&self.relationship_edges);
+        let mut relation_rows = Vec::new();
+        let mut current_project = None::<String>;
+        for (index, root) in roots.iter().enumerate() {
+            let project_path = if root.session.project_path.is_empty() {
+                "全局".to_string()
+            } else {
+                root.session.project_path.clone()
+            };
+            if current_project.as_deref() != Some(project_path.as_str()) {
+                current_project = Some(project_path.clone());
+                let project_name = if root.session.project_name.is_empty() {
+                    project_path.clone()
+                } else {
+                    root.session.project_name.clone()
+                };
+                relation_rows.push(
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "relationship-project-header-{index}"
+                        )))
+                        .mx(SIDEBAR_EDGE)
+                        .mt(if relation_rows.is_empty() {
+                            SPACE_XS
+                        } else {
+                            SPACE_MD
+                        })
+                        .mb(SPACE_XS)
+                        .gap(SPACE_SM)
+                        .items_center()
+                        .text_size(FONT_BODY)
+                        .font_semibold()
+                        .text_color(theme.muted_foreground)
+                        .child(div().min_w_0().truncate().child(project_name))
+                        .child(div().h(px(1.)).flex_1().bg(theme.sidebar_border))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(project_path.clone())
+                                .build(window, cx)
+                        })
+                        .into_any_element(),
+                );
+            }
+            let session = root.session.clone();
+            let key = session.key.clone();
+            let title = clip_display(&session.title, 28);
+            let selected = self
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.meta.key == key);
+            let click_entity = entity.clone();
+            let menu_entity = entity.clone();
+            let menu_key = key.clone();
+            relation_rows.push(
+                v_flex()
+                    .id(SharedString::from(format!("relationship-root-nav-{index}")))
+                    .mx(SIDEBAR_EDGE)
+                    .px(SPACE_MD)
+                    .py(SPACE_MD)
+                    .gap(SPACE_XS)
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(if selected {
+                        theme.primary
+                    } else {
+                        theme.border.opacity(0.55)
+                    })
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.list_active))
+                    .when(!selected, |row| {
+                        row.hover(|style| style.bg(theme.secondary_hover))
+                    })
+                    .on_click(move |_, window, cx| {
+                        click_entity.update(cx, |this, cx| {
+                            this.page = Page::Relationships;
+                            this.open_detail(&key, None, window, cx);
+                            this.select_list_key(&key, true, window, cx);
+                        });
+                    })
+                    .child(
+                        h_flex()
+                            .gap(ICON_TEXT_GAP)
+                            .items_center()
+                            .child(
+                                img(session.agent.brand_icon(theme.mode.is_dark()))
+                                    .size(px(17.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(if selected {
+                                        theme.sidebar_accent_foreground
+                                    } else {
+                                        theme.sidebar_foreground
+                                    })
+                                    .font_medium()
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(ICON_TEXT_GAP)
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .child("关系树起点")
+                            .child(div().flex_1())
+                            .child(format!("{} 条关系", root.edge_count)),
+                    )
+                    .context_menu(move |menu, _, _| {
+                        let entity = menu_entity.clone();
+                        let key = menu_key.clone();
+                        menu.min_w(px(160.)).item(
+                            PopupMenuItem::new("打开")
+                                .icon(icon("icons/message-square.svg").with_size(px(15.)))
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.open_relationship_session_in_sessions(
+                                            &key, window, cx,
+                                        );
+                                    });
+                                }),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .children(relation_rows)
+            .when(roots.is_empty(), |nav| {
+                nav.child(
+                    div()
+                        .mx(SIDEBAR_EDGE)
+                        .text_size(FONT_LABEL)
+                        .text_color(theme.muted_foreground)
+                        .child("还没有建立会话关系。"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_compressions_nav(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let entity = cx.entity();
+        let query = self.compression_query.read(cx).value().trim().to_string();
+        let mut documents = Vec::new();
+        let mut current_project = None::<String>;
+        for (index, document) in self.compression_documents.iter().enumerate() {
+            let project_path = if document.project_path.is_empty() {
+                "全局".to_string()
+            } else {
+                document.project_path.clone()
+            };
+            if current_project.as_deref() != Some(project_path.as_str()) {
+                current_project = Some(project_path.clone());
+                let project_name = if document.project_path.is_empty() {
+                    "全局压缩库".to_string()
+                } else {
+                    PathBuf::from(&document.project_path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&document.project_path)
+                        .to_string()
+                };
+                documents.push(
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "compression-project-header-{index}"
+                        )))
+                        .mx(SIDEBAR_EDGE)
+                        .mt(if documents.is_empty() {
+                            SPACE_XS
+                        } else {
+                            SPACE_LG
+                        })
+                        .mb(SPACE_XS)
+                        .gap(SPACE_SM)
+                        .items_center()
+                        .text_size(FONT_BODY)
+                        .font_semibold()
+                        .text_color(theme.muted_foreground)
+                        .child(div().min_w_0().truncate().child(project_name))
+                        .child(div().h(px(1.)).flex_1().bg(theme.sidebar_border))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(project_path.clone())
+                                .build(window, cx)
+                        })
+                        .into_any_element(),
+                );
+            }
+            let path = document.path.clone();
+            let selected = self.compression_selected.as_ref() == Some(&path);
+            let click_entity = entity.clone();
+            documents.push(
+                v_flex()
+                    .id(SharedString::from(format!(
+                        "compression-nav-document-{index}"
+                    )))
+                    .mx(SIDEBAR_EDGE)
+                    .px(SPACE_MD)
+                    .py(SPACE_MD)
+                    .gap(SPACE_XS)
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(if selected {
+                        theme.primary
+                    } else {
+                        theme.border.opacity(0.55)
+                    })
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.list_active))
+                    .when(!selected, |row| {
+                        row.hover(|style| style.bg(theme.secondary_hover))
+                    })
+                    .on_click(move |_, _, cx| {
+                        click_entity.update(cx, |this, cx| {
+                            this.compression_selected = Some(path.clone());
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        h_flex()
+                            .gap(ICON_TEXT_GAP)
+                            .items_center()
+                            .child(
+                                icon("icons/file-text.svg")
+                                    .with_size(px(16.))
+                                    .flex_shrink_0()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(FONT_BODY)
+                                    .font_medium()
+                                    .text_color(if selected {
+                                        theme.sidebar_accent_foreground
+                                    } else {
+                                        theme.sidebar_foreground
+                                    })
+                                    .child(
+                                        document.title.replace(HL_OPEN, "").replace(HL_CLOSE, ""),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "compression-document-location-{index}"
+                            )))
+                            .w_full()
+                            .min_w_0()
+                            .gap(ICON_TEXT_GAP)
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(document.scope.clone()),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div().min_w_0().max_w(px(140.)).truncate().child(
+                                    document
+                                        .path
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("Markdown")
+                                        .to_string(),
+                                ),
+                            )
+                            .tooltip({
+                                let path = document.path.to_string_lossy().to_string();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(path.clone())
+                                        .build(window, cx)
+                                }
+                            }),
+                    )
+                    .when(!query.is_empty() && !document.snippet.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .mt(px(2.))
+                                .text_size(FONT_LABEL)
+                                .min_w_0()
+                                .w_full()
+                                .text_color(theme.muted_foreground)
+                                .whitespace_normal()
+                                .line_clamp(2)
+                                .child(
+                                    document
+                                        .snippet
+                                        .replace(HL_OPEN, "「")
+                                        .replace(HL_CLOSE, "」")
+                                        .replace('\n', " "),
+                                ),
+                        )
+                    })
+                    .when(!document.direct_match, |row| {
+                        row.child(
+                            div()
+                                .mt(px(2.))
+                                .text_size(FONT_LABEL)
+                                .text_color(theme.accent_foreground)
+                                .child(format!(
+                                    "关联结果 · {} 条关系",
+                                    document.relation_count.max(1)
+                                )),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .px(SIDEBAR_EDGE)
+                    .pb(SPACE_SM)
+                    .child(search_input_control(
+                        &self.compression_query,
+                        gpui_component::Size::Medium,
+                        "compression-search-clear",
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .mx(SIDEBAR_EDGE)
+                    .mb(SPACE_XS)
+                    .text_size(FONT_LABEL)
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "压缩文档 · 已索引 {}",
+                        self.compression_indexed_documents
+                    )),
+            )
+            .children(documents)
+            .when(self.compression_documents.is_empty(), |nav| {
+                nav.child(
+                    div()
+                        .mx(SIDEBAR_EDGE)
+                        .text_size(FONT_LABEL)
+                        .text_color(theme.muted_foreground)
+                        .child(if self.compression_search_loading {
+                            "正在搜索…"
+                        } else {
+                            "没有压缩文档"
+                        }),
+                )
+            })
+            .when(self.compression_search_degraded, |nav| {
+                nav.child(
+                    div()
+                        .mx(SIDEBAR_EDGE)
+                        .mt(SPACE_MD)
+                        .text_size(FONT_LABEL)
+                        .text_color(theme.warning)
+                        .child("当前使用短关键词兼容模式"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_relationship_tree_panel(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(detail) = &self.detail else {
+            return div().into_any_element();
+        };
+        let entity = cx.entity();
+        let current_key = detail.meta.key.clone();
+        let current_title = clip_display(&detail.meta.title, 22);
+        let parent_tree = detail.link_parent_tree.clone();
+        let child_tree = detail.link_child_tree.clone();
+        let has_tree = !parent_tree.is_empty() || !child_tree.is_empty();
+        let row = move |id: String,
+                        title: String,
+                        depth: usize,
+                        glyph: &'static str,
+                        relation: Option<String>,
+                        active: bool,
+                        key: Option<String>| {
+            let entity = entity.clone();
+            let relation_color = relation
+                .as_deref()
+                .map(|relation| match relation {
+                    "continues" => theme.primary,
+                    "branches" => theme.info,
+                    "blocks" => theme.danger,
+                    "resolves" => theme.success,
+                    "related" => theme.muted_foreground,
+                    _ => theme.muted_foreground,
+                })
+                .unwrap_or(theme.muted_foreground);
+            div()
+                .id(SharedString::from(id))
+                .h(ROW_HEIGHT_SUB)
+                .mx(SIDEBAR_EDGE)
+                .pl(LEAD_INSET + px((depth.min(3) as f32) * 10.))
+                .pr(SIDEBAR_EDGE)
+                .rounded(theme.radius)
+                .flex()
+                .items_center()
+                .gap(ICON_TEXT_GAP)
+                .text_size(FONT_CAPTION)
+                .text_color(if active {
+                    theme.sidebar_accent_foreground
+                } else {
+                    theme.sidebar_foreground
+                })
+                .when(active, |this| this.bg(theme.sidebar_accent))
+                .when(!active && key.is_some(), |this| {
+                    this.cursor_pointer()
+                        .hover(|this| this.bg(theme.sidebar_accent.opacity(0.55)))
+                })
+                .when_some(key, |this, key| {
+                    this.on_click(move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open_detail(&key, None, window, cx);
+                            this.select_list_key(&key, true, window, cx);
+                        });
+                    })
+                })
+                .child(
+                    icon(glyph)
+                        .with_size(px(13.))
+                        .flex_shrink_0()
+                        .text_color(if active {
+                            theme.sidebar_accent_foreground
+                        } else {
+                            relation_color
+                        }),
+                )
+                .when_some(relation, |this, relation| {
+                    this.child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(5.))
+                            .rounded(RADIUS_BADGE)
+                            .text_size(FONT_LABEL)
+                            .text_color(relation_color)
+                            .bg(relation_color.opacity(0.12))
+                            .child(session_relation_label(&relation)),
+                    )
+                })
+                .child(div().min_w_0().truncate().child(title))
+                .into_any_element()
+        };
+        let mut panel = v_flex()
+            .flex_shrink_0()
+            .max_h(px(220.))
+            .overflow_hidden()
+            .border_t_1()
+            .border_color(theme.sidebar_border)
+            .pt(SPACE_XS)
+            .pb(SPACE_SM)
+            .gap(px(2.))
+            .child(group_header(
+                "relationship-tree-header",
+                "关系树",
+                self.relationship_tree_collapsed,
+                cx.listener(|this, _, _window, cx| {
+                    this.relationship_tree_collapsed = !this.relationship_tree_collapsed;
+                    cx.notify();
+                }),
+                cx,
+            ));
+        if self.relationship_tree_collapsed {
+            return panel.into_any_element();
+        }
+        panel = panel.child(row(
+            "relationship-current".to_string(),
+            current_title,
+            0,
+            "icons/message-square.svg",
+            None,
+            true,
+            Some(current_key),
+        ));
+        if has_tree {
+            if !parent_tree.is_empty() {
+                panel = panel.child(
+                    group_header(
+                        "relationship-parents-header",
+                        "上游",
+                        self.relationship_parents_collapsed,
+                        cx.listener(|this, _, _window, cx| {
+                            this.relationship_parents_collapsed =
+                                !this.relationship_parents_collapsed;
+                            cx.notify();
+                        }),
+                        cx,
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .pr(SIDEBAR_EDGE)
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.muted_foreground)
+                            .child(parent_tree.len().to_string()),
+                    ),
+                );
+                if !self.relationship_parents_collapsed {
+                    for rel in parent_tree {
+                        let title = clip_display(&rel.session.title, 22);
+                        panel = panel.child(row(
+                            format!("relationship-parent:{}", rel.session.key),
+                            title,
+                            rel.depth,
+                            session_relation_icon(&rel.relation),
+                            Some(rel.relation),
+                            false,
+                            Some(rel.session.key),
+                        ));
+                    }
+                }
+            }
+            if !child_tree.is_empty() {
+                panel = panel.child(
+                    group_header(
+                        "relationship-children-header",
+                        "分支",
+                        self.relationship_children_collapsed,
+                        cx.listener(|this, _, _window, cx| {
+                            this.relationship_children_collapsed =
+                                !this.relationship_children_collapsed;
+                            cx.notify();
+                        }),
+                        cx,
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .pr(SIDEBAR_EDGE)
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.muted_foreground)
+                            .child(child_tree.len().to_string()),
+                    ),
+                );
+                if !self.relationship_children_collapsed {
+                    for rel in child_tree {
+                        let title = clip_display(&rel.session.title, 22);
+                        panel = panel.child(row(
+                            format!("relationship-child:{}", rel.session.key),
+                            title,
+                            rel.depth,
+                            session_relation_icon(&rel.relation),
+                            Some(rel.relation),
+                            false,
+                            Some(rel.session.key),
+                        ));
+                    }
+                }
+            }
+        } else {
+            panel = panel.child(
+                div()
+                    .mx(SIDEBAR_EDGE)
+                    .px(LEAD_INSET)
+                    .py(SPACE_XS)
+                    .text_size(FONT_LABEL)
+                    .text_color(theme.muted_foreground)
+                    .child("暂无关系"),
+            );
+        }
+        panel.into_any_element()
+    }
+
+    fn render_relationships_page(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(detail) = &self.detail else {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .bg(theme.background)
+                .child(empty_state(
+                    "icons/git-branch.svg",
+                    px(48.),
+                    px(22.),
+                    "关系",
+                    "选择一个会话查看关系树。",
+                    cx,
+                ))
+                .into_any_element();
+        };
+        let entity = cx.entity();
+        let relation_color = |relation: &str| match relation {
+            "continues" => theme.primary,
+            "branches" => theme.info,
+            "blocks" => theme.danger,
+            "resolves" => theme.success,
+            "related" => theme.muted_foreground,
+            _ => theme.muted_foreground,
+        };
+        let danger_color = theme.danger;
+        let node = |id: String,
+                    session: SessionMeta,
+                    relation: Option<String>,
+                    edge: Option<(String, String, String)>,
+                    start: bool,
+                    depth: usize,
+                    active: bool| {
+            let entity = entity.clone();
+            let key = session.key.clone();
+            let title = clip_display(&session.title, 52);
+            let project = if session.project_name.is_empty() {
+                "未知项目".to_string()
+            } else {
+                session.project_name.clone()
+            };
+            let color = relation
+                .as_deref()
+                .map(relation_color)
+                .unwrap_or(theme.primary);
+            let click_entity = entity.clone();
+            let menu_entity = entity.clone();
+            let menu_key = key.clone();
+            h_flex()
+                .id(SharedString::from(id))
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .rounded(theme.radius)
+                .cursor_pointer()
+                .when(!active, |this| {
+                    this.hover(|style| style.bg(theme.secondary_hover))
+                })
+                .on_click(move |_, window, cx| {
+                    click_entity.update(cx, |this, cx| {
+                        this.page = Page::Relationships;
+                        this.open_detail(&key, None, window, cx);
+                        this.select_list_key(&key, true, window, cx);
+                    });
+                })
+                .child(
+                    div()
+                        .w(px(24. + (depth.min(6) as f32) * 20.))
+                        .flex_shrink_0()
+                        .flex()
+                        .justify_end()
+                        .self_stretch()
+                        .child(
+                            div()
+                                .w(px(12.))
+                                .border_l_1()
+                                .border_color(theme.border.opacity(0.8))
+                                .child(
+                                    div()
+                                        .mt(px(28.))
+                                        .h(px(1.))
+                                        .w(px(12.))
+                                        .bg(theme.border.opacity(0.8)),
+                                ),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(SPACE_XS)
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(if active {
+                            theme.primary
+                        } else {
+                            theme.border.opacity(0.9)
+                        })
+                        .bg(if active {
+                            theme.list_active
+                        } else {
+                            theme.popover
+                        })
+                        .px(SPACE_MD)
+                        .py(SPACE_LG)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    icon(if start {
+                                        "icons/git-branch.svg"
+                                    } else {
+                                        relation
+                                            .as_deref()
+                                            .map(session_relation_icon)
+                                            .unwrap_or("icons/message-square.svg")
+                                    })
+                                    .with_size(px(15.))
+                                    .text_color(color),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(FONT_HEADING)
+                                        .font_medium()
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                )
+                                .when(start, |this| {
+                                    this.child(outline_badge("起点", theme.primary))
+                                })
+                                .when_some(relation.clone().filter(|_| !start), |this, relation| {
+                                    this.child(outline_badge(
+                                        session_relation_label(&relation),
+                                        color,
+                                    ))
+                                })
+                                .when_some(edge.clone(), |this, (parent, child, old_relation)| {
+                                    let entity = entity.clone();
+                                    this.child(
+                                        Button::new(SharedString::from(format!(
+                                            "relationship-edge-actions:{child}:{old_relation}"
+                                        )))
+                                        .ghost()
+                                        .rounded(RADIUS_BUTTON)
+                                        .icon(icon("icons/more-horizontal.svg").with_size(px(15.)))
+                                        .dropdown_menu(move |menu, _, _| {
+                                            let menu = SESSION_RELATIONS.iter().fold(
+                                                menu.min_w(px(180.)),
+                                                |menu, relation| {
+                                                    let entity = entity.clone();
+                                                    let parent = parent.clone();
+                                                    let child = child.clone();
+                                                    let old_relation = old_relation.clone();
+                                                    menu.item(
+                                                        PopupMenuItem::new(format!(
+                                                            " 改为{}",
+                                                            session_relation_label(relation)
+                                                        ))
+                                                        .icon(
+                                                            icon(session_relation_icon(relation))
+                                                                .with_size(px(15.)),
+                                                        )
+                                                        .checked(*relation == old_relation)
+                                                        .on_click(move |_, window, cx| {
+                                                            entity.update(cx, |this, cx| {
+                                                                this.update_relationship_edge(
+                                                                    &parent,
+                                                                    &child,
+                                                                    &old_relation,
+                                                                    relation,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        }),
+                                                    )
+                                                },
+                                            );
+                                            let entity = entity.clone();
+                                            let parent = parent.clone();
+                                            let child = child.clone();
+                                            let old_relation = old_relation.clone();
+                                            menu.separator().item(
+                                                PopupMenuItem::element(|_, cx| {
+                                                    div()
+                                                        .text_color(cx.theme().danger)
+                                                        .child(" 删除关系")
+                                                })
+                                                .icon(
+                                                    icon("icons/trash-2.svg")
+                                                        .with_size(px(15.))
+                                                        .text_color(danger_color),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.delete_relationship_edge(
+                                                            &parent,
+                                                            &child,
+                                                            &old_relation,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                            )
+                                        })
+                                        .anchor(Anchor::TopRight),
+                                    )
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(ICON_TEXT_GAP)
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    img(session.agent.brand_icon(theme.mode.is_dark()))
+                                        .size(px(15.))
+                                        .flex_shrink_0(),
+                                )
+                                .child(badge(project, theme.muted, theme.muted_foreground))
+                                .when(!session.project_path.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(session.project_path.clone()),
+                                    )
+                                }),
+                        ),
+                )
+                .context_menu(move |menu, _, _| {
+                    let entity = menu_entity.clone();
+                    let key = menu_key.clone();
+                    menu.min_w(px(160.)).item(
+                        PopupMenuItem::new("打开")
+                            .icon(icon("icons/message-square.svg").with_size(px(15.)))
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.open_relationship_session_in_sessions(&key, window, cx);
+                                });
+                            }),
+                    )
+                })
+                .into_any_element()
+        };
+        let parents = detail.link_parent_tree.clone();
+        let children = detail.link_child_tree.clone();
+        let current = detail.meta.clone();
+        let mut tree_rows: Vec<AnyElement> = Vec::new();
+        let parent_chain = parents.iter().rev().collect::<Vec<_>>();
+        for (ix, rel) in parent_chain.iter().enumerate() {
+            let edge_child = parent_chain
+                .get(ix + 1)
+                .map(|next| next.session.key.clone())
+                .unwrap_or_else(|| current.key.clone());
+            tree_rows.push(node(
+                format!("relationships-parent:{}", rel.session.key),
+                rel.session.clone(),
+                Some(rel.relation.clone()),
+                Some((rel.session.key.clone(), edge_child, rel.relation.clone())),
+                ix == 0,
+                ix,
+                false,
+            ));
+        }
+        tree_rows.push(node(
+            "relationships-current".to_string(),
+            current.clone(),
+            parents.last().map(|rel| rel.relation.clone()),
+            parents.last().map(|rel| {
+                (
+                    rel.session.key.clone(),
+                    current.key.clone(),
+                    rel.relation.clone(),
+                )
+            }),
+            parents.is_empty(),
+            parents.len(),
+            true,
+        ));
+        let mut child_parent_stack = vec![current.key.clone()];
+        for rel in &children {
+            child_parent_stack.truncate(rel.depth);
+            let parent_key = child_parent_stack
+                .last()
+                .cloned()
+                .unwrap_or_else(|| current.key.clone());
+            tree_rows.push(node(
+                format!("relationships-child:{}", rel.session.key),
+                rel.session.clone(),
+                Some(rel.relation.clone()),
+                Some((parent_key, rel.session.key.clone(), rel.relation.clone())),
+                false,
+                parents.len() + rel.depth,
+                false,
+            ));
+            child_parent_stack.push(rel.session.key.clone());
+        }
+        let actions = h_flex()
+            .gap(SPACE_XS)
+            .child(
+                Button::new("relationship-chunk-input")
+                    .ghost()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(icon("icons/layers.svg").with_size(px(16.)))
+                    .label("选择会话并分块输入")
+                    .tooltip("选择关系树中的会话，超长会话按完整轮次分块")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_relationship_chunk_input(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("export-relationships")
+                    .ghost()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(icon("icons/download.svg").with_size(px(16.)))
+                    .tooltip("导出关系文档")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.do_export_relationships(window, cx);
+                    })),
+            )
+            .child(self.refresh_button(self.scan.scanning, Self::refresh_sessions, cx))
+            .into_any_element();
+        let relationship_lead = vec![
+            img(current.agent.brand_icon(theme.mode.is_dark()))
+                .size(px(15.))
+                .into_any_element(),
+            div()
+                .text_size(FONT_CAPTION)
+                .child(current.agent.display_name())
+                .into_any_element(),
+            project_badge(
+                "relationship-detail-project",
+                &current.project_path,
+                if current.project_name.is_empty() {
+                    "未知项目".to_string()
+                } else {
+                    current.project_name.clone()
+                },
+                theme,
+            ),
+        ];
+        let relationship_header_meta = h_flex()
+            .gap(ICON_TEXT_GAP)
+            .flex_wrap()
+            .text_size(FONT_CAPTION)
+            .children([
+                format!("{} 个上游", parents.len()),
+                format!("{} 个分支", children.len()),
+                format!("{} 个会话", parents.len() + children.len() + 1),
+            ])
+            .into_any_element();
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .bg(theme.background)
+            .child(detail_header_frame(
+                "relationships-header",
+                relationship_lead,
+                vec![actions],
+                current.title.clone().into(),
+                vec![relationship_header_meta],
+                theme,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .flex()
+                    .justify_center()
+                    .px(SPACE_XXL)
+                    .pb(SPACE_XXL)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .pt(SPACE_MD)
+                            .max_w(px(1120.))
+                            .gap(SPACE_LG)
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_between()
+                                    .pb(SPACE_SM)
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(section_header_row("关系树", &theme))
+                                    .child(
+                                        div()
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.muted_foreground)
+                                            .child("点击会话查看 · 右键打开会话"),
+                                    ),
+                            )
+                            .children(tree_rows),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// 侧栏的 Agents / Projects 两组(会话导航与 Memory 导航同一套行组件、同一个单选
     /// 模型,折叠状态两页共用)。每行给 (身份, 计数, 是否当前);点击回调收到切换后的
     /// 目标——点当前项就是 None(回全部)
@@ -5766,19 +15463,15 @@ impl Workbench {
             })
     }
 
-    /// 侧栏底部左端的一组:三颗页切换 + Clean up,同尺寸图标钮,当前页那颗 `active`
-    /// (侧栏选中色圆角底)。Sessions 也是一颗——否则从 Memory 回来只能"再点一次
-    /// Memory"。Clean up 打开时三颗页都不亮、它自己亮(它是叠在会话视图上的模式,
-    /// 不是页;用户 2026-09-21 定它也靠左,右端只留 Settings)
+    /// 侧栏底部左端的核心目的地。
     fn render_page_switch(&self, cx: &Context<Self>) -> AnyElement {
-        let current = (!self.cleanup.open).then_some(self.page);
-        let button = |id: &'static str, tooltip: &'static str, glyph: &'static str, page: Page| {
+        let button = |id: &'static str, tooltip: &'static str, glyph: SidebarGlyph, page: Page| {
             sidebar_tool_btn(
                 id,
                 tooltip,
-                current == Some(page),
+                self.page == page && !self.cleanup.open,
                 glyph,
-                cx.listener(move |this, _, _window, cx| this.show_page(page, cx)),
+                cx.listener(move |this, _, window, cx| this.show_page(page, window, cx)),
                 cx,
             )
         };
@@ -5787,28 +15480,39 @@ impl Workbench {
             .child(button(
                 "page-sessions",
                 t("Sessions"),
-                "icons/messages-square.svg",
+                SidebarGlyph::Icon("icons/messages-square.svg"),
                 Page::Sessions,
             ))
             .child(button(
                 "page-memory",
                 t("Memory"),
-                "icons/brain.svg",
+                SidebarGlyph::Icon("icons/brain.svg"),
                 Page::Memory,
             ))
             .child(button(
+                "page-skills",
+                t("Skills"),
+                SidebarGlyph::Text("S"),
+                Page::Skills,
+            ))
+            .child(button(
+                "page-relationships",
+                "关系",
+                SidebarGlyph::Icon("icons/git-branch.svg"),
+                Page::Relationships,
+            ))
+            .child(button(
+                "page-compressions",
+                "压缩文件",
+                SidebarGlyph::Icon("icons/file-text.svg"),
+                Page::Compressions,
+            ))
+            // 统计放最右、紧邻设置:低频目的地不进首屏动作区(用户 2026-10-15 定)
+            .child(button(
                 "page-insights",
                 t("Insights"),
-                "icons/chart-column.svg",
+                SidebarGlyph::Icon("icons/chart-column.svg"),
                 Page::Insights,
-            ))
-            .child(sidebar_tool_btn(
-                "cleanup",
-                t("Clean Up Sessions"),
-                self.cleanup.open,
-                "icons/brush-cleaning.svg",
-                cx.listener(|this, _, window, cx| this.toggle_cleanup(window, cx)),
-                cx,
             ))
             .into_any_element()
     }
@@ -5855,6 +15559,7 @@ impl Workbench {
             SortKey::Updated => t("Date updated"),
             SortKey::Created => t("Date created"),
             SortKey::Messages => t("Message count"),
+            SortKey::Tokens => t("Token usage"),
         };
         let sort_tooltip = crate::tf!(
             "Sort by {} · {}",
@@ -5908,11 +15613,57 @@ impl Workbench {
                     .item(mk_key(t("Date updated"), SortKey::Updated))
                     .item(mk_key(t("Date created"), SortKey::Created))
                     .item(mk_key(t("Message count"), SortKey::Messages))
+                    .item(mk_key(t("Token usage"), SortKey::Tokens))
                     .separator()
                     .item(mk_dir(t("Descending"), false))
                     .item(mk_dir(t("Ascending"), true))
             })
             .anchor(Anchor::TopRight);
+        let relationship_picker = self.pending_link_parent.as_ref().map(|(_, parent_title)| {
+            let child_title = self
+                .pending_link_child
+                .as_ref()
+                .map(|(_, title)| clip_display(title, 18));
+            let text = child_title.map_or_else(
+                || {
+                    crate::tf!(
+                        "正在连接：{}，请在会话列表中选择目标",
+                        clip_display(parent_title, 18)
+                    )
+                },
+                |child| {
+                    crate::tf!(
+                        "正在连接：{} → {}，请选择关系类型",
+                        clip_display(parent_title, 14),
+                        child
+                    )
+                },
+            );
+            h_flex()
+                .mx(SPACE_LG)
+                .mb(SPACE_SM)
+                .px(SPACE_SM)
+                .py(px(6.))
+                .gap(SPACE_SM)
+                .items_center()
+                .rounded(RADIUS_BUTTON)
+                .bg(theme.primary.opacity(0.10))
+                .text_size(FONT_LABEL)
+                .text_color(theme.primary)
+                .child(icon("icons/git-branch.svg").with_size(px(14.)))
+                .child(div().flex_1().min_w_0().truncate().child(text))
+                .child(
+                    Button::new("cancel-relationship-picker")
+                        .ghost()
+                        .small()
+                        .rounded(RADIUS_BUTTON)
+                        .label("取消")
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.cancel_pending_relationship(cx);
+                        })),
+                )
+                .into_any_element()
+        });
         v_flex()
             .w(SESSION_STREAM_WIDTH)
             .h_full()
@@ -5932,6 +15683,7 @@ impl Workbench {
                 ),
                 cx,
             ))
+            .when_some(relationship_picker, |this, picker| this.child(picker))
             .child(if shown == 0 {
                 if library_empty && self.scan.scanning {
                     v_flex()
@@ -6303,16 +16055,27 @@ impl Workbench {
     ) -> AnyElement {
         // 详情宽度随窗口变化；工具头要用当前可用像素反算显示格数，再交给
         // unicode-width 截断，避免窄窗口溢出、宽窗口仍停在固定长度。
-        let reader_width =
-            (window.viewport_size().width - SIDEBAR_WIDTH - SESSION_STREAM_WIDTH - SPACE_XXL * 2.)
-                .clamp(px(220.), READER_MAX_WIDTH);
+        let outline_width = if self.detail_outline_hidden_for_width(window) {
+            px(0.)
+        } else if self.detail_outline_collapsed {
+            DETAIL_OUTLINE_COLLAPSED_WIDTH
+        } else {
+            DETAIL_OUTLINE_WIDTH
+        };
+        let reader_width = (window.viewport_size().width
+            - SIDEBAR_WIDTH
+            - SESSION_STREAM_WIDTH
+            - outline_width
+            - SPACE_XXL * 2.)
+            .clamp(px(220.), READER_MAX_WIDTH);
         let tool_summary_width = (reader_width - px(156.)).max(px(80.));
         let tool_arg_cells =
             ((f32::from(tool_summary_width) / TOOL_MONO_CELL_WIDTH) as usize).max(8);
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
         // 尾部要用的 Copy 值提前取出,theme 借用不跨越 inner 构建期的 &mut cx
-        let jump_bg = theme.primary.opacity(0.09);
+        let search_match_bg = theme.primary.opacity(0.055);
+        let jump_bg = theme.primary.opacity(0.16);
         let jump_radius = theme.radius;
         let image_border = theme.border;
         let image_panel = theme.popover;
@@ -6320,10 +16083,17 @@ impl Workbench {
         let Some(detail) = &self.detail else {
             return div().into_any_element();
         };
-        let total = detail.transcript.len();
+        let list_ix = ix;
+        let ix = detail
+            .reader_visible_indices
+            .get(list_ix)
+            .copied()
+            .unwrap_or(list_ix);
+        let total = detail.reader_visible_indices.len();
         let tools_open = detail.expanded_tools.contains(&ix);
         let thinking_open = detail.expanded_thinking.contains(&ix);
         let jump_seq = detail.jump_seq;
+        let is_search_match = detail.search_matches.contains(&ix);
         // Rc 克隆只加引用计数;逐行借用,避免每帧深拷贝整条消息(text 可达 32KB)
         let transcript = detail.transcript.clone();
         let shots = detail.images.get(ix).cloned().unwrap_or_default();
@@ -6340,6 +16110,29 @@ impl Workbench {
         {
             return div().into_any_element();
         }
+        if self.detail_outline_mode == DetailOutlineMode::Conversation
+            && m.text.trim().is_empty()
+            && shots.is_empty()
+        {
+            return div().into_any_element();
+        }
+        if self.detail_outline_mode == DetailOutlineMode::Changes
+            && !transcript_message_is_change(m)
+            && m.role != MessageRole::User
+        {
+            return div().into_any_element();
+        }
+        let visible_tools: Vec<ToolCallView> =
+            if self.detail_outline_mode == DetailOutlineMode::Changes {
+                m.tool_calls
+                    .iter()
+                    .filter(|call| tool_call_is_change(call))
+                    .cloned()
+                    .collect()
+            } else {
+                m.tool_calls.clone()
+            };
+        let has_visible_tools = !visible_tools.is_empty();
         // 搜索跳转的落点消息:淡 primary 底色保持高亮,直到换会话
         let is_jump_target = jump_seq == Some(m.seq);
 
@@ -6395,7 +16188,7 @@ impl Workbench {
                             cx.listener(move |this, _, _window, cx| {
                                 if let Some(detail) = &mut this.detail {
                                     toggle_expanded_row(&mut detail.expanded_thinking, ix);
-                                    detail.msg_list.splice(ix..ix + 1, 1);
+                                    detail.msg_list.splice(list_ix..list_ix + 1, 1);
                                 }
                                 cx.notify();
                             }),
@@ -6429,17 +16222,17 @@ impl Workbench {
                                 .children(parts),
                         );
                     }
-                    if !m.tool_calls.is_empty() {
+                    if has_visible_tools {
                         col = col.child(tool_cluster(
                             ix,
-                            &m.tool_calls,
+                            &visible_tools,
                             tool_arg_cells,
                             tools_open,
                             cx.listener(move |this, _, _window, cx| {
                                 if let Some(detail) = &mut this.detail {
                                     toggle_expanded_row(&mut detail.expanded_tools, ix);
                                     // 行高随展开变化,让 list 重测该行
-                                    detail.msg_list.splice(ix..ix + 1, 1);
+                                    detail.msg_list.splice(list_ix..list_ix + 1, 1);
                                 }
                                 cx.notify();
                             }),
@@ -6459,16 +16252,24 @@ impl Workbench {
             // 与详情头共用 24px 阅读轴，正文、标题和元信息形成一条竖线。
             .px(SPACE_XXL)
             .py(SPACE_SM)
-            .when(ix == 0, |d| d.pt(SPACE_LG))
-            .when(ix + 1 == total, |d| d.pb(SPACE_XXL))
+            .when(list_ix == 0, |d| d.pt(SPACE_LG))
+            .when(list_ix + 1 == total, |d| d.pb(SPACE_XXL))
             .child(
                 div()
                     .w_full()
                     .max_w(READER_MAX_WIDTH)
                     .min_w_0()
-                    // 淡 primary 底:标记搜索命中落点(尾部命中不滚动,全靠它识别)。
+                    // 搜索命中使用淡色背景，当前上下按钮定位的消息使用更强背景。
                     // 负 margin + 等量 padding:背景向外扩出呼吸边,内容原位不推挤,
                     // 与相邻消息的对齐和行距都不变
+                    .when(is_search_match, |d| {
+                        d.rounded(jump_radius)
+                            .bg(search_match_bg)
+                            .mx(-SPACE_SM)
+                            .px(SPACE_SM)
+                            .my(-SPACE_XS)
+                            .py(SPACE_XS)
+                    })
                     .when(is_jump_target, |d| {
                         d.rounded(jump_radius)
                             .bg(jump_bg)
@@ -6484,9 +16285,447 @@ impl Workbench {
 
     // ---------------- Insights ----------------
 
+    fn on_compression_query_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            self.compression_selected = None;
+            self.reload_compressions(cx);
+        }
+    }
+
+    fn reload_compressions(&mut self, cx: &mut Context<Self>) {
+        if self.page != Page::Compressions {
+            return;
+        }
+        let query = self.compression_query.read(cx).value().trim().to_string();
+        self.compression_last_query.clone_from(&query);
+        self.compression_search_loading = true;
+        self.compression_search_error = None;
+        let store = self.store.clone();
+        let projects = self.projects.clone();
+        let search_query = query.clone();
+        let task =
+            cx.background_spawn(
+                async move { compression_documents(&store, &projects, &search_query) },
+            );
+        self.compression_search_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                let current_query = this.compression_query.read(cx).value().trim().to_string();
+                if current_query != query {
+                    return;
+                }
+                this.compression_search_loading = false;
+                match result {
+                    Ok((documents, indexed_documents, degraded)) => {
+                        this.compression_indexed_documents = indexed_documents;
+                        this.compression_search_degraded = degraded;
+                        this.compression_search_error = None;
+                        let selected_still_exists =
+                            this.compression_selected.as_ref().is_some_and(|selected| {
+                                documents.iter().any(|doc| &doc.path == selected)
+                            });
+                        if !selected_still_exists {
+                            this.compression_selected =
+                                documents.first().map(|doc| doc.path.clone());
+                        }
+                        this.compression_documents = documents;
+                    }
+                    Err(error) => {
+                        this.compression_documents.clear();
+                        this.compression_search_degraded = false;
+                        this.compression_search_error = Some(format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn confirm_delete_compression_document(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        let path_label = path.to_string_lossy().to_string();
+        window.open_alert_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            let entity = entity.clone();
+            let path = path.clone();
+            dialog
+                .title(
+                    div()
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("删除这份压缩文档？"),
+                )
+                .width(px(480.))
+                .confirm()
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .cancel_text("取消")
+                        .ok_text(move_to_trash())
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
+                .child(
+                    v_flex()
+                        .gap(SPACE_SM)
+                        .text_size(FONT_BODY)
+                        .child(crate::ui::trash_confirm_body())
+                        .child(
+                            div()
+                                .px(SPACE_SM)
+                                .py(SPACE_XS)
+                                .rounded(theme.radius)
+                                .bg(theme.muted)
+                                .text_size(FONT_CAPTION)
+                                .font_family(theme.mono_font_family.clone())
+                                .child(path_label.clone()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.move_compression_document_to_trash(path.clone(), window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn move_compression_document_to_trash(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path_label = path.to_string_lossy().to_string();
+        let task = cx.background_spawn(async move { terminal::trash_paths(&[path_label]) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    if this.compression_selected.as_ref() == Some(&path) {
+                        this.compression_selected = None;
+                    }
+                    window.push_notification(Notification::success("压缩文档已移入回收站"), cx);
+                    cx.notify();
+                }
+                Err(error) => window.push_notification(
+                    Notification::error(crate::tf!("删除压缩文档失败：{}", format!("{error:#}"))),
+                    cx,
+                ),
+            })
+        })
+        .detach();
+    }
+
+    fn render_compressions(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let query = self.compression_query.read(cx).value().trim().to_string();
+        let documents = &self.compression_documents;
+        let indexed_documents = self.compression_indexed_documents;
+        let degraded = self.compression_search_degraded;
+        let selected = self
+            .compression_selected
+            .as_ref()
+            .and_then(|path| documents.iter().find(|doc| &doc.path == path))
+            .or_else(|| documents.first());
+        let selected_record = selected.and_then(|doc| {
+            self.store
+                .get_compression_document(&doc.path.to_string_lossy())
+                .ok()
+                .flatten()
+        });
+        let selected_content = selected_record.as_ref().map(|record| {
+            wake_core::services::compression_documents::display_content(&record.body)
+        });
+        let selected_metadata = selected_record
+            .as_ref()
+            .map(|record| compression_document_metadata(&record.body))
+            .unwrap_or_default();
+        let header_actions = selected.map(|doc| {
+            let path = doc.path.clone();
+            let copy_path = path.to_string_lossy().to_string();
+            let reveal_path = copy_path.clone();
+            let delete_path = path.clone();
+            let delete_entity = cx.entity();
+            h_flex()
+                .gap(SPACE_XS)
+                .child(
+                    Button::new("compression-copy-path")
+                        .ghost()
+                        .rounded(RADIUS_BUTTON)
+                        .icon(icon("icons/copy.svg").with_size(px(16.)))
+                        .tooltip(t("Copy path"))
+                        .on_click(move |_, window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                            window
+                                .push_notification(Notification::success("压缩文档路径已复制"), cx);
+                        }),
+                )
+                .child(
+                    Button::new("compression-reveal")
+                        .ghost()
+                        .rounded(RADIUS_BUTTON)
+                        .icon(icon("icons/folder.svg").with_size(px(16.)))
+                        .tooltip(reveal_in_fm())
+                        .on_click(move |_, window, cx| {
+                            terminal::reveal_in_file_manager(&reveal_path);
+                            window.push_notification(
+                                Notification::success(t("Opened in file manager")),
+                                cx,
+                            );
+                        }),
+                )
+                .child(
+                    Button::new("compression-trash")
+                        .ghost()
+                        .rounded(RADIUS_BUTTON)
+                        .icon(
+                            icon("icons/trash-2.svg")
+                                .with_size(px(16.))
+                                .text_color(theme.danger),
+                        )
+                        .tooltip(move_to_trash())
+                        .on_click(move |_, window, cx| {
+                            delete_entity.update(cx, |this, cx| {
+                                this.confirm_delete_compression_document(
+                                    delete_path.clone(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+                .into_any_element()
+        });
+        let reader = if let (Some(doc), Some(content)) = (selected, selected_content) {
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .flex()
+                .justify_center()
+                .px(SPACE_XXL)
+                .py(SPACE_LG)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(960.))
+                        .h_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex_shrink_0()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .bg(theme.popover)
+                        .p(SPACE_XXL)
+                        .child(
+                            TextView::markdown(doc.path.to_string_lossy().to_string(), content)
+                                .selectable(true),
+                        ),
+                )
+                .into_any_element()
+        } else if let Some(error) = self.compression_search_error.as_ref() {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(empty_state_card(
+                    "icons/info.svg",
+                    px(58.),
+                    px(24.),
+                    "压缩文件搜索失败",
+                    error.clone(),
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            let (title, detail) = if !query.is_empty() && !self.compression_search_loading {
+                (
+                    format!("没有找到“{query}”"),
+                    "请尝试更短或不同的关键词。".to_string(),
+                )
+            } else {
+                (
+                    "暂无压缩文件".to_string(),
+                    "从会话菜单导出压缩 Markdown 后，会在这里显示。".to_string(),
+                )
+            };
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(empty_state_card(
+                    "icons/file-text.svg",
+                    px(58.),
+                    px(24.),
+                    title,
+                    detail,
+                    cx,
+                ))
+                .into_any_element()
+        };
+        let header_title = selected
+            .map(|doc| doc.title.replace(HL_OPEN, "").replace(HL_CLOSE, ""))
+            .unwrap_or_else(|| "压缩文件".to_string());
+        let compression_lead = selected.map(|doc| {
+            vec![
+                icon("icons/file-text.svg")
+                    .with_size(px(15.))
+                    .text_color(theme.primary)
+                    .into_any_element(),
+                div()
+                    .text_size(FONT_CAPTION)
+                    .child("压缩文档")
+                    .into_any_element(),
+                project_badge(
+                    "compression-detail-project",
+                    &doc.project_path,
+                    if selected_metadata.project.is_empty() {
+                        "全局文档".to_string()
+                    } else {
+                        selected_metadata.project.clone()
+                    },
+                    theme,
+                ),
+            ]
+        });
+        let compression_meta = selected.map(|_| {
+            let mut rows = Vec::new();
+            let mut add_row = |label: &'static str, value: String| {
+                if value.trim().is_empty() {
+                    return;
+                }
+                rows.push(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .items_start()
+                        .gap(SPACE_SM)
+                        .text_size(FONT_BODY)
+                        .child(
+                            div()
+                                .w(px(56.))
+                                .flex_shrink_0()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .whitespace_normal()
+                                .line_height(relative(1.5))
+                                .text_color(theme.foreground.opacity(0.78))
+                                .child(value),
+                        )
+                        .into_any_element(),
+                );
+            };
+            if !selected_metadata.generated_at.is_empty() {
+                add_row("生成", selected_metadata.generated_at.clone());
+            }
+            if !selected_metadata.source_session.is_empty() {
+                add_row("来源", selected_metadata.source_session.clone());
+            }
+            if !selected_metadata.coverage.is_empty() {
+                add_row("覆盖", selected_metadata.coverage.clone());
+            }
+            if !selected_metadata.processing_chain.is_empty() {
+                add_row("处理", selected_metadata.processing_chain.clone());
+            }
+            if rows.is_empty() {
+                rows.push(
+                    div()
+                        .min_w_0()
+                        .w_full()
+                        .text_size(FONT_CAPTION)
+                        .whitespace_normal()
+                        .child(format!(
+                            "{} 个结果 · 已索引 {} 个文档",
+                            documents.len(),
+                            indexed_documents
+                        ))
+                        .into_any_element(),
+                );
+            }
+            vec![
+                v_flex()
+                    .w_full()
+                    .gap(SPACE_SM)
+                    .p(SPACE_LG)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .bg(theme.popover)
+                    .child(
+                        div()
+                            .text_size(FONT_BODY)
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .child("文档信息"),
+                    )
+                    .children(rows)
+                    .into_any_element(),
+            ]
+        });
+        let fallback_subtitle = format!(
+            "{} 个结果 · 已索引 {} 个文档{}",
+            documents.len(),
+            indexed_documents,
+            if degraded {
+                " · 短关键词兼容模式"
+            } else {
+                ""
+            }
+        );
+        let header: AnyElement = if let Some(lead) = compression_lead {
+            detail_header_frame(
+                "compressions-header",
+                lead,
+                header_actions.into_iter().collect(),
+                header_title.into(),
+                compression_meta.unwrap_or_default(),
+                theme,
+            )
+            .into_any_element()
+        } else {
+            library_header(
+                "compressions-header-empty",
+                header_title,
+                fallback_subtitle,
+                SPACE_XXL,
+                header_actions,
+                cx,
+            )
+            .into_any_element()
+        };
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(header)
+            .child(reader)
+            .into_any_element()
+    }
+
     /// Insights 整页(替换中栏+右栏)。头部沿用中栏 88px 标题节奏兼窗口
     /// 拖拽区;内容 720px 阅读宽居中,区块只用留白与组头分隔,不做卡片墙
-    fn render_insights(&self, cx: &Context<Self>) -> AnyElement {
+    fn render_insights(&self, window: &mut Window, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         // 副标题只说 "Since {首会话月份}"(用户定稿);拿不到时间时回落默认句
         let subtitle: SharedString = match &self.insights {
@@ -6497,28 +16736,99 @@ impl Workbench {
             _ => t("Your coding agent activity").into(),
         };
 
-        let body: AnyElement = match &self.insights {
-            Some(d) if d.sessions > 0 => self.render_insights_content(d, cx),
-            _ if self.insights_loading => div()
-                .flex_1()
-                .flex()
+        let body: AnyElement = match self.insights_subview {
+            InsightsSubview::WorkspaceChanges | InsightsSubview::SessionChanges => {
+                self.render_workspace_changes_content(window, cx)
+            }
+            InsightsSubview::Overview => match &self.insights {
+                Some(d) => self.render_insights_content(d, cx),
+                _ if self.insights_loading => div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Spinner::new())
+                    .into_any_element(),
+                _ => v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .child(empty_state_card(
+                        "icons/chart-column.svg",
+                        px(58.),
+                        px(24.),
+                        t("No activity yet"),
+                        t("Refresh sessions to see your activity here."),
+                        cx,
+                    ))
+                    .into_any_element(),
+            },
+        };
+        let overview_active = self.insights_subview == InsightsSubview::Overview;
+        let workspace_changes_active = self.insights_subview == InsightsSubview::WorkspaceChanges;
+        let session_changes_active = self.insights_subview == InsightsSubview::SessionChanges;
+        let navigation = h_flex()
+            .items_center()
+            .gap(SPACE_XS)
+            .child(
+                Button::new("insights-overview-tab")
+                    .small()
+                    .label("统计")
+                    .when(overview_active, |button| button.primary())
+                    .when(!overview_active, |button| button.ghost())
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.set_insights_subview(InsightsSubview::Overview, cx)
+                    })),
+            )
+            .child(div().w(px(1.)).h(px(16.)).bg(theme.border))
+            .child(
+                Button::new("insights-workspace-changes-tab")
+                    .small()
+                    .label("工作区改动")
+                    .when(workspace_changes_active, |button| button.primary())
+                    .when(!workspace_changes_active, |button| button.ghost())
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.set_insights_subview(InsightsSubview::WorkspaceChanges, cx)
+                    })),
+            )
+            .child(
+                Button::new("insights-session-changes-tab")
+                    .small()
+                    .label("会话改动")
+                    .when(session_changes_active, |button| button.primary())
+                    .when(!session_changes_active, |button| button.ghost())
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.set_insights_subview(InsightsSubview::SessionChanges, cx)
+                    })),
+            )
+            .child(self.refresh_button(self.scan.scanning, Self::refresh_sessions, cx));
+
+        let header: AnyElement = if overview_active {
+            library_header(
+                "insights-header",
+                t("Insights"),
+                subtitle,
+                SPACE_XXL,
+                Some(navigation.into_any_element()),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            h_flex()
+                .id("insights-header")
+                .w_full()
+                .h(px(58.))
+                .flex_shrink_0()
+                .window_control_area(WindowControlArea::Drag)
+                .px(SPACE_XXL)
                 .items_center()
-                .justify_center()
-                .child(Spinner::new())
-                .into_any_element(),
-            _ => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(empty_state_card(
-                    "icons/chart-column.svg",
-                    px(58.),
-                    px(24.),
-                    t("No activity yet"),
-                    t("Refresh sessions to see your activity here."),
-                    cx,
-                ))
-                .into_any_element(),
+                .justify_between()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .child(div().text_size(FONT_BODY).font_semibold().child("统计"))
+                .child(div().occlude().child(navigation))
+                .into_any_element()
         };
 
         v_flex()
@@ -6526,32 +16836,109 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .bg(theme.background)
-            .child(library_header(
-                "insights-header",
-                t("Insights"),
-                subtitle,
-                SPACE_XXL,
-                Some(self.refresh_button(self.scan.scanning, Self::refresh_sessions, cx)),
-                cx,
-            ))
+            .child(header)
             .child(body)
             .into_any_element()
     }
 
     fn render_insights_content(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        let custom_range_label = match self.insights_time_range {
+            InsightsTimeRange::Custom {
+                start_ms,
+                end_ms,
+                live_end,
+            } if self.insights_selected.is_none() => {
+                let start = chrono::DateTime::from_timestamp_millis(start_ms)
+                    .map(|dt| dt.with_timezone(&Local))
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default();
+                let end = if live_end {
+                    Local::now().format("%Y-%m-%d %H:%M").to_string()
+                } else {
+                    chrono::DateTime::from_timestamp_millis(end_ms)
+                        .map(|dt| dt.with_timezone(&Local))
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_default()
+                };
+                Some(format!("{start} – {end}"))
+            }
+            _ => None,
+        };
 
-        // ---- 概览大数字行 ----
-        // 序:Sessions / Tokens / Prompts / Agents / Projects / Active days
-        // (用户钉的)
+        let time_ranges = h_flex()
+            .flex_wrap()
+            .gap(SPACE_XS)
+            .children(
+                InsightsTimeRange::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, range)| {
+                        let selected =
+                            self.insights_selected.is_none() && self.insights_time_range == range;
+                        Button::new(("insights-time-range", ix))
+                            .small()
+                            .rounded(RADIUS_BUTTON)
+                            .label(range.label())
+                            .when(selected, |button| button.primary())
+                            .when(!selected, |button| button.ghost())
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.set_insights_time_range(range, cx);
+                            }))
+                    }),
+            )
+            .child(
+                Button::new("insights-custom-range")
+                    .small()
+                    .rounded(RADIUS_BUTTON)
+                    .label(t("Custom"))
+                    .when(
+                        self.insights_selected.is_none()
+                            && matches!(self.insights_time_range, InsightsTimeRange::Custom { .. }),
+                        |button| button.primary(),
+                    )
+                    .when(
+                        self.insights_selected.is_some()
+                            || !matches!(
+                                self.insights_time_range,
+                                InsightsTimeRange::Custom { .. }
+                            ),
+                        |button| button.ghost(),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_insights_custom_range(window, cx);
+                    })),
+            )
+            .when_some(self.insights_selected, |row, day| {
+                row.child(
+                    div()
+                        .ml(SPACE_SM)
+                        .flex()
+                        .items_center()
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} · {}", t("Date"), day.format(t("%b %-d, %Y")))),
+                )
+            })
+            .when_some(custom_range_label, |row, label| {
+                row.child(
+                    div()
+                        .ml(SPACE_SM)
+                        .flex()
+                        .items_center()
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+            });
+
+        // ---- 当前范围内的汇总 ----
         let stat =
             |value: String, label: &'static str| stat_cell(value, label, FONT_TITLE, None, cx);
         let overview = h_flex()
-            .gap(px(40.))
+            .gap(px(24.))
             .child(stat(thousands(d.sessions), t("Sessions")))
-            .when(d.tokens > 0, |row| {
-                row.child(stat(fmt_tokens(Some(d.tokens)), t("Tokens")))
-            })
+            .child(stat(fmt_tokens(Some(d.tokens)), t("Tokens")))
             .child(stat(thousands(d.prompts), t("Prompts")))
             .child(stat(thousands(d.agents.len() as i64), t("Agents")))
             .child(stat(thousands(d.project_count), t("Projects")))
@@ -6587,18 +16974,29 @@ impl Workbench {
                         .pt(SPACE_SM)
                         .pb(px(40.))
                         .gap(INSIGHTS_SECTION_GAP)
+                        .child(time_ranges)
                         .child(overview)
-                        .child(render_week_section(d, cx))
                         .child(
                             v_flex()
                                 .gap(SPACE_MD)
                                 .child(switch_section_head(
                                     t("Activity"),
-                                    Some(t("Prompts you sent, day by day").into()),
+                                    Some(
+                                        // 选中态换副标题:下方两图已被这天收窄,
+                                        // 说清当前scope与取消方式
+                                        match self.insights_selected {
+                                            Some(day) => crate::tf!(
+                                                "{} · click the day again to clear",
+                                                day.format(t("%b %-d, %Y"))
+                                            )
+                                            .into(),
+                                            None => t("Prompts you sent, day by day").into(),
+                                        },
+                                    ),
                                     None,
                                     cx,
                                 ))
-                                .child(render_heatmap(d, cx)),
+                                .child(render_heatmap(d, self.insights_selected, cx)),
                         )
                         .child(self.render_trend_section(d, cx))
                         .child(self.render_distribution_section(d, cx))
@@ -6624,7 +17022,7 @@ impl Workbench {
                                 cx,
                             ))
                         })
-                        // 末尾单独一块:上面全是"你怎么用 agent",这块是"agent 怎么用 Wake"
+                        // 末尾单独一块:上面全是"你怎么用 agent",这块是"agent 怎么用 ContextOS"
                         .when(!d.wake_lookups_7d.is_empty(), |col| {
                             col.child(self.render_lookups_section(d, cx))
                         }),
@@ -6633,13 +17031,38 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// 分布区块:标题右侧 ‹ › 在 hour/weekday/month 三个维度间循环切换
+    /// 分布区块:标题右侧 ‹ › 在 hour/weekday/month 三个维度间循环切换。
+    /// 热力图选中某天时三档全部收窄为该日所在周期(当天逐时 / 当周逐日 /
+    /// 当月逐日)——同一份 period_breakdown 切三份,不再额外查询
     fn render_distribution_section(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
         let range = self.insights_range;
-        let values: &[i64] = match range {
-            InsightsRange::Hour => &d.hourly,
-            InsightsRange::Weekday => &d.weekday,
-            InsightsRange::Month => &d.monthly,
+        // 快照必须与当前选中日配对:切天后迟到的旧快照不参与渲染(否则会
+        // 出现"格子描边是 15 号、图是 14 号"的错位)
+        let period = match self.insights_selected {
+            Some(day) => self.insights_period.as_deref().filter(|p| p.day == day),
+            None => None,
+        };
+        // 选中但数据还在路上的那一两帧:先按全历史画(不闪空白),数毫秒后
+        // 被周期数据替换;查询失败时上游已收回选中态,不会停在这个中间态
+        let values: Vec<i64> = match (period, range) {
+            (Some(p), InsightsRange::Hour) => p.day_hours.to_vec(),
+            (Some(p), InsightsRange::Weekday) => p.week_days.to_vec(),
+            (Some(p), InsightsRange::Month) => {
+                p.month_days[..days_in_month(p.day) as usize].to_vec()
+            }
+            (None, InsightsRange::Hour) => d.hourly.to_vec(),
+            (None, InsightsRange::Weekday) => d.weekday.to_vec(),
+            (None, InsightsRange::Month) => d.monthly.to_vec(),
+        };
+        let token_values: Vec<i64> = match (period, range) {
+            (Some(p), InsightsRange::Hour) => p.day_hour_tokens.to_vec(),
+            (Some(p), InsightsRange::Weekday) => p.week_day_tokens.to_vec(),
+            (Some(p), InsightsRange::Month) => {
+                p.month_day_tokens[..days_in_month(p.day) as usize].to_vec()
+            }
+            (None, InsightsRange::Hour) => d.hourly_tokens.to_vec(),
+            (None, InsightsRange::Weekday) => d.weekday_tokens.to_vec(),
+            (None, InsightsRange::Month) => d.monthly_tokens.to_vec(),
         };
         // 峰值只算这一次:caption 点名的与图里高亮的必须是同一根柱
         let (peak, peak_n) = values
@@ -6661,37 +17084,71 @@ impl Workbench {
             }),
             cx,
         );
+        let caption = match period {
+            Some(p) => dist_caption_scoped(range, p.day, peak, peak_n),
+            None => dist_caption(range, peak, peak_n),
+        };
         v_flex()
             .gap(SPACE_MD)
             .child(switch_section_head(
                 range.title(),
-                Some(dist_caption(range, peak, peak_n).into()),
+                Some(caption.into()),
                 Some(arrows.into_any_element()),
                 cx,
             ))
-            .child(render_distribution(range, values, peak, cx))
+            .child(render_distribution(
+                range,
+                &values,
+                &token_values,
+                peak,
+                period.map(|p| p.day),
+                cx,
+            ))
             .into_any_element()
     }
 
     /// 趋势区块:近 53 周每周 prompts 按 agent 堆叠。不按模型出图——
-    /// messages 表没有逐条 model,会话级 model 是末态,切周即改写历史
+    /// messages 表没有逐条 model,会话级 model 是末态,切周即改写历史。
+    /// 热力图选中某天时,该天所在的周整列高亮并换成那周的副标题
     fn render_trend_section(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
         let layers = trend_layers(&d.trend_agents, cx);
+        let start = d.trend_start();
+        // 选中日 → 列号(与热力图同一套周网格:周一起始,列 0 = 窗口首周)
+        let selected_week = self
+            .insights_selected
+            .map(|day| ((day - start).num_days().max(0) / 7).min(TREND_WEEKS as i64 - 1) as usize);
+        let caption: SharedString = match self.insights_selected {
+            // 点名"这一天在哪一周":光高亮一列会被读成"这周整体被选中"
+            Some(day) => {
+                use chrono::Datelike as _;
+                let monday =
+                    day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64);
+                crate::tf!(
+                    "{} is in the week of {}",
+                    day.format(t("%b %-d")),
+                    monday.format(t("%b %-d"))
+                )
+                .into()
+            }
+            None => trend_caption(&layers).into(),
+        };
         v_flex()
             .gap(SPACE_MD)
-            .child(switch_section_head(
-                t("Over time"),
-                Some(trend_caption(&layers).into()),
-                None,
+            .child(switch_section_head(t("Over time"), Some(caption), None, cx))
+            .child(render_trend(
+                start,
+                layers,
+                &d.weekly_tokens,
+                selected_week,
                 cx,
             ))
-            .child(render_trend(d.trend_start(), layers, cx))
             .into_any_element()
     }
 
     /// 榜单区块(Agents/Projects/Models 同构):‹ 度量名 › 循环切换,行按
-    /// 当前度量降序重排再截断 top-N。可用档位就是一个切片:组内无人报
-    /// token 时 Tokens 不在其中,归一、循环、行过滤都从这一个事实推出
+    /// 当前度量降序重排再截断。可用档位就是一个切片:组内无人报
+    /// token 时 Tokens 不在其中,归一、循环、行过滤都从这一个事实推出。
+    /// 行数档(5/10/20/全部)只给 Projects/Models——Agents 共十九家,全列即可
     fn render_usage_section(
         &self,
         board: UsageBoard,
@@ -6702,7 +17159,9 @@ impl Workbench {
         use InsightsMetric::*;
         let has_tokens = rows.iter().any(|u| u.tokens > 0);
         // 循环序与概览行同:Sessions / Tokens / Prompts(用户钉的)
-        let avail: &[InsightsMetric] = if has_tokens {
+        let avail: &[InsightsMetric] = if matches!(board, UsageBoard::Models) {
+            &[Tokens]
+        } else if has_tokens {
             &[Sessions, Tokens, Prompts]
         } else {
             &[Sessions, Prompts]
@@ -6730,6 +17189,27 @@ impl Workbench {
             }),
             cx,
         );
+        // 行数档:Agents 不入此列(全量),其余榜各自记忆。光标点一下换下一档
+        let top_n = self.insights_top_n[slot];
+        let show_rows_btn = !matches!(board, UsageBoard::Agents);
+        let rows_btn = show_rows_btn.then(|| {
+            use gpui_component::button::{Button, ButtonVariants as _};
+            let theme = cx.theme();
+            let to_next_n = top_n.next();
+            let n_label: SharedString = top_n.label().into();
+            Button::new(("rows-n", slot))
+                .ghost()
+                .rounded(RADIUS_BUTTON)
+                .label(n_label)
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .tooltip(top_n.tooltip())
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.insights_top_n[slot] = to_next_n;
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
         let mut sorted: Vec<&UsageTally> = rows
             .iter()
             // Tokens 档只列报了用量的组:空条不是"用了 0",是没数据
@@ -6737,18 +17217,37 @@ impl Workbench {
             .collect();
         // stable sort:平局保持 SQL 的 sessions desc + 名称序
         sorted.sort_by_key(|u| std::cmp::Reverse(metric.value(u)));
-        sorted.truncate(board.limit());
+        sorted.truncate(match board {
+            UsageBoard::Agents => usize::MAX,
+            _ => top_n.limit(),
+        });
         let max = sorted.iter().map(|u| metric.value(u)).max().unwrap_or(1);
+        let head_controls = h_flex()
+            .flex_shrink_0()
+            .gap(SPACE_XS)
+            .when_some(rows_btn, |row, btn| row.child(btn))
+            .when(!matches!(board, UsageBoard::Models), |row| {
+                row.child(arrows.into_any_element())
+            });
         v_flex()
             .gap(SPACE_MD)
             .child(switch_section_head(
                 board.title(),
                 None,
-                Some(arrows.into_any_element()),
+                Some(head_controls.into_any_element()),
                 cx,
             ))
             .children(sorted.into_iter().map(|u| {
                 let (lead, label) = row_head(u);
+                // 下钻参数从榜单规格派生:Agents 带 agent、Projects 带 project、
+                // Models 带 model——一行只透传自己的 key,语义集中在 drill 方法
+                let board_for_click = board;
+                let key = u.key.clone();
+                let on_click = move |this: &mut Workbench,
+                                     window: &mut Window,
+                                     cx: &mut Context<Workbench>| {
+                    this.drill_into_usage(board_for_click, &key, window, cx);
+                };
                 usage_bar_row(
                     lead,
                     label,
@@ -6756,14 +17255,17 @@ impl Workbench {
                     metric.value(u),
                     max,
                     board.name_w(),
+                    board,
+                    Some(on_click),
+                    None,
                     cx,
                 )
             }))
             .into_any_element()
     }
 
-    /// "Agents asking Wake":Insights 末尾单独一块——前面全是"你怎么用 agent",这块
-    /// 是"agent 怎么用 Wake":近 7 天各家经 wake-mcp / wake-cli 查过往会话的次数,按
+    /// "Agents asking ContextOS":Insights 末尾单独一块——前面全是"你怎么用 agent",这块
+    /// 是"agent 怎么用 ContextOS":近 7 天各家经 wake-mcp / wake-cli 查过往会话的次数,按
     /// 调用时刻归窗。一条 hairline 隔开,自己的组头与说明;‹ › 在 All / MCP / CLI 间
     /// 循环,行形制同 Agents 榜单;一次都没有就整组不画(与空榜单同规矩)。这是
     /// mcp-roadmap 定的"MCP 接入有没有真实使用"的仪表(位置用户 2026-09-17 定)
@@ -6788,12 +17290,16 @@ impl Workbench {
             .wake_lookups_7d
             .iter()
             .fold((0, 0), |(m, c), l| (m + l.mcp, c + l.cli));
-        let caption = crate::tp!(
-            "{} lookup in the last 7 days · {} via MCP · {} via CLI",
-            "{} lookups in the last 7 days · {} via MCP · {} via CLI",
-            mcp + cli,
-            mcp,
-            cli
+        let range_label = self
+            .insights_selected
+            .map(|day| day.format(t("%b %-d, %Y")).to_string())
+            .unwrap_or_else(|| self.insights_time_range.label().to_string());
+        let caption = format!(
+            "{} · {} lookups · {} via MCP · {} via CLI",
+            range_label,
+            thousands(mcp + cli),
+            thousands(mcp),
+            thousands(cli)
         );
         let mut rows: Vec<&LookupTally> = d
             .wake_lookups_7d
@@ -6813,7 +17319,7 @@ impl Workbench {
                     .mb(INSIGHTS_SECTION_GAP - SPACE_MD),
             )
             .child(switch_section_head(
-                t("Agents asking Wake"),
+                t("Agents asking ContextOS"),
                 Some(caption.into()),
                 Some(arrows.into_any_element()),
                 cx,
@@ -6827,6 +17333,9 @@ impl Workbench {
                     view.value(l),
                     max,
                     UsageBoard::Agents.name_w(),
+                    UsageBoard::Agents,
+                    None::<fn(&mut Workbench, &mut Window, &mut Context<Workbench>)>,
+                    None,
                     cx,
                 )
             }))
@@ -6865,6 +17374,581 @@ impl Workbench {
         self.detail_selection_auto_scroll.stop();
     }
 
+    fn on_detail_search_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let query = input.read(cx).value().trim().to_lowercase();
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        detail.search_matches = if query.is_empty() {
+            Vec::new()
+        } else {
+            detail
+                .reader_visible_indices
+                .iter()
+                .copied()
+                .filter(|&index| transcript_message_matches(&detail.transcript[index], &query))
+                .collect()
+        };
+        detail.search_cursor = 0;
+        if let Some(&index) = detail.search_matches.first() {
+            detail.jump_seq = detail.transcript.get(index).map(|message| message.seq);
+            if let Some(item_ix) = detail
+                .reader_visible_indices
+                .iter()
+                .position(|&visible| visible == index)
+            {
+                detail.msg_list.scroll_to(gpui::ListOffset {
+                    item_ix,
+                    offset_in_item: px(0.),
+                });
+            }
+        } else {
+            detail.jump_seq = None;
+        }
+        cx.notify();
+    }
+
+    fn move_detail_search(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        if detail.search_matches.is_empty() {
+            return;
+        }
+        let len = detail.search_matches.len() as isize;
+        detail.search_cursor = ((detail.search_cursor as isize + delta).rem_euclid(len)) as usize;
+        let index = detail.search_matches[detail.search_cursor];
+        detail.jump_seq = detail.transcript.get(index).map(|message| message.seq);
+        if let Some(item_ix) = detail
+            .reader_visible_indices
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            detail.msg_list.scroll_to(gpui::ListOffset {
+                item_ix,
+                offset_in_item: px(0.),
+            });
+        }
+        cx.notify();
+    }
+
+    fn jump_to_detail_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        if index >= detail.transcript.len() {
+            return;
+        }
+        detail.jump_seq = Some(detail.transcript[index].seq);
+        if let Some(position) = detail.search_matches.iter().position(|&item| item == index) {
+            detail.search_cursor = position;
+        }
+        if let Some(item_ix) = detail
+            .reader_visible_indices
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            detail.msg_list.scroll_to(gpui::ListOffset {
+                item_ix,
+                offset_in_item: px(0.),
+            });
+        }
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        cx.notify();
+    }
+
+    fn toggle_detail_outline(&mut self, cx: &mut Context<Self>) {
+        self.detail_outline_collapsed = !self.detail_outline_collapsed;
+        cx.notify();
+    }
+
+    fn set_detail_outline_mode(&mut self, mode: DetailOutlineMode, cx: &mut Context<Self>) {
+        self.detail_outline_mode = mode;
+        let query = self
+            .detail_search_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        if let Some(detail) = &mut self.detail {
+            rebuild_detail_reader_view(detail, mode);
+            detail.search_matches = if query.is_empty() {
+                Vec::new()
+            } else {
+                detail
+                    .reader_visible_indices
+                    .iter()
+                    .copied()
+                    .filter(|&index| transcript_message_matches(&detail.transcript[index], &query))
+                    .collect()
+            };
+            detail.search_cursor = 0;
+            if let Some(&index) = detail.search_matches.first() {
+                detail.jump_seq = detail.transcript.get(index).map(|message| message.seq);
+                if let Some(item_ix) = detail
+                    .reader_visible_indices
+                    .iter()
+                    .position(|&visible| visible == index)
+                {
+                    detail.msg_list.scroll_to(gpui::ListOffset {
+                        item_ix,
+                        offset_in_item: px(0.),
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_detail_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detail_search_open = !self.detail_search_open;
+        if self.detail_search_open {
+            self.detail_search_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn detail_outline_hidden_for_width(&self, window: &Window) -> bool {
+        window.viewport_size().width
+            < SIDEBAR_WIDTH
+                + SESSION_STREAM_WIDTH
+                + DETAIL_OUTLINE_WIDTH
+                + DETAIL_OUTLINE_MIN_READER_WIDTH
+    }
+
+    fn render_detail_outline(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(detail) = &self.detail else {
+            return div().into_any_element();
+        };
+        let entity = cx.entity();
+        if self.detail_outline_hidden_for_width(window) {
+            return div().into_any_element();
+        }
+        if self.detail_outline_collapsed {
+            return v_flex()
+                .w(DETAIL_OUTLINE_COLLAPSED_WIDTH)
+                .h_full()
+                .flex_shrink_0()
+                .items_center()
+                .pt(WINDOW_TITLEBAR_HEIGHT)
+                .border_l_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .child(
+                    Button::new("expand-detail-outline")
+                        .ghost()
+                        .small()
+                        .icon(icon("icons/chevron-left.svg").with_size(px(15.)))
+                        .tooltip("展开右侧栏")
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.toggle_detail_outline(cx));
+                        }),
+                )
+                .into_any_element();
+        }
+        let query = self.detail_search_input.read(cx).value().trim().to_string();
+        let match_total = detail.search_matches.len();
+        let match_label = if match_total == 0 {
+            "0 / 0".to_string()
+        } else {
+            format!("{} / {}", detail.search_cursor + 1, match_total)
+        };
+        let active_match = detail.search_matches.get(detail.search_cursor).copied();
+        let mut rows = Vec::new();
+        for turn in &detail.reader_turns {
+            if self.detail_outline_mode == DetailOutlineMode::Changes
+                && turn.changed_messages.is_empty()
+            {
+                continue;
+            }
+            if self.detail_outline_mode == DetailOutlineMode::Conversation
+                && turn.question.is_none()
+                && turn.reply.is_none()
+            {
+                continue;
+            }
+            let mut turn_indices = Vec::new();
+            match self.detail_outline_mode {
+                DetailOutlineMode::Changes => {
+                    if let Some(index) = turn.question {
+                        turn_indices.push(index);
+                    }
+                    turn_indices.extend(turn.changed_messages.iter().copied());
+                }
+                DetailOutlineMode::Conversation => {
+                    if let Some(index) = turn.question {
+                        turn_indices.push(index);
+                    }
+                    if let Some(index) = turn.reply {
+                        turn_indices.push(index);
+                    }
+                }
+                DetailOutlineMode::All => {
+                    if let Some(index) = turn.question {
+                        turn_indices.push(index);
+                    }
+                    if let Some(index) = turn.reply {
+                        turn_indices.push(index);
+                    }
+                    turn_indices.extend(turn.step_messages.iter().copied());
+                }
+            }
+            let is_match = !query.is_empty()
+                && turn_indices
+                    .iter()
+                    .any(|&index| transcript_message_matches(&detail.transcript[index], &query));
+            let is_active = active_match.is_some_and(|index| turn_indices.contains(&index));
+            let row_entity = entity.clone();
+            let question = turn.question.and_then(|index| detail.transcript.get(index));
+            let reply = turn.reply.and_then(|index| detail.transcript.get(index));
+            let changed_message = turn
+                .changed_messages
+                .first()
+                .and_then(|&index| detail.transcript.get(index));
+            let reply_target_and_preview = if self.detail_outline_mode == DetailOutlineMode::Changes
+            {
+                changed_message.and_then(|message| {
+                    message
+                        .tool_calls
+                        .iter()
+                        .find(|call| tool_call_is_change(call))
+                        .map(|call| {
+                            (
+                                turn.changed_messages.first().copied(),
+                                one_line(&call.name, 88),
+                            )
+                        })
+                })
+            } else {
+                reply
+                    .map(|message| (turn.reply, one_line(&message.text, 88)))
+                    .filter(|(_, text)| !text.is_empty())
+                    .or_else(|| {
+                        changed_message.and_then(|message| {
+                            message
+                                .tool_calls
+                                .iter()
+                                .find(|call| tool_call_is_change(call))
+                                .map(|call| {
+                                    (
+                                        turn.changed_messages.first().copied(),
+                                        one_line(&call.name, 88),
+                                    )
+                                })
+                        })
+                    })
+            };
+            let reply_preview = reply_target_and_preview
+                .as_ref()
+                .map(|(_, preview)| preview.clone());
+            let question_element = question.map(|message| {
+                let index = turn.question.expect("question element has an index");
+                let row_entity = row_entity.clone();
+                h_flex()
+                    .id(("detail-outline-question", turn.index))
+                    .w_full()
+                    .justify_end()
+                    .child(
+                        v_flex()
+                            .max_w(px(196.))
+                            .items_end()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(FONT_LABEL)
+                                    .text_color(theme.muted_foreground)
+                                    .child("你"),
+                            )
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .rounded(px(10.))
+                                    .bg(theme.muted)
+                                    .px(SPACE_SM)
+                                    .py(SPACE_XS)
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.foreground)
+                                    .child(one_line(&message.text, 120)),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        row_entity.update(cx, |this, cx| {
+                            this.jump_to_detail_message(index, cx);
+                        });
+                    })
+                    .into_any_element()
+            });
+            let reply_element = reply_preview.map(|preview| {
+                let index = reply_target_and_preview
+                    .as_ref()
+                    .and_then(|(index, _)| *index)
+                    .expect("reply preview has a target");
+                let row_entity = row_entity.clone();
+                h_flex()
+                    .id(("detail-outline-reply", turn.index))
+                    .w_full()
+                    .gap(ICON_TEXT_GAP)
+                    .child(icon("icons/message-square.svg").with_size(px(13.)))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .gap(px(2.))
+                            .child(
+                                h_flex()
+                                    .gap(ICON_TEXT_GAP)
+                                    .text_size(FONT_LABEL)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Assistant")
+                                    .when(turn.step_messages.len() > 0, |row| {
+                                        row.child(format!("{} 步", turn.step_messages.len()))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.foreground)
+                                    .child(preview),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        row_entity.update(cx, |this, cx| {
+                            this.jump_to_detail_message(index, cx);
+                        });
+                    })
+                    .into_any_element()
+            });
+            rows.push(
+                v_flex()
+                    .id(("detail-outline-row", turn.index))
+                    .w_full()
+                    .min_w_0()
+                    .gap(SPACE_XS)
+                    .px(SPACE_SM)
+                    .py(SPACE_SM)
+                    .rounded(theme.radius)
+                    .when(is_match, |row| row.bg(theme.primary.opacity(0.06)))
+                    .when(is_active, |row| row.bg(theme.primary.opacity(0.14)))
+                    .hover(|row| row.bg(theme.secondary_hover))
+                    .children(question_element)
+                    .children(reply_element)
+                    .when(turn.request_count > 0, |row| {
+                        row.child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(crate::tf!(
+                                    "{} tokens · {} requests",
+                                    fmt_tokens(Some(turn.tokens_used)),
+                                    turn.request_count
+                                )),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        let prev_entity = entity.clone();
+        let next_entity = entity.clone();
+        let mode_entity = entity.clone();
+        let search_entity = entity.clone();
+        let close_search_entity = entity.clone();
+        let collapse_entity = entity.clone();
+        let toolbar = h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap(SPACE_XS)
+            .child(
+                h_flex()
+                    .gap(px(1.))
+                    .p(px(2.))
+                    .rounded(theme.radius)
+                    .bg(theme.muted)
+                    .child(
+                        Button::new("outline-all")
+                            .ghost()
+                            .small()
+                            .when(
+                                self.detail_outline_mode == DetailOutlineMode::All,
+                                |button| button.bg(theme.background),
+                            )
+                            .label("全部")
+                            .on_click({
+                                let entity = mode_entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.set_detail_outline_mode(DetailOutlineMode::All, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("outline-conversation")
+                            .ghost()
+                            .small()
+                            .when(
+                                self.detail_outline_mode == DetailOutlineMode::Conversation,
+                                |button| button.bg(theme.background),
+                            )
+                            .label("对话")
+                            .on_click({
+                                let entity = mode_entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.set_detail_outline_mode(
+                                            DetailOutlineMode::Conversation,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("outline-changes")
+                            .ghost()
+                            .small()
+                            .when(
+                                self.detail_outline_mode == DetailOutlineMode::Changes,
+                                |button| button.bg(theme.background),
+                            )
+                            .label("改动")
+                            .on_click(move |_, _, cx| {
+                                mode_entity.update(cx, |this, cx| {
+                                    this.set_detail_outline_mode(DetailOutlineMode::Changes, cx);
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap(SPACE_XS)
+                    .child(
+                        Button::new("outline-search-toggle")
+                            .ghost()
+                            .small()
+                            .icon(icon("icons/search.svg").with_size(px(15.)))
+                            .tooltip("搜索会话")
+                            .on_click(move |_, window, cx| {
+                                search_entity.update(cx, |this, cx| {
+                                    this.toggle_detail_search(window, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("collapse-detail-outline")
+                            .ghost()
+                            .small()
+                            .icon(icon("icons/chevron-right.svg").with_size(px(15.)))
+                            .tooltip("收起右侧栏")
+                            .on_click(move |_, _, cx| {
+                                collapse_entity.update(cx, |this, cx| {
+                                    this.toggle_detail_outline(cx);
+                                });
+                            }),
+                    ),
+            );
+        let search_controls = if self.detail_search_open {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap(SPACE_XS)
+                .child(
+                    Input::new(&self.detail_search_input)
+                        .appearance(false)
+                        .min_w_0()
+                        .flex_1(),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(FONT_LABEL)
+                        .text_color(theme.muted_foreground)
+                        .child(match_label),
+                )
+                .child(
+                    Button::new("detail-search-prev")
+                        .ghost()
+                        .small()
+                        .w(px(24.))
+                        .icon(icon("icons/chevron-up.svg").with_size(px(14.)))
+                        .tooltip("上一个匹配")
+                        .on_click(move |_, _, cx| {
+                            prev_entity.update(cx, |this, cx| {
+                                this.move_detail_search(-1, cx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("detail-search-next")
+                        .ghost()
+                        .small()
+                        .w(px(24.))
+                        .icon(icon("icons/chevron-down.svg").with_size(px(14.)))
+                        .tooltip("下一个匹配")
+                        .on_click(move |_, _, cx| {
+                            next_entity.update(cx, |this, cx| {
+                                this.move_detail_search(1, cx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("detail-search-close")
+                        .ghost()
+                        .small()
+                        .w(px(24.))
+                        .icon(icon("icons/close.svg").with_size(px(14.)))
+                        .tooltip("关闭搜索")
+                        .on_click(move |_, window, cx| {
+                            close_search_entity.update(cx, |this, cx| {
+                                this.toggle_detail_search(window, cx);
+                            });
+                        }),
+                )
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        v_flex()
+            .w(DETAIL_OUTLINE_WIDTH)
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .p(SPACE_SM)
+            .gap(SPACE_SM)
+            .child(toolbar)
+            .child(search_controls)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
     fn render_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(detail) = &self.detail else {
@@ -6888,43 +17972,158 @@ impl Workbench {
                 .into_any_element();
         };
         let meta = &detail.meta;
-        let path_copied = detail.copy_path_reset.is_some();
-        let copy_path_hint = match (
-            !meta.host.is_empty(),
-            detail
-                .source_path
-                .as_ref()
-                .is_some_and(|path| path != &meta.file_path),
-        ) {
-            (false, false) => t("Copy Session Path"),
-            (false, true) => t("Copy Session Path (shared database)"),
-            (true, false) => t("Copy Session Path (local copy)"),
-            (true, true) => t("Copy Session Path (local copy of shared database)"),
-        };
-        let copy_path = Button::new("copy-session-path")
-            .ghost()
-            .rounded(RADIUS_BUTTON)
-            .icon(
-                icon(if path_copied {
-                    "icons/check.svg"
-                } else {
-                    "icons/copy.svg"
-                })
-                .with_size(px(16.)),
-            )
-            .tooltip(if path_copied {
-                t("Copied")
-            } else {
-                copy_path_hint
-            })
-            .disabled(detail.source_path.as_deref().is_none_or(str::is_empty))
-            .on_click(cx.listener(|this, _, _, cx| this.copy_session_path(cx)));
         let session_id = meta.id.clone();
         let session_key = meta.key.clone();
         let session_title = meta.title.clone();
+        let session_project = meta.project_path.clone();
+        let current_tags = detail.tags.clone();
         let export_entity = cx.entity();
+        let copy_path_entity = export_entity.clone();
         let reveal_entity = export_entity.clone();
         let delete_entity = export_entity.clone();
+        let tag_entity = export_entity.clone();
+        let relation_entity = export_entity.clone();
+        let pending_link_parent = self.pending_link_parent.clone();
+        let pending_link_child = self.pending_link_child.clone();
+        let has_pending_relationship = pending_link_parent.is_some();
+        let link_parent_tree = detail.link_parent_tree.clone();
+        let link_child_tree = detail.link_child_tree.clone();
+        let danger_color = theme.danger;
+        let tag_menu = Button::new("tag-actions")
+            .ghost()
+            .rounded(RADIUS_BUTTON)
+            .icon(icon("icons/tag.svg").with_size(px(16.)))
+            .tooltip("标签")
+            .dropdown_menu(move |menu, _, _| {
+                SESSION_TAGS.iter().fold(menu.min_w(px(180.)), |menu, tag| {
+                    let entity = tag_entity.clone();
+                    menu.item(
+                        PopupMenuItem::new(format!(" {}", session_tag_label(tag)))
+                            .icon(icon("icons/tag.svg").with_size(px(15.)))
+                            .checked(current_tags.contains(*tag))
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.toggle_session_tag(tag, window, cx);
+                                });
+                            }),
+                    )
+                })
+            })
+            .anchor(Anchor::TopRight);
+        let relation_menu = Button::new("relation-actions")
+            .ghost()
+            .rounded(RADIUS_BUTTON)
+            .icon(icon("icons/git-branch.svg").with_size(px(16.)))
+            .tooltip("关系")
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.min_w(px(220.)).item(
+                    PopupMenuItem::new(" 选择连接会话")
+                        .icon(icon("icons/git-branch.svg").with_size(px(15.)))
+                        .on_click({
+                            let entity = relation_entity.clone();
+                            move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.mark_relationship_parent(window, cx);
+                                });
+                            }
+                        }),
+                );
+                if let (Some((_parent_key, parent_title)), Some((_child_key, child_title))) =
+                    (pending_link_parent.clone(), pending_link_child.clone())
+                {
+                    let parent = clip_display(&parent_title, 12);
+                    let child = clip_display(&child_title, 12);
+                    SESSION_RELATIONS.iter().fold(
+                        menu.separator().item(
+                            PopupMenuItem::new(format!("{} → {}", parent, child)).disabled(true),
+                        ),
+                        |menu, relation| {
+                            let entity = relation_entity.clone();
+                            menu.item(
+                                PopupMenuItem::new(format!(
+                                    " 设为{}",
+                                    session_relation_label(relation)
+                                ))
+                                .icon(icon("icons/link.svg").with_size(px(15.)))
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.connect_pending_relationship(relation, window, cx);
+                                    });
+                                }),
+                            )
+                        },
+                    )
+                } else {
+                    menu
+                }
+                .when(has_pending_relationship, |menu| {
+                    let entity = relation_entity.clone();
+                    menu.separator().item(
+                        PopupMenuItem::new(" 取消连接选择")
+                            .icon(icon("icons/close.svg").with_size(px(15.)))
+                            .on_click(move |_, _window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.cancel_pending_relationship(cx);
+                                });
+                            }),
+                    )
+                })
+                .separator()
+                .item(PopupMenuItem::new("上游").disabled(true))
+                .map(|menu| {
+                    if link_parent_tree.is_empty() {
+                        menu.item(PopupMenuItem::new(" 暂无上游").disabled(true))
+                    } else {
+                        link_parent_tree.iter().fold(menu, |menu, rel| {
+                            let entity = relation_entity.clone();
+                            let key = rel.session.key.clone();
+                            let indent = "  ".repeat(rel.depth.saturating_sub(1));
+                            menu.item(
+                                PopupMenuItem::new(format!(
+                                    " {}↳ {} · {}",
+                                    indent,
+                                    session_relation_label(&rel.relation),
+                                    clip_display(&rel.session.title, 24)
+                                ))
+                                .icon(icon("icons/git-branch.svg").with_size(px(15.)))
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.open_detail(&key, None, window, cx);
+                                    });
+                                }),
+                            )
+                        })
+                    }
+                })
+                .separator()
+                .item(PopupMenuItem::new("分支").disabled(true))
+                .map(|menu| {
+                    if link_child_tree.is_empty() {
+                        menu.item(PopupMenuItem::new(" 暂无分支").disabled(true))
+                    } else {
+                        link_child_tree.iter().fold(menu, |menu, rel| {
+                            let entity = relation_entity.clone();
+                            let key = rel.session.key.clone();
+                            let indent = "  ".repeat(rel.depth.saturating_sub(1));
+                            menu.item(
+                                PopupMenuItem::new(format!(
+                                    " {}↳ {} · {}",
+                                    indent,
+                                    session_relation_label(&rel.relation),
+                                    clip_display(&rel.session.title, 24)
+                                ))
+                                .icon(icon("icons/link.svg").with_size(px(15.)))
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.open_detail(&key, None, window, cx);
+                                    });
+                                }),
+                            )
+                        })
+                    }
+                })
+            })
+            .anchor(Anchor::TopRight);
         // 远程会话只读:Delete 项整个不出现(阶段 1 不做远程删除——本地能
         // trash 的只有缓存副本,下次 rsync 就复活,语义是骗人的)
         let menu_is_remote = !meta.host.is_empty() || self.cleanup.open;
@@ -6932,76 +18131,156 @@ impl Workbench {
             .ghost()
             .rounded(RADIUS_BUTTON)
             .icon(icon("icons/more-horizontal.svg").with_size(px(16.)))
-            .dropdown_menu(move |menu, _, cx| {
+            .dropdown_menu(move |menu, window, cx| {
+                let copy_path_entity = copy_path_entity.clone();
                 let export_entity = export_entity.clone();
-                let reveal_entity = reveal_entity.clone();
+                let conversation_entity = export_entity.clone();
+                let thinking_entity = export_entity.clone();
+                let changes_entity = export_entity.clone();
+                let compressed_export_entity = export_entity.clone();
+                let memory_compressed_export_entity = export_entity.clone();
+                let chunk_input_entity = export_entity.clone();
                 let delete_entity = delete_entity.clone();
-                menu.min_w(px(210.))
-                    .item(
-                        PopupMenuItem::new(t(" Export as Markdown"))
-                            .icon(icon("icons/download.svg").with_size(px(15.)))
-                            .on_click(move |_, window, cx| {
-                                export_entity.update(cx, |this, cx| {
-                                    this.do_export(window, cx);
-                                });
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(format!(" {}", reveal_in_fm()))
-                            .icon(icon("icons/folder.svg").with_size(px(15.)))
-                            .on_click(move |_, _, cx| {
-                                reveal_entity.update(cx, |this, _| {
-                                    if let Some(detail) = &this.detail {
-                                        terminal::reveal_in_file_manager(&detail.meta.file_path);
+                let session_id_for_copy = session_id.clone();
+                let session_key_for_copy = session_key.clone();
+                let session_title_for_copy = session_title.clone();
+                let session_project_for_copy = session_project.clone();
+                let mut menu = menu
+                    .min_w(px(210.))
+                    .submenu_with_icon(
+                        Some(icon("icons/copy.svg").with_size(px(15.))),
+                        "复制",
+                        window,
+                        cx,
+                        move |menu, _, _| {
+                            let copy_path_entity = copy_path_entity.clone();
+                            let id = session_id_for_copy.clone();
+                            let key = session_key_for_copy.clone();
+                            let title = session_title_for_copy.clone();
+                            menu.min_w(px(210.))
+                                .item(PopupMenuItem::new("复制会话路径").on_click({
+                                    let entity = copy_path_entity.clone();
+                                    move |_, _, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.copy_session_path(cx);
+                                        });
                                     }
-                                });
-                            }),
+                                }))
+                                .item(PopupMenuItem::new(t(" Copy Session ID")).on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            id.clone(),
+                                        ));
+                                    },
+                                ))
+                                .item(PopupMenuItem::new(t(" Copy Handoff")).on_click({
+                                    let project = session_project_for_copy.clone();
+                                    move |_, _, cx| {
+                                        let cli = wake_core::mcp::sibling_file("contextos-cli");
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            wake_core::cli::handoff_text(
+                                                &key,
+                                                &title,
+                                                Some(project.as_str()),
+                                                cli.as_deref(),
+                                            ),
+                                        ));
+                                    }
+                                }))
+                        },
                     )
-                    .item(
-                        PopupMenuItem::new(t(" Copy Session ID"))
-                            .icon(icon("icons/copy.svg").with_size(px(15.)))
-                            .on_click({
-                                let id = session_id.clone();
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-                                }
-                            }),
+                    .submenu_with_icon(
+                        Some(icon("icons/download.svg").with_size(px(15.))),
+                        "导出",
+                        window,
+                        cx,
+                        move |menu, _, _| {
+                            menu.min_w(px(250.))
+                                .item(PopupMenuItem::new("导出为 Markdown").on_click({
+                                    let entity = export_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.do_export(window, cx);
+                                        });
+                                    }
+                                }))
+                                .item(PopupMenuItem::new("导出对话").on_click({
+                                    let entity = conversation_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.do_conversation_export(false, window, cx);
+                                        });
+                                    }
+                                }))
+                                .item(PopupMenuItem::new("导出包含 Thinking 的对话").on_click({
+                                    let entity = thinking_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.do_conversation_export(true, window, cx);
+                                        });
+                                    }
+                                }))
+                                .item(PopupMenuItem::new("导出仅改动文件").on_click({
+                                    let entity = changes_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.do_changed_files_export(window, cx);
+                                        });
+                                    }
+                                }))
+                        },
                     )
-                    // 交接(#33 的后半):头部已有 Copy Session Path,这里再给一段对方能
-                    // 直接消费的话——key 加两种读法(MCP 的 wake_get_session / shell 的
-                    // wake-cli show),精简渲染比原始 JSONL 省得多。与 Copy Session ID
-                    // 一样不弹通知
-                    .item(
-                        PopupMenuItem::new(t(" Copy Handoff"))
-                            .icon(icon("icons/copy.svg").with_size(px(15.)))
-                            .on_click({
-                                let key = session_key.clone();
-                                let title = session_title.clone();
-                                move |_, _, cx| {
-                                    let cli = wake_core::mcp::sibling_file("wake-cli");
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        wake_core::cli::handoff_text(&key, &title, cli.as_deref()),
-                                    ));
-                                }
-                            }),
-                    )
-                    .when(!menu_is_remote, |menu| {
-                        menu.separator().item(
-                            PopupMenuItem::element(|_, cx| {
-                                div().text_color(cx.theme().danger).child(move_to_trash())
-                            })
-                            .icon(
-                                icon("icons/trash-2.svg")
-                                    .with_size(px(15.))
-                                    .text_color(cx.theme().danger),
-                            )
-                            .on_click(move |_, window, cx| {
-                                delete_entity.update(cx, |this, cx| {
-                                    this.confirm_delete(window, cx);
-                                });
-                            }),
+                    .submenu_with_icon(
+                        Some(icon("icons/file-text.svg").with_size(px(15.))),
+                        "压缩",
+                        window,
+                        cx,
+                        move |menu, _, _| {
+                            menu.min_w(px(230.))
+                                .item(PopupMenuItem::new("压缩导出").on_click({
+                                    let entity = compressed_export_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.do_compressed_export(window, cx);
+                                        });
+                                    }
+                                }))
+                                .item(PopupMenuItem::new("压缩并生成记忆").on_click({
+                                    let entity = memory_compressed_export_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.do_memory_compressed_export(window, cx);
+                                        });
+                                    }
+                                }))
+                                .item(PopupMenuItem::new("分块输入（长对话）").on_click({
+                                    let entity = chunk_input_entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.open_single_chunk_input(window, cx);
+                                        });
+                                    }
+                                }))
+                        },
+                    );
+                if !menu_is_remote {
+                    menu = menu.separator().item(
+                        PopupMenuItem::element(move |_, _cx| {
+                            div().text_color(danger_color).child(move_to_trash())
+                        })
+                        .icon(
+                            icon("icons/trash-2.svg")
+                                .with_size(px(15.))
+                                .text_color(danger_color),
                         )
-                    })
+                        .on_click(move |_, window, cx| {
+                            delete_entity.update(cx, |this, cx| {
+                                this.confirm_delete(window, cx);
+                            });
+                        }),
+                    );
+                }
+                menu
             })
             .anchor(Anchor::TopRight);
 
@@ -7017,6 +18296,16 @@ impl Workbench {
         }
         if let Some(tokens) = meta.tokens_used {
             detail_facts.push(crate::tf!("{} tokens", fmt_tokens(Some(tokens))));
+        }
+        if detail.link_parent_count > 0 || detail.link_child_count > 0 {
+            let mut parts = Vec::new();
+            if detail.link_parent_count > 0 {
+                parts.push(crate::tf!("{} 上游", detail.link_parent_count));
+            }
+            if detail.link_child_count > 0 {
+                parts.push(crate::tf!("{} 分支", detail.link_child_count));
+            }
+            detail_facts.push(crate::tf!("关系：{}", parts.join(" · ")));
         }
         let has_detail_facts = !detail_facts.is_empty();
         let detail_fact_line: SharedString = detail_facts.join(" · ").into();
@@ -7037,6 +18326,8 @@ impl Workbench {
         });
         let branch: Option<SharedString> =
             visible_git_branch(meta.git_branch.as_deref()).map(|branch| branch.to_string().into());
+        let mut shown_tags = detail.tags.iter().cloned().collect::<Vec<_>>();
+        shown_tags.sort();
 
         let project_badge = project_badge(
             "detail-project",
@@ -7239,8 +18530,21 @@ impl Workbench {
                 )
                 .into_any_element()
         };
+        let reveal_button = Button::new("reveal-session")
+            .ghost()
+            .rounded(RADIUS_BUTTON)
+            .icon(icon("icons/folder.svg").with_size(px(16.)))
+            .tooltip(reveal_in_fm())
+            .on_click(move |_, _, cx| {
+                reveal_entity.update(cx, |this, _| {
+                    if let Some(detail) = &this.detail {
+                        terminal::reveal_in_file_manager(&detail.meta.file_path);
+                    }
+                });
+            });
         let actions: Vec<AnyElement> = vec![
             open_in,
+            reveal_button.into_any_element(),
             tool_btn(
                 "fav",
                 "icons/star.svg",
@@ -7265,7 +18569,8 @@ impl Workbench {
                 cx.listener(|this, _, window, cx| this.toggle_pinned(window, cx)),
             )
             .into_any_element(),
-            copy_path.into_any_element(),
+            tag_menu.into_any_element(),
+            relation_menu.into_any_element(),
             more_menu.into_any_element(),
         ];
         let mut meta_rows: Vec<AnyElement> = vec![
@@ -7296,6 +18601,10 @@ impl Workbench {
                     // 胶囊一致(primary);muted 描边用户否决 2026-09-03
                     this.child(outline_badge(format!("@{}", meta.host), theme.primary))
                 })
+                .children(shown_tags.into_iter().map(|tag| {
+                    outline_badge(format!("#{}", session_tag_label(&tag)), theme.primary)
+                        .into_any_element()
+                }))
                 .when(has_detail_facts, |this| {
                     this.child(div().flex_1().min_w_0().truncate().child(detail_fact_line))
                 })
@@ -7513,6 +18822,7 @@ enum RowLevel {
 /// 侧栏行首元素——每行必须有一个,槽位定宽,保证同组文字起点对齐。
 /// Lucide 图标随选中态着色;品牌 PNG 保留原色不着色。
 enum RowLead {
+    None,
     Icon(Icon),
     /// Agent 品牌图标,取 `AgentId::brand_icon()`
     Brand(&'static str),
@@ -7613,11 +18923,14 @@ fn usage_bar_row(
     count: i64,
     max: i64,
     name_w: Pixels,
-    cx: &App,
-) -> impl IntoElement {
+    board: UsageBoard,
+    on_click: Option<impl Fn(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static>,
+    tooltip: Option<String>,
+    cx: &Context<Workbench>,
+) -> AnyElement {
     let theme = cx.theme();
     let frac = (count as f32 / max.max(1) as f32).clamp(0., 1.);
-    h_flex()
+    let row = h_flex()
         .h(SPACE_XXL)
         .gap(ICON_TEXT_GAP)
         .items_center()
@@ -7640,7 +18953,7 @@ fn usage_bar_row(
                 .text_size(FONT_CAPTION)
                 .text_color(theme.foreground)
                 .truncate()
-                .child(label),
+                .child(label.clone()),
         )
         .child(
             div()
@@ -7665,7 +18978,28 @@ fn usage_bar_row(
                 .text_size(FONT_LABEL)
                 .text_color(theme.muted_foreground)
                 .child(value_text),
-        )
+        );
+    match on_click {
+        // 可点的行包一层交互壳:hover 出底色 + 手势光标,与侧栏行同语言
+        Some(on_click) => div()
+            .id(SharedString::from(format!(
+                "usage-{}-{}",
+                board.id(),
+                label
+            )))
+            .w_full()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.muted).rounded(RADIUS_BUTTON))
+            .when_some(tooltip, |row, tooltip| {
+                row.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                })
+            })
+            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .child(row)
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
 }
 
 fn prompts_label(n: i64) -> String {
@@ -7743,10 +19077,84 @@ fn dist_caption(range: InsightsRange, peak: usize, peak_n: i64) -> String {
     }
 }
 
-/// 竖柱分布图(hour 24 根 / weekday 7 根 / month 12 根共用)。峰值柱全饱和
-/// primary,其余 55%;零值留 2px muted 底座维持基线连续。宽柱配大缝:
-/// 柱数越少 gap 越大,免得 7 根 90px 宽柱糊成一片
-fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &App) -> AnyElement {
+/// 该月天数(1..=31)。月末日期由选中日反推,不查表:先跳到下月 1 号再回退一天
+fn days_in_month(day: chrono::NaiveDate) -> u32 {
+    use chrono::Datelike as _;
+    let first = day.with_day(1).unwrap_or(day);
+    let next = if first.month() == 12 {
+        chrono::NaiveDate::from_ymd_opt(first.year() + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(first.year(), first.month() + 1, 1)
+    };
+    next.and_then(|n| n.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(31)
+}
+
+/// 选中日所在周(周一起始)的 7 天,供周期模式的轴标签与 tooltip 用
+fn week_days_of(day: chrono::NaiveDate) -> impl Iterator<Item = chrono::NaiveDate> {
+    use chrono::Datelike as _;
+    let monday = day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64);
+    (0..7).map(move |i| monday + chrono::Days::new(i))
+}
+
+/// 选中日所在月的每一天(1 号起),供周期模式的轴标签与 tooltip 用
+fn month_days_of(day: chrono::NaiveDate) -> impl Iterator<Item = chrono::NaiveDate> {
+    let first = day.with_day(1).unwrap_or(day);
+    (0..days_in_month(day) as u64).map(move |i| first + chrono::Days::new(i))
+}
+
+/// 选中某天时三档分布的副标题:先点名周期(Hour 档说哪天、Weekday 档说哪周、
+/// Month 档说哪月),再报该周期内的峰值——不然单说"最常在 2 PM"读者不知道
+/// 说的是哪一天
+fn dist_caption_scoped(
+    range: InsightsRange,
+    day: chrono::NaiveDate,
+    peak: usize,
+    peak_n: i64,
+) -> String {
+    use chrono::Datelike as _;
+    let scope: String = match range {
+        InsightsRange::Hour => day.format(t("%b %-d, %Y")).to_string(),
+        InsightsRange::Weekday => {
+            let monday = day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64);
+            let sunday = monday + chrono::Days::new(6);
+            format!(
+                "{} – {}",
+                monday.format(t("%b %-d")),
+                sunday.format(t("%b %-d"))
+            )
+        }
+        InsightsRange::Month => day.format(t("%B %Y")).to_string(),
+    };
+    if peak_n == 0 {
+        return crate::tf!("{} · no prompts", scope);
+    }
+    let where_peak: String = match range {
+        InsightsRange::Hour => crate::tf!("Most active around {}", hour_label(peak)),
+        InsightsRange::Weekday => crate::tf!("Most active on {}", dow_plural()[peak]),
+        // 月档的峰值柱是"几号",直接报日期比报数字直观
+        InsightsRange::Month => {
+            let on = day.with_day(peak as u32 + 1).unwrap_or(day);
+            crate::tf!("Most active on {}", on.format(t("%b %-d")))
+        }
+    };
+    format!("{scope} · {where_peak}")
+}
+
+/// 竖柱分布图(hour 24 根 / weekday 7 根 / month 12 根 / 选中周期 7 或 28–31 根
+/// 共用)。峰值柱全饱和 primary,其余 55%;零值留 2px muted 底座维持基线连续。
+/// 宽柱配大缝:柱数越少 gap 越大,免得 7 根 90px 宽柱糊成一片。
+/// `scoped_day` = 选中日:轴标签改标具体日期(周档标那 7 天、月档标几号),
+/// 否则读图时无法与"哪一周/哪个月"对上
+fn render_distribution(
+    range: InsightsRange,
+    values: &[i64],
+    token_values: &[i64],
+    peak: usize,
+    scoped_day: Option<chrono::NaiveDate>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let max = values.iter().copied().max().unwrap_or(0).max(1);
     let gap = match range {
@@ -7757,15 +19165,30 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
     const CHART_H: f32 = 72.;
     // 两张名表在逐柱闭包**之外**取一次:闭包体每根柱跑一遍,放进去就是
     // 12 根柱 × 12 次查表(hour 档不用名表,空着)
-    let long_names: Vec<SharedString> = match range {
-        InsightsRange::Hour => Vec::new(),
-        InsightsRange::Weekday => dow_plural().map(SharedString::from).into(),
-        InsightsRange::Month => month_full().into(),
+    let long_names: Vec<SharedString> = match (range, scoped_day) {
+        // 周期模式:tooltip 与刻度都标真实日期,周档给"10月13日"而非"周一"
+        (InsightsRange::Weekday, Some(day)) => week_days_of(day)
+            .map(|d| d.format(t("%b %-d")).to_string().into())
+            .collect(),
+        (InsightsRange::Month, Some(day)) => month_days_of(day)
+            .map(|d| d.format(t("%b %-d")).to_string().into())
+            .collect(),
+        (InsightsRange::Hour, None) => Vec::new(),
+        (InsightsRange::Weekday, None) => dow_plural().map(SharedString::from).into(),
+        (InsightsRange::Month, None) => month_full().into(),
+        // 小时档的展示名由 tooltip 里的 "12 AM – 1 AM" 现算,周期与否都一样
+        (InsightsRange::Hour, Some(_)) => Vec::new(),
     };
-    let tick_names: Vec<SharedString> = match range {
-        InsightsRange::Hour => Vec::new(),
-        InsightsRange::Weekday => dow_short().map(SharedString::from).into(),
-        InsightsRange::Month => month_short().into(),
+    let tick_names: Vec<SharedString> = match (range, scoped_day) {
+        (InsightsRange::Weekday, Some(_)) => dow_short().map(SharedString::from).into(),
+        // 月档 31 根柱:刻度只标日期数字,全标会挤成一片
+        (InsightsRange::Month, Some(_)) => (1..=values.len())
+            .map(|d| SharedString::from(d.to_string()))
+            .collect(),
+        (InsightsRange::Hour, None) => Vec::new(),
+        (InsightsRange::Hour, Some(_)) => Vec::new(),
+        (InsightsRange::Weekday, None) => dow_short().map(SharedString::from).into(),
+        (InsightsRange::Month, None) => month_short().into(),
     };
     v_flex()
         .gap(px(6.))
@@ -7789,7 +19212,7 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
                             },
                         )
                     };
-                    let label: SharedString = match range {
+                    let activity_label = match range {
                         InsightsRange::Hour => format!(
                             "{} · {} – {}",
                             prompts_label(n),
@@ -7797,7 +19220,12 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
                             hour_label(i + 1)
                         ),
                         _ => format!("{} · {}", prompts_label(n), long_names[i]),
-                    }
+                    };
+                    let label: SharedString = format!(
+                        "{} · {} tokens",
+                        activity_label,
+                        fmt_tokens(Some(token_values.get(i).copied().unwrap_or(0)))
+                    )
                     .into();
                     div()
                         .id(("dist", i))
@@ -7903,7 +19331,7 @@ fn agent_label(raw: &str) -> SharedString {
 }
 
 /// 榜单里一行 agent 的行首与名称:15px 品牌图 + 显示名。Agents 榜与 Agents asking
-/// Wake 共用,"一行 agent 长什么样"只此一处
+/// ContextOS 共用,"一行 agent 长什么样"只此一处
 fn agent_row_head(name: &str, dark: bool) -> (Option<AnyElement>, SharedString) {
     (
         AgentId::from_str(name).map(|a| img(a.brand_icon(dark)).size(px(15.)).into_any_element()),
@@ -7977,63 +19405,18 @@ fn trend_caption(layers: &[TrendLayer]) -> String {
     }
 }
 
-/// "Last 7 days" 对比行:三个度量各带与前 7 天的相对变化。上涨用 primary,
-/// 持平/下降 muted——不引入第四种文字色。Tokens 不在这里:会话级累计量没有
-/// 时间维度,按创建日切窗会颠倒结果(2026-09-03 Codex review)
-fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let (cur, prev) = d.last_week_pair();
-    let note = |now: i64, before: i64| -> (SharedString, Hsla) {
-        match (now, before) {
-            (0, 0) => (t("No activity").into(), theme.muted_foreground),
-            (_, 0) => (t("New this week").into(), theme.primary),
-            _ => {
-                let pct = ((now - before) as f64 * 100. / before as f64).round() as i64;
-                match pct {
-                    0 => (t("Same as last week").into(), theme.muted_foreground),
-                    p => (
-                        crate::tf!("{}% vs last week", format!("{p:+}")).into(),
-                        if p > 0 {
-                            theme.primary
-                        } else {
-                            theme.muted_foreground
-                        },
-                    ),
-                }
-            }
-        }
-    };
-    let stat = |label: &'static str, now: i64, before: i64, fmt: &dyn Fn(i64) -> String| {
-        stat_cell(fmt(now), label, FONT_HEADING, Some(note(now, before)), cx)
-    };
-    v_flex()
-        .gap(SPACE_MD)
-        .child(switch_section_head(
-            t("Last 7 days"),
-            Some(t("Compared with the 7 days before").into()),
-            None,
-            cx,
-        ))
-        .child(
-            h_flex()
-                .gap(px(40.))
-                .items_start()
-                .child(stat(t("Sessions"), cur.sessions, prev.sessions, &thousands))
-                .child(stat(t("Prompts"), cur.prompts, prev.prompts, &thousands))
-                .child(stat(
-                    t("Active days"),
-                    cur.active_days,
-                    prev.active_days,
-                    &thousands,
-                )),
-        )
-        .into_any_element()
-}
-
 /// 堆叠周柱图:TREND_WEEKS 列与热力图同宽同步距(左侧留出热力图的星期标签
 /// 列,两图的周列上下对齐),每列 = 各层该周 prompts 自下而上堆叠,按窗口内
-/// 峰值周归一;零周留 2px muted 基线。图例列出各层
-fn render_trend(start: chrono::NaiveDate, layers: Rc<Vec<TrendLayer>>, cx: &App) -> AnyElement {
+/// 峰值周归一;零周留 2px muted 基线。图例列出各层。
+/// `selected_week` = 热力图选中日所在列:该列套一条贯穿图高的描边(画在与柱
+/// 同宽的定高轨道上,而不是变高的柱本身——零周那根 2px 基线套不住描边)
+fn render_trend(
+    start: chrono::NaiveDate,
+    layers: Rc<Vec<TrendLayer>>,
+    weekly_tokens: &[i64],
+    selected_week: Option<usize>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     const CHART_H: f32 = 72.;
     let totals: Vec<i64> = (0..TREND_WEEKS)
@@ -8069,29 +19452,42 @@ fn render_trend(start: chrono::NaiveDate, layers: Rc<Vec<TrendLayer>>, cx: &App)
             }
             col
         };
+        // 定高轨道:柱贴底(justify_end),轨道本身贯穿图高,"选中那周"才有一条
+        // 完整的竖带可套描边;宽度/间距与改造前一致,热力图的对齐不受影响
+        let track = v_flex()
+            .w(px(WEEK_CELL))
+            .h(px(CHART_H))
+            .flex_shrink_0()
+            .justify_end()
+            .when(selected_week == Some(w), |t| {
+                t.border_1()
+                    .border_color(theme.foreground)
+                    .rounded(RADIUS_CELL)
+            })
+            .child(column);
         // tooltip 只捕获 Rc + 两个 Copy 值,该周总量与前三层明细 hover 才算
         let layers = Rc::clone(&layers);
-        columns = columns.child(column.id(("trend", w)).flex_shrink_0().tooltip(
-            move |window, cx| {
-                let monday = start + chrono::Days::new(w as u64 * 7);
-                let mut label = crate::tf!(
-                    "Week of {} · {}",
-                    monday.format(t("%b %-d")),
-                    prompts_label(total)
-                );
-                let breakdown: Vec<String> = layers
-                    .iter()
-                    .filter(|l| l.weekly[w] > 0)
-                    .take(3)
-                    .map(|l| format!("{} {}", l.name, l.weekly[w]))
-                    .collect();
-                if !breakdown.is_empty() {
-                    label.push('\n');
-                    label.push_str(&breakdown.join(" · "));
-                }
-                gpui_component::tooltip::Tooltip::new(SharedString::from(label)).build(window, cx)
-            },
-        ));
+        let week_tokens = weekly_tokens.get(w).copied().unwrap_or(0);
+        columns = columns.child(track.id(("trend", w)).tooltip(move |window, cx| {
+            let monday = start + chrono::Days::new(w as u64 * 7);
+            let mut label = crate::tf!(
+                "Week of {} · {}",
+                monday.format(t("%b %-d")),
+                prompts_label(total)
+            );
+            label.push_str(&format!(" · {} tokens", fmt_tokens(Some(week_tokens))));
+            let breakdown: Vec<String> = layers
+                .iter()
+                .filter(|l| l.weekly[w] > 0)
+                .take(3)
+                .map(|l| format!("{} {}", l.name, l.weekly[w]))
+                .collect();
+            if !breakdown.is_empty() {
+                label.push('\n');
+                label.push_str(&breakdown.join(" · "));
+            }
+            gpui_component::tooltip::Tooltip::new(SharedString::from(label)).build(window, cx)
+        }));
     }
 
     let legend = h_flex()
@@ -8126,8 +19522,14 @@ const HEAT: [f32; 4] = [0.25, 0.5, 0.75, 1.];
 /// 53×9 + 52×3 = 662,必须收进最小窗口的内容宽 668(940 − 224 侧栏 −
 /// 两侧 24 padding)——10px 格的 715 会在最小窗口被裁掉右缘
 /// (2026-08-27 Codex review)。daily 升序,二分出窗口后填定长数组——
-/// 渲染路径零哈希零日期运算;tooltip 文案 hover 才格式化
-fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
+/// 渲染路径零哈希零日期运算;tooltip 文案 hover 才格式化。
+/// **本图是三档分布的选取器**:点一格 = 选中那天(再点取消),选中格用
+/// foreground 描边(底色已是 primary,描边用前景色才在两套主题下都跳出来)
+fn render_heatmap(
+    d: &InsightsData,
+    selected: Option<chrono::NaiveDate>,
+    cx: &Context<Workbench>,
+) -> AnyElement {
     let theme = cx.theme();
     let today = d.as_of;
     let start = d.trend_start();
@@ -8135,6 +19537,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
 
     const DAYS: usize = TREND_WEEKS * 7;
     let mut window = [0i64; DAYS];
+    let tokens_by_day: HashMap<chrono::NaiveDate, i64> = d.daily_tokens.iter().copied().collect();
     let mut heat_max = 1i64;
     let from = d.daily.partition_point(|(day, _)| *day < start);
     for &(day, n) in &d.daily[from..] {
@@ -8187,17 +19590,34 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
                 continue;
             }
             let n = window[ix];
+            let cell_day = start + chrono::Days::new(ix as u64);
+            let tokens = tokens_by_day.get(&cell_day).copied().unwrap_or(0);
+            let is_selected = selected == Some(cell_day);
             col = col.child(
                 div()
                     .id(("hm", ix))
                     .size(px(CELL))
                     .rounded(RADIUS_CELL)
                     .bg(heat_color(n))
+                    .cursor_pointer()
+                    // 选中格描边。描边画在 9px 格内侧,不吃布局(热力图与趋势
+                    // 图的列必须严格对齐)
+                    .when(is_selected, |cell| {
+                        cell.border_1().border_color(theme.foreground)
+                    })
+                    .hover(|cell| cell.border_1().border_color(theme.muted_foreground))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_insights_day(cell_day, cx);
+                    }))
                     // 只捕获 Copy 的 (start, ix, n),hover 到的那格才格式化
                     .tooltip(move |window, cx| {
                         let day = start + chrono::Days::new(ix as u64);
-                        let label =
-                            format!("{} · {}", prompts_label(n), day.format(t("%b %-d, %Y")));
+                        let label = format!(
+                            "{} · {} tokens · {}",
+                            prompts_label(n),
+                            fmt_tokens(Some(tokens)),
+                            day.format(t("%b %-d, %Y"))
+                        );
                         gpui_component::tooltip::Tooltip::new(SharedString::from(label))
                             .build(window, cx)
                     }),
@@ -8478,6 +19898,92 @@ fn export_dir(store: &Store) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn contextos_skill_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("skills/contextos"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("skills/contextos"));
+            candidates.push(dir.join("../skills/contextos"));
+            candidates.push(dir.join("../../skills/contextos"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.join("SKILL.md").is_file())
+}
+
+fn copy_dir_contents(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+            copy_dir_contents(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn skill_binary_path(name: &str) -> String {
+    wake_core::mcp::sibling_named(name)
+        .filter(|path| path.is_file())
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn powershell_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn inject_skill_binary_paths(path: &std::path::Path) -> anyhow::Result<()> {
+    let original = std::fs::read_to_string(path)?;
+    let marker = "## Finding the binary";
+    let Some(start) = original.find(marker) else {
+        return Ok(());
+    };
+    let Some(rest) = original[start..].find("\n## Commands").map(|ix| start + ix) else {
+        return Ok(());
+    };
+    let cli = skill_binary_path("contextos-cli");
+    let mcp = skill_binary_path("contextos-mcp");
+    let generated = format!(
+        "## Finding the binary\n\n\
+         This exported package was generated on this machine with these ContextOS binaries:\n\n\
+         ```powershell\n\
+         $env:CONTEXTOS_CLI = {}\n\
+         $env:CONTEXTOS_MCP = {}\n\
+         ```\n\n\
+         Use `$env:CONTEXTOS_CLI` when running the commands below. The MCP path is included for \
+         agents that need to register the ContextOS MCP server directly.\n\n\
+         If those paths no longer exist, fall back to discovery:\n\n\
+         ```bash\n\
+         command -v contextos-cli || ls /Applications/ContextOS.app/Contents/MacOS/contextos-cli\n\
+         ```\n\n\
+         Use whichever resolves. On Linux it is on `PATH` after a deb install, or at\n\
+         `~/.local/bin/contextos-cli` from the tarball; on Windows it usually sits next to\n\
+         `ContextOS.exe`.\n\n\
+         Two things can be missing, and they need different answers:\n\n\
+         - **No binary.** Say so — the user needs ContextOS. Do not try to install it yourself.\n\
+         - **No index** (`no ContextOS index at … — launch ContextOS once to build it`). ContextOS is\n\
+           installed but has never run. Run `contextos-cli index` once; it builds the index in a\n\
+           few seconds without opening the app, then retry your query.\n",
+        powershell_string(&cli),
+        powershell_string(&mcp),
+    );
+    let mut text = String::with_capacity(original.len() + generated.len());
+    text.push_str(&original[..start]);
+    text.push_str(&generated);
+    text.push_str(&original[rest..]);
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
 fn zoom_fit(dims: Option<(u32, u32)>, viewport: Size<Pixels>) -> Size<Pixels> {
     let available_width = (f32::from(viewport.width) - 112.0).max(120.0);
     let available_height = (f32::from(viewport.height) - 164.0).max(120.0);
@@ -8726,7 +20232,7 @@ fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 /// 对话正文共用的 Markdown 视图。表格、引用块与分隔线由组件原生解析；
-/// Wake 覆写样式、代码操作区,并按会话所属主机处理 macOS 正文链接。
+/// ContextOS 覆写样式、代码操作区,并按会话所属主机处理 macOS 正文链接。
 /// Markdown 正文(消息与记忆文档共用);`host` / `project_path` 只用来解析正文里的
 /// 相对链接(远程会话不开本地文件)
 fn markdown_body(
@@ -9288,7 +20794,6 @@ fn detail_header_frame(
     v_flex()
         .id(id)
         .flex_shrink_0()
-        .window_control_area(WindowControlArea::Drag)
         .px(SPACE_XXL)
         .pb(SPACE_SM)
         .border_b_1()
@@ -9304,13 +20809,21 @@ fn detail_header_frame(
                     h_flex()
                         .flex_1()
                         .min_w_0()
+                        .window_control_area(WindowControlArea::Drag)
                         .gap(ICON_TEXT_GAP)
                         .items_center()
                         .text_size(FONT_LABEL)
                         .text_color(theme.muted_foreground)
                         .children(lead),
                 )
-                .child(h_flex().flex_shrink_0().gap(SPACE_XS).children(actions)),
+                .child(
+                    h_flex()
+                        .id((ElementId::from(id), "actions"))
+                        .flex_shrink_0()
+                        .gap(SPACE_XS)
+                        .occlude()
+                        .children(actions),
+                ),
         )
         .child(
             div()
@@ -9320,6 +20833,7 @@ fn detail_header_frame(
                 .py(SPACE_SM)
                 .flex()
                 .items_center()
+                .window_control_area(WindowControlArea::Drag)
                 .child(
                     div()
                         .id((ElementId::from(id), "title"))
@@ -9340,6 +20854,7 @@ fn detail_header_frame(
             v_flex()
                 .w_full()
                 .min_w_0()
+                .window_control_area(WindowControlArea::Drag)
                 .pt(SPACE_SM)
                 .gap(SPACE_SM)
                 .text_size(FONT_LABEL)
@@ -9354,6 +20869,12 @@ const FOOTER_BTN: Pixels = px(28.);
 /// 图标的中心压在与导航行行首同一条轴上(用户 2026-09-21)
 const FOOTER_LEAD_INSET: Pixels = px(12.75);
 
+#[derive(Clone, Copy)]
+enum SidebarGlyph {
+    Icon(&'static str),
+    Text(&'static str),
+}
+
 /// 底部工具条的图标按钮(Zed 状态栏 / Xcode 导航条同款图标条,不带盒子):透明底、
 /// hover 才出色;`active`(当前页 / 清理模式)用侧栏行的选中色做圆角底 + 选中前景,
 /// 与导航行的选中态同一套语言。14px 图标由容器 text_color 着色
@@ -9361,7 +20882,7 @@ fn sidebar_tool_btn(
     id: &'static str,
     tooltip: &'static str,
     active: bool,
-    glyph: &'static str,
+    glyph: SidebarGlyph,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &Context<Workbench>,
 ) -> Stateful<Div> {
@@ -9386,7 +20907,14 @@ fn sidebar_tool_btn(
         })
         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx))
         .on_click(on_click)
-        .child(icon(glyph).with_size(px(14.)))
+        .child(match glyph {
+            SidebarGlyph::Icon(path) => icon(path).with_size(px(14.)).into_any_element(),
+            SidebarGlyph::Text(label) => div()
+                .text_size(FONT_LABEL)
+                .font_semibold()
+                .child(label)
+                .into_any_element(),
+        })
 }
 
 /// Things 风源列表行:图标 + 文字 + 计数,6px 圆角选中胶囊
@@ -9443,6 +20971,7 @@ fn sidebar_row(
                         .items_center()
                         .justify_center()
                         .child(match lead {
+                            RowLead::None => div().into_any_element(),
                             // 线条图标比实心品牌图视觉轻,给它小一档才平衡
                             RowLead::Icon(ic) => ic
                                 .with_size(if sub { px(14.) } else { NAV_ICON })
@@ -9542,6 +21071,162 @@ impl Focusable for Workbench {
     }
 }
 
+struct MemoryCandidatesView {
+    focus_handle: FocusHandle,
+    workbench: Entity<Workbench>,
+    candidates: Vec<ContextosMemoryCandidate>,
+    meta: SessionMeta,
+}
+
+impl MemoryCandidatesView {
+    fn new(
+        workbench: Entity<Workbench>,
+        candidates: Vec<ContextosMemoryCandidate>,
+        meta: SessionMeta,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            workbench,
+            candidates,
+            meta,
+        }
+    }
+}
+
+impl Focusable for MemoryCandidatesView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for MemoryCandidatesView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let workbench = self.workbench.clone();
+        let meta = self.meta.clone();
+        let rows = self
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(ix, candidate)| {
+                let memory_button_id = format!("candidate-memory-{ix}");
+                let memory_candidate = candidate.clone();
+                let memory_meta = meta.clone();
+                let memory_workbench = workbench.clone();
+                v_flex()
+                    .id(("memory-candidate-window-row", ix))
+                    .flex_shrink_0()
+                    .gap(SPACE_SM)
+                    .p(SPACE_LG)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .bg(theme.popover)
+                    .child(
+                        h_flex()
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .child(outline_badge(candidate.kind_label(), theme.primary))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(FONT_BODY)
+                                    .font_medium()
+                                    .truncate()
+                                    .child(candidate.title_or_fallback()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!(
+                                        "{} · 建议：{}",
+                                        empty_dash(&candidate.confidence),
+                                        empty_dash(&candidate.target)
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .line_height(px(18.))
+                            .child(candidate.brief()),
+                    )
+                    .child(
+                        h_flex().gap(SPACE_SM).items_center().child(
+                            settings_button(Button::new(memory_button_id).label("加入记忆"), cx)
+                                .on_click(move |_, window, cx| {
+                                    memory_workbench.update(cx, |this, cx| {
+                                        this.add_candidate_to_memory(
+                                            memory_candidate.clone(),
+                                            memory_meta.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                        ),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .id("contextos-memory-candidates-window")
+            .track_focus(&self.focus_handle)
+            .size_full()
+                    .bg(theme.popover)
+            .text_color(theme.foreground)
+            .child(
+                v_flex()
+                    .size_full()
+                    .p(SPACE_LG)
+                    .gap(SPACE_MD)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(SPACE_MD)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(FONT_HEADING)
+                                            .font_semibold()
+                                            .child("ContextOS 记忆候选"),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt(SPACE_XS)
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.muted_foreground)
+                                            .child("逐条确认要加入记忆。未确认的候选不会写入长期记忆。"),
+                                    ),
+                            )
+                            .child(
+                                settings_button(Button::new("memory-candidates-close").label("关闭"), cx)
+                                    .on_click(|_, window, _| window.remove_window()),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .id("memory-candidates-window-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .gap(SPACE_SM)
+                            .children(rows),
+                    ),
+            )
+            .children(overlay_layers(window, cx))
+    }
+}
+
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_language(window, cx);
@@ -9594,10 +21279,16 @@ impl Render for Workbench {
                         }
                         match self.page {
                             Page::Memory => this.child(self.render_memory(cx)),
-                            Page::Insights => this.child(self.render_insights(cx)),
+                            Page::Skills => this.child(self.render_skills(cx)),
+                            Page::Insights => this.child(self.render_insights(window, cx)),
+                            Page::Relationships => this.child(self.render_relationships_page(cx)),
+                            Page::Compressions => this.child(self.render_compressions(cx)),
                             Page::Sessions => this
                                 .child(self.render_session_list(cx))
-                                .child(self.render_detail(window, cx)),
+                                .child(self.render_detail(window, cx))
+                                .when(self.detail.is_some(), |this| {
+                                    this.child(self.render_detail_outline(window, cx))
+                                }),
                         }
                     }),
             )

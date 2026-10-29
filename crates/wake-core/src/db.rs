@@ -1,7 +1,12 @@
 use crate::models::*;
+use crate::workspace_changes::{
+    WorkspaceChangeDetail, WorkspaceChangeEvent, WorkspaceChangeKind, WorkspaceFileObservation,
+    WorkspaceObservationMode, WorkspaceRoot,
+};
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -10,6 +15,28 @@ pub type LocationOverrides = (
     Vec<AgentId>,
     Vec<(AgentId, std::path::PathBuf)>,
 );
+
+#[derive(Debug, Clone)]
+pub struct SessionRelation {
+    pub relation: String,
+    pub source: String,
+    pub session: SessionMeta,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRelationNode {
+    pub depth: usize,
+    pub relation: String,
+    pub session: SessionMeta,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRelationEdge {
+    pub relation: String,
+    pub source: String,
+    pub parent: SessionMeta,
+    pub child: SessionMeta,
+}
 
 /// remote_hosts 表的一行(Settings → Remote hosts / roster 组装共用)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +77,33 @@ CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path, updated_at DESC);
 
+-- Agent 用量独立于会话全文索引维护。源日志是唯一事实来源,mtime/size 是
+-- 增量同步游标;单独更新用量不需要重新解析 messages_fts。
+CREATE TABLE IF NOT EXISTS session_usage (
+  file_path   TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL,
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  has_usage   INTEGER NOT NULL DEFAULT 1,
+  source      TEXT NOT NULL DEFAULT 'adapter-session-source-v1',
+  file_mtime  INTEGER NOT NULL DEFAULT 0,
+  file_size   INTEGER NOT NULL DEFAULT 0,
+  scanned_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_session_usage_agent ON session_usage(agent_id);
+
+-- 每个源文件解析出的逐请求 Token 事件。session_usage 仍保存会话级快照供会话视图使用；
+-- Insights 按 timestamp_ms 统计，不把会话累计值归到创建日。
+CREATE TABLE IF NOT EXISTS session_usage_events (
+  file_path    TEXT NOT NULL,
+  event_index  INTEGER NOT NULL,
+  timestamp_ms INTEGER,
+  tokens_used  INTEGER NOT NULL DEFAULT 0,
+  model        TEXT,
+  PRIMARY KEY (file_path, event_index)
+);
+CREATE INDEX IF NOT EXISTS idx_session_usage_events_time
+  ON session_usage_events(timestamp_ms);
+
 CREATE TABLE IF NOT EXISTS messages (
   id           INTEGER PRIMARY KEY,
   session_key  TEXT NOT NULL,
@@ -73,10 +127,32 @@ CREATE TABLE IF NOT EXISTS user_data (
   updated_at  INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS session_tags (
+  session_key TEXT NOT NULL,
+  tag         TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT 'manual',
+  confidence  REAL,
+  updated_at  INTEGER,
+  PRIMARY KEY (session_key, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag, session_key);
+
+CREATE TABLE IF NOT EXISTS session_links (
+  parent_session_key TEXT NOT NULL,
+  child_session_key  TEXT NOT NULL,
+  relation           TEXT NOT NULL DEFAULT 'related',
+  source             TEXT NOT NULL DEFAULT 'manual',
+  created_at         INTEGER,
+  PRIMARY KEY (parent_session_key, child_session_key, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_session_links_child ON session_links(child_session_key);
+
 CREATE TABLE IF NOT EXISTS tombstones (
-  file_path  TEXT PRIMARY KEY,
-  key        TEXT,
-  deleted_at INTEGER
+  file_path          TEXT PRIMARY KEY,
+  key                TEXT,
+  deleted_at         INTEGER,
+  deleted_file_mtime INTEGER,
+  deleted_file_size  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS custom_roots (
@@ -111,6 +187,25 @@ CREATE TABLE IF NOT EXISTS disabled_locations (
   path        TEXT NOT NULL,
   disabled_at INTEGER,
   PRIMARY KEY (agent, path)
+);
+
+CREATE TABLE IF NOT EXISTS skill_project_roots (
+  path     TEXT PRIMARY KEY,
+  added_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mcp_server_clients (
+  server_id TEXT NOT NULL,
+  agent_id  TEXT NOT NULL,
+  enabled   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (server_id, agent_id),
+  FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS remote_hosts (
@@ -169,6 +264,38 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   tokenize="trigram case_sensitive 0"
 );
 
+-- ContextOS 自有压缩 Markdown 的派生全文索引。文件仍是真实来源；这里保存
+-- 可重建镜像，以便 GUI/MCP/CLI 共用 BM25、snippet 和关系扩展。
+CREATE TABLE IF NOT EXISTS compression_documents (
+  id           INTEGER PRIMARY KEY,
+  path         TEXT NOT NULL UNIQUE,
+  root_path    TEXT NOT NULL,
+  scope        TEXT NOT NULL,
+  project_path TEXT NOT NULL DEFAULT '',
+  title        TEXT NOT NULL DEFAULT '',
+  body         TEXT NOT NULL DEFAULT '',
+  sources      TEXT NOT NULL DEFAULT '[]',
+  modified_at  INTEGER NOT NULL DEFAULT 0,
+  size_bytes   INTEGER NOT NULL DEFAULT 0,
+  indexed_at   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_compression_documents_root
+  ON compression_documents(root_path, modified_at DESC);
+CREATE TABLE IF NOT EXISTS compression_document_sources (
+  document_id INTEGER NOT NULL,
+  session_key TEXT NOT NULL,
+  PRIMARY KEY (document_id, session_key)
+);
+CREATE INDEX IF NOT EXISTS idx_compression_document_sources_session
+  ON compression_document_sources(session_key, document_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS compression_documents_fts USING fts5(
+  path,
+  title,
+  body,
+  sources,
+  tokenize="trigram case_sensitive 0"
+);
+
 -- agent 查 Wake 的每一次调用(解析时从工具调用里认出,2026-09-17)。与 messages
 -- 同一事务写、同 key 删;channel = mcp | cli,tool = MCP 工具名或命令行二进制名,
 -- ts = 所在消息的时间(缺则 NULL,归窗时退回会话 updated_at)。老库首开由
@@ -182,6 +309,10 @@ CREATE TABLE IF NOT EXISTS wake_lookups (
 );
 CREATE INDEX IF NOT EXISTS idx_wake_lookups_session ON wake_lookups(session_key);
 "#;
+
+const WORKSPACE_TEXT_SNAPSHOT_LIMIT: usize = 1024 * 1024;
+const INDEX_WAL_CHECKPOINT_THRESHOLD: u64 = 8 * 1024 * 1024;
+const INDEX_WAL_VACUUM_THRESHOLD: u64 = 64 * 1024 * 1024;
 
 /// 会话元数据和 FTS 单元的派生规则版本(`adapters::units_from_messages` 及其上游解析)。改了派生
 /// 规则就换个值:旧库首开时挂 fts_reindex 旗子,下一轮扫描强制重解析全部文件。
@@ -210,9 +341,40 @@ fn open_conn(path: &Path) -> Result<Connection> {
     )?;
     conn.execute_batch(DDL)
         .context("failed to initialize SQLite schema")?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS workspace_change_session_links;
+         DROP TABLE IF EXISTS workspace_change_events;
+         DROP TABLE IF EXISTS workspace_file_state;
+         DROP TABLE IF EXISTS workspace_file_snapshots;
+         DROP TABLE IF EXISTS workspace_roots;",
+    )?;
+    if !table_has_column(&conn, "session_usage", "source")? {
+        conn.execute(
+            "ALTER TABLE session_usage ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy-session-usage'",
+            [],
+        )?;
+    }
+    if !table_has_column(&conn, "session_usage", "has_usage")? {
+        conn.execute(
+            "ALTER TABLE session_usage ADD COLUMN has_usage INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
     // tombstones.key 迁移(2026-08-24 加列,老库无此列;重复加列报错即忽略):
     // 墓碑按逻辑会话(key)+物理路径双轨屏蔽,多 location 副本不得复活已删会话
     let _ = conn.execute("ALTER TABLE tombstones ADD COLUMN key TEXT", []);
+    if !table_has_column(&conn, "tombstones", "deleted_file_mtime")? {
+        conn.execute(
+            "ALTER TABLE tombstones ADD COLUMN deleted_file_mtime INTEGER",
+            [],
+        )?;
+    }
+    if !table_has_column(&conn, "tombstones", "deleted_file_size")? {
+        conn.execute(
+            "ALTER TABLE tombstones ADD COLUMN deleted_file_size INTEGER",
+            [],
+        )?;
+    }
     if !table_has_column(&conn, "sessions", "parent_key")? {
         let tx = conn.transaction()?;
         tx.execute(
@@ -255,6 +417,34 @@ fn open_conn(path: &Path) -> Result<Connection> {
             params![FTS_FORMAT],
         )?;
     }
+    // Existing transcripts need one pass to populate the independent session
+    // change history without rewriting indexed session bodies.
+    let session_change_format: Option<String> = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'session_file_change_format'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if session_change_format.as_deref() != Some("1") {
+        let has_sessions: bool =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM sessions)", [], |r| r.get(0))?;
+        if sessions_existed && has_sessions {
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('session_file_change_backfill', '1')",
+                [],
+            )?;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('session_file_change_format', '1')",
+            [],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM schema_meta WHERE key IN
+         ('workspace_session_event_backfill', 'workspace_session_event_format')",
+        [],
+    )?;
     // host 迁移(2026-09-01 远程会话加列;空串 = 本地)。老库首扫时既有行
     // 全部落 '',与远程装饰器生产的非空 host 天然分域,无需回填
     if !table_has_column(&conn, "sessions", "host")? {
@@ -305,7 +495,7 @@ fn open_conn(path: &Path) -> Result<Connection> {
 const NEWEST_COLUMN: (&str, &str) = ("memories", "source");
 /// 最近一次迁移加的、只读读者会查的表(wake_list_memories 读 memories),与
 /// NEWEST_COLUMN 同一用途、同一维护规矩
-const NEWEST_TABLE: &str = "memories";
+const NEWEST_TABLE: &str = "compression_documents";
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -315,12 +505,28 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     )?)
 }
 
+fn has_tombstone_fingerprint_columns(conn: &Connection) -> Result<bool> {
+    Ok(table_has_column(conn, "tombstones", "deleted_file_mtime")?
+        && table_has_column(conn, "tombstones", "deleted_file_size")?)
+}
+
 /// 只读连接:不建表、不迁移、不改 journal_mode(旁路进程用;`open_read_only`
 /// 与只读 Store 的 insights 临时连接共用,别的入口不要直开)
 fn open_conn_ro(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+    Ok(conn)
+}
+
+/// 读写打开既有库，但不创建文件、不初始化 schema、不迁移，也不修改
+/// journal_mode。MCP/CLI 的业务写入口使用它，数据库生命周期仍归 GUI。
+fn open_conn_existing(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(std::time::Duration::from_millis(3000))?;
     Ok(conn)
@@ -374,6 +580,8 @@ pub struct Store {
     /// `open_read_only` 建的实例:所有连接(含 insights 的临时连接)都只读,
     /// 写方法在运行期报 SQLITE_READONLY
     read_only: bool,
+    tombstone_fingerprints: bool,
+    workspace_root_sources: bool,
 }
 
 impl Store {
@@ -383,6 +591,8 @@ impl Store {
             read: Mutex::new(open_conn(path)?),
             path: path.to_path_buf(),
             read_only: false,
+            tombstone_fingerprints: true,
+            workspace_root_sources: true,
         })
     }
 
@@ -401,19 +611,237 @@ impl Store {
         let read = open_conn_ro(path)?;
         if !table_has_column(&read, NEWEST_COLUMN.0, NEWEST_COLUMN.1)?
             || !table_exists(&read, NEWEST_TABLE)?
+            || !table_exists(&read, "session_usage")?
+            || !table_has_column(&read, "session_usage", "has_usage")?
+            || !table_has_column(&read, "session_usage", "source")?
         {
             anyhow::bail!(
                 "Wake index at {} is empty or from an older version — launch Wake once to upgrade it",
                 path.display()
             );
         }
+        let tombstone_fingerprints = has_tombstone_fingerprint_columns(&read)?;
+        let workspace_root_sources = table_has_column(&read, "workspace_roots", "source")?;
         Ok(Self {
             // Store 的形状要求有 write 连接;这里给的同样是只读句柄
             write: Mutex::new(open_conn_ro(path)?),
             read: Mutex::new(read),
             path: path.to_path_buf(),
             read_only: true,
+            tombstone_fingerprints,
+            workspace_root_sources,
         })
+    }
+
+    /// 读写打开现有且与当前二进制兼容的索引。与 `open_read_only` 一样，
+    /// 旁路进程无权创建、迁移、修复或重建数据库。
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        if !path.is_file() {
+            anyhow::bail!(
+                "no Wake index at {} — launch Wake once to build it",
+                path.display()
+            );
+        }
+        let read = open_conn_ro(path)?;
+        if !table_has_column(&read, NEWEST_COLUMN.0, NEWEST_COLUMN.1)?
+            || !table_exists(&read, NEWEST_TABLE)?
+            || !table_exists(&read, "session_usage")?
+            || !table_has_column(&read, "session_usage", "has_usage")?
+            || !table_has_column(&read, "session_usage", "source")?
+        {
+            anyhow::bail!(
+                "Wake index at {} is empty or from an older version — launch Wake once to upgrade it",
+                path.display()
+            );
+        }
+        let tombstone_fingerprints = has_tombstone_fingerprint_columns(&read)?;
+        let workspace_root_sources = table_has_column(&read, "workspace_roots", "source")?;
+        Ok(Self {
+            write: Mutex::new(open_conn_existing(path)?),
+            read: Mutex::new(read),
+            path: path.to_path_buf(),
+            read_only: false,
+            tombstone_fingerprints,
+            workspace_root_sources,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 用量同步只需在源文件指纹变化时解析;与会话索引游标分表维护。
+    pub fn session_usage_fingerprints(
+        &self,
+        agent: AgentId,
+    ) -> Result<HashMap<String, (i64, i64, String)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT file_path, file_mtime, file_size, source FROM session_usage WHERE agent_id = ?1",
+        )?;
+        let rows = stmt.query_map([agent.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get(1)?, row.get(2)?, row.get(3)?),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    pub fn write_session_usage(
+        &self,
+        file_path: &str,
+        agent: AgentId,
+        tokens: Option<i64>,
+        usage_events: &[SessionUsageEvent],
+        file_mtime: i64,
+        file_size: i64,
+        source: &str,
+    ) -> Result<()> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO session_usage(file_path, agent_id, tokens_used, has_usage, source, file_mtime, file_size, scanned_at)
+             VALUES (?1, ?2, COALESCE(?3,0), CASE WHEN ?3 IS NULL THEN 0 ELSE 1 END, ?4, ?5, ?6, ?7)
+             ON CONFLICT(file_path) DO UPDATE SET
+               agent_id = excluded.agent_id,
+               tokens_used = excluded.tokens_used,
+               has_usage = excluded.has_usage,
+               source = excluded.source,
+               file_mtime = excluded.file_mtime,
+               file_size = excluded.file_size,
+               scanned_at = excluded.scanned_at",
+            params![file_path, agent.as_str(), tokens.map(|value| value.max(0)), source, file_mtime, file_size, now_ms()],
+        )?;
+        tx.execute(
+            "DELETE FROM session_usage_events WHERE file_path = ?1",
+            [file_path],
+        )?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO session_usage_events(file_path, event_index, timestamp_ms, tokens_used, model)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (index, event) in usage_events.iter().enumerate() {
+                insert.execute(params![
+                    file_path,
+                    index as i64,
+                    event.timestamp,
+                    event.tokens_used.max(0),
+                    event.model,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 完整成功列举某 Agent 的所有文件后调用,清理已从磁盘消失的同步记录。
+    pub fn prune_session_usage(&self, agent: AgentId, live_paths: &[String]) -> Result<()> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        if live_paths.is_empty() {
+            tx.execute(
+                "DELETE FROM session_usage_events WHERE file_path IN (
+                    SELECT file_path FROM session_usage WHERE agent_id = ?1
+                 )",
+                [agent.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM session_usage WHERE agent_id = ?1",
+                [agent.as_str()],
+            )?;
+        } else {
+            let stale = format!(
+                "SELECT file_path FROM session_usage WHERE agent_id = ?1 AND file_path NOT IN ({})",
+                placeholders(live_paths.len())
+            );
+            let stale_params = || {
+                rusqlite::params_from_iter(
+                    std::iter::once(agent.as_str().to_string()).chain(live_paths.iter().cloned()),
+                )
+            };
+            tx.execute(
+                &format!("DELETE FROM session_usage_events WHERE file_path IN ({stale})"),
+                stale_params(),
+            )?;
+            tx.execute(
+                &format!("DELETE FROM session_usage WHERE file_path IN ({stale})"),
+                stale_params(),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_mcp_servers(&self) -> Result<Vec<crate::services::mcp::McpServer>> {
+        let conn = self.read.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT id, name, config_json FROM mcp_servers ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let config: String = row.get(2)?;
+            Ok(crate::services::mcp::McpServer {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                config: serde_json::from_str(&config).unwrap_or(serde_json::Value::Null),
+                clients: HashMap::new(),
+            })
+        })?;
+        let mut servers = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        drop(conn);
+
+        let conn = self.read.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT server_id, agent_id, enabled FROM mcp_server_clients ORDER BY agent_id",
+        )?;
+        let flags = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })?;
+        let flags = flags.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (server_id, agent, enabled) in flags {
+            if let Some(server) = servers.iter_mut().find(|server| server.id == server_id) {
+                server.clients.insert(agent, enabled);
+            }
+        }
+        Ok(servers)
+    }
+
+    pub fn save_mcp_server(&self, server: &crate::services::mcp::McpServer) -> Result<()> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let config = serde_json::to_string(&server.config)?;
+        tx.execute(
+            "INSERT INTO mcp_servers(id, name, config_json, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, config_json=excluded.config_json, updated_at=excluded.updated_at",
+            params![server.id, server.name, config, chrono::Utc::now().timestamp_millis()],
+        )?;
+        for (agent, enabled) in &server.clients {
+            tx.execute(
+                "INSERT INTO mcp_server_clients(server_id, agent_id, enabled) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(server_id, agent_id) DO UPDATE SET enabled=excluded.enabled",
+                params![server.id, agent, enabled],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_mcp_server(&self, id: &str) -> Result<()> {
+        self.write
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM mcp_servers WHERE id = ?1", [id])?;
+        self.write
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM mcp_server_clients WHERE server_id = ?1", [id])?;
+        Ok(())
     }
 
     /// 索引覆盖到的最新会话活动时间(epoch ms;空库 None)。wake-mcp 把它随
@@ -577,6 +1005,14 @@ impl Store {
         self.clear_meta_flag("fts_reindex")
     }
 
+    pub fn needs_session_file_change_backfill(&self) -> bool {
+        self.has_meta_flag("session_file_change_backfill")
+    }
+
+    pub fn finish_session_file_change_backfill(&self) -> Result<()> {
+        self.clear_meta_flag("session_file_change_backfill")
+    }
+
     /// 当前胜出副本的 `(key, file_path)`，scanner 用 file_path 把同一 agent
     /// 的多 location 会话交回真正拥有它的 adapter 快照。
     pub fn session_sources_for_agent(&self, agent: AgentId) -> Result<Vec<(String, String)>> {
@@ -700,27 +1136,47 @@ impl Store {
                     );
                 }
             }
-            let file_path: Option<String> = tx
+            let file: Option<(String, Option<i64>, i64)> = tx
                 .query_row(
-                    "SELECT file_path FROM sessions WHERE key = ?1",
+                    "SELECT file_path, file_mtime, file_size FROM sessions WHERE key = ?1",
                     params![key],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
             clear_session_rows(&tx, key)?;
+            if let Some((file_path, _, _)) = &file {
+                tx.execute(
+                    "DELETE FROM session_usage WHERE file_path = ?1",
+                    params![file_path],
+                )?;
+                tx.execute(
+                    "DELETE FROM session_usage_events WHERE file_path = ?1",
+                    params![file_path],
+                )?;
+            }
             tx.execute("DELETE FROM titles_fts WHERE key = ?1", params![key])?;
             tx.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
             if tombstone {
-                if let Some(fp) = file_path.or_else(|| {
+                if let Some((fp, mtime, size)) = file.or_else(|| {
                     recorded
                         .iter()
                         .find(|s| s.key == *key)
-                        .map(|s| s.file_path.clone())
+                        .map(|s| (s.file_path.clone(), None, s.size_bytes))
                 }) {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO tombstones(file_path, key, deleted_at) VALUES (?1, ?2, ?3)",
-                        params![fp, key, stamp],
-                    )?;
+                    if self.tombstone_fingerprints {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO tombstones(
+                               file_path, key, deleted_at, deleted_file_mtime, deleted_file_size
+                             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![fp, key, stamp, mtime, size],
+                        )?;
+                    } else {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO tombstones(file_path, key, deleted_at)
+                             VALUES (?1, ?2, ?3)",
+                            params![fp, key, stamp],
+                        )?;
+                    }
                 }
             }
         }
@@ -779,6 +1235,271 @@ impl Store {
                 now_ms()
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn session_tags(&self, key: &str) -> Result<Vec<String>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn
+            .prepare_cached("SELECT tag FROM session_tags WHERE session_key = ?1 ORDER BY tag")?;
+        let rows = stmt.query_map(params![key], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn session_tags_for(&self, keys: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT session_key, tag FROM session_tags
+             WHERE session_key IN ({})
+             ORDER BY session_key, tag",
+            placeholders(keys.len())
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (key, tag) = row?;
+            out.entry(key).or_default().push(tag);
+        }
+        Ok(out)
+    }
+
+    pub fn set_session_tag(&self, key: &str, tag: &str, enabled: bool) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        if enabled {
+            conn.execute(
+                "INSERT INTO session_tags(session_key, tag, source, confidence, updated_at)
+                 VALUES (?1, ?2, 'manual', 1.0, ?3)
+                 ON CONFLICT(session_key, tag) DO UPDATE SET
+                   source = 'manual',
+                   confidence = 1.0,
+                   updated_at = excluded.updated_at",
+                params![key, tag, now_ms()],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM session_tags WHERE session_key = ?1 AND tag = ?2",
+                params![key, tag],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn session_tag_counts(&self, include_archived: bool) -> Result<Vec<(String, i64)>> {
+        let conn = self.read.lock().unwrap();
+        let archived = if include_archived {
+            ""
+        } else {
+            "WHERE s.archived = 0"
+        };
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT t.tag, COUNT(*)
+             FROM session_tags t
+             JOIN sessions s ON s.key = t.session_key
+             {archived}
+             GROUP BY t.tag
+             ORDER BY t.tag"
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_session_link(&self, parent: &str, child: &str, relation: &str) -> Result<()> {
+        if parent == child {
+            anyhow::bail!("a session cannot link to itself");
+        }
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_links(parent_session_key, child_session_key, relation, source, created_at)
+             VALUES (?1, ?2, ?3, 'manual', ?4)
+             ON CONFLICT(parent_session_key, child_session_key, relation) DO UPDATE SET
+               source = 'manual',
+               created_at = excluded.created_at",
+            params![parent, child, relation, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_link_source(
+        &self,
+        parent: &str,
+        child: &str,
+        relation: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.read.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT source FROM session_links
+                 WHERE parent_session_key = ?1 AND child_session_key = ?2 AND relation = ?3",
+                params![parent, child, relation],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn update_session_link_relation(
+        &self,
+        parent: &str,
+        child: &str,
+        old_relation: &str,
+        new_relation: &str,
+    ) -> Result<()> {
+        if parent == child {
+            anyhow::bail!("a session cannot link to itself");
+        }
+        let conn = self.write.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM session_links
+             WHERE parent_session_key = ?1 AND child_session_key = ?2 AND relation = ?3",
+            params![parent, child, old_relation],
+        )?;
+        tx.execute(
+            "INSERT INTO session_links(parent_session_key, child_session_key, relation, source, created_at)
+             VALUES (?1, ?2, ?3, 'manual', ?4)
+             ON CONFLICT(parent_session_key, child_session_key, relation) DO UPDATE SET
+               source = 'manual',
+               created_at = excluded.created_at",
+            params![parent, child, new_relation, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_session_link(&self, parent: &str, child: &str, relation: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "DELETE FROM session_links
+             WHERE parent_session_key = ?1 AND child_session_key = ?2 AND relation = ?3",
+            params![parent, child, relation],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_link_counts(&self, key: &str) -> Result<(i64, i64)> {
+        let conn = self.read.lock().unwrap();
+        let parents = conn.query_row(
+            "SELECT COUNT(*) FROM session_links WHERE child_session_key = ?1",
+            params![key],
+            |r| r.get(0),
+        )?;
+        let children = conn.query_row(
+            "SELECT COUNT(*) FROM session_links WHERE parent_session_key = ?1",
+            params![key],
+            |r| r.get(0),
+        )?;
+        Ok((parents, children))
+    }
+
+    pub fn session_relationships(
+        &self,
+        key: &str,
+    ) -> Result<(Vec<SessionRelation>, Vec<SessionRelation>)> {
+        let conn = self.read.lock().unwrap();
+        let parent_sql = format!(
+            "SELECT l.relation, l.source, {SESSION_COLS}
+             FROM session_links l
+             JOIN sessions s ON s.key = l.parent_session_key
+             LEFT JOIN user_data u ON u.session_key = s.key
+             WHERE l.child_session_key = ?1
+             ORDER BY l.created_at DESC, s.updated_at DESC"
+        );
+        let child_sql = format!(
+            "SELECT l.relation, l.source, {SESSION_COLS}
+             FROM session_links l
+             JOIN sessions s ON s.key = l.child_session_key
+             LEFT JOIN user_data u ON u.session_key = s.key
+             WHERE l.parent_session_key = ?1
+             ORDER BY l.created_at DESC, s.updated_at DESC"
+        );
+        let mut parent_stmt = conn.prepare_cached(&parent_sql)?;
+        let parents = parent_stmt
+            .query_map(params![key], relation_row_to_meta)?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut child_stmt = conn.prepare_cached(&child_sql)?;
+        let children = child_stmt
+            .query_map(params![key], relation_row_to_meta)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((parents, children))
+    }
+
+    pub fn all_session_relationships(&self) -> Result<Vec<SessionRelationEdge>> {
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT l.relation, l.source, {parent_cols}, {child_cols}
+             FROM session_links l
+             JOIN sessions p ON p.key = l.parent_session_key
+             LEFT JOIN user_data pu ON pu.session_key = p.key
+             JOIN sessions c ON c.key = l.child_session_key
+             LEFT JOIN user_data cu ON cu.session_key = c.key
+             ORDER BY l.created_at DESC, p.updated_at DESC, c.updated_at DESC",
+            parent_cols = SESSION_COLS.replace("s.", "p.").replace("u.", "pu."),
+            child_cols = SESSION_COLS.replace("s.", "c.").replace("u.", "cu."),
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SessionRelationEdge {
+                relation: row.get(0)?,
+                source: row.get(1)?,
+                parent: relation_session_meta(row, 2)?,
+                child: relation_session_meta(row, 21)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn session_relationship_tree(
+        &self,
+        key: &str,
+        max_depth: usize,
+    ) -> Result<(Vec<SessionRelationNode>, Vec<SessionRelationNode>)> {
+        let mut parent_tree = Vec::new();
+        let mut child_tree = Vec::new();
+        let mut seen_parents = HashSet::from([key.to_string()]);
+        let mut seen_children = HashSet::from([key.to_string()]);
+        self.push_relationship_tree(key, max_depth, 1, true, &mut seen_parents, &mut parent_tree)?;
+        self.push_relationship_tree(
+            key,
+            max_depth,
+            1,
+            false,
+            &mut seen_children,
+            &mut child_tree,
+        )?;
+        Ok((parent_tree, child_tree))
+    }
+
+    fn push_relationship_tree(
+        &self,
+        key: &str,
+        max_depth: usize,
+        depth: usize,
+        parents: bool,
+        seen: &mut HashSet<String>,
+        out: &mut Vec<SessionRelationNode>,
+    ) -> Result<()> {
+        if depth > max_depth {
+            return Ok(());
+        }
+        let (parent_links, child_links) = self.session_relationships(key)?;
+        let links = if parents { parent_links } else { child_links };
+        for link in links {
+            if !seen.insert(link.session.key.clone()) {
+                continue;
+            }
+            let next_key = link.session.key.clone();
+            out.push(SessionRelationNode {
+                depth,
+                relation: link.relation,
+                session: link.session,
+            });
+            self.push_relationship_tree(&next_key, max_depth, depth + 1, parents, seen, out)?;
+        }
         Ok(())
     }
 
@@ -1215,6 +1936,144 @@ impl Store {
         Ok(map)
     }
 
+    /// Perform bounded maintenance after a successful session scan.
+    ///
+    /// Session writes intentionally replace derived rows, so a crash or an
+    /// older binary can leave orphaned FTS/index rows behind. Repair those
+    /// rows here, after the scan has released all write transactions. WAL
+    /// checkpointing is threshold-based; an unconditional VACUUM would make
+    /// every refresh expensive and would create needless SSD writes.
+    pub fn compact_after_scan(&self, force_vacuum: bool) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+
+        let wal_path = std::path::PathBuf::from(format!("{}-wal", self.path.display()));
+        let wal_bytes = std::fs::metadata(&wal_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut cleaned = 0usize;
+
+        cleaned += tx.execute(
+            "DELETE FROM titles_fts
+             WHERE key NOT IN (SELECT key FROM sessions)",
+            [],
+        )?;
+        cleaned += tx.execute(
+            "DELETE FROM memories_fts
+             WHERE rowid NOT IN (SELECT id FROM memories)",
+            [],
+        )?;
+        cleaned += tx.execute(
+            "DELETE FROM compression_documents_fts
+             WHERE rowid NOT IN (SELECT id FROM compression_documents)",
+            [],
+        )?;
+        cleaned += tx.execute(
+            "DELETE FROM wake_lookups
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sessions WHERE sessions.key = wake_lookups.session_key
+             )",
+            [],
+        )?;
+        cleaned += tx.execute(
+            "DELETE FROM session_usage_events
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM session_usage
+                 WHERE session_usage.file_path = session_usage_events.file_path
+             )",
+            [],
+        )?;
+
+        let orphan_messages: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sessions WHERE sessions.key = messages.session_key
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if orphan_messages > 0 {
+            cleaned += tx.execute(
+                "DELETE FROM messages
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM sessions WHERE sessions.key = messages.session_key
+                 )",
+                [],
+            )?;
+        }
+
+        let messages_fts_mismatch: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM messages m
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM messages_fts f WHERE f.rowid = m.id
+                )
+            ) OR EXISTS(
+                SELECT 1 FROM messages_fts f
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM messages m WHERE m.id = f.rowid
+                )
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if orphan_messages > 0 || messages_fts_mismatch {
+            tx.execute("DELETE FROM messages_fts", [])?;
+            tx.execute(
+                "INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')",
+                [],
+            )?;
+            cleaned += 1;
+        }
+
+        let titles_fts_mismatch: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sessions s
+                WHERE s.title != '' AND NOT EXISTS(
+                    SELECT 1 FROM titles_fts t WHERE t.key = s.key
+                )
+            ) OR EXISTS(
+                SELECT 1 FROM titles_fts t
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM sessions s WHERE s.key = t.key
+                )
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if titles_fts_mismatch {
+            tx.execute("DELETE FROM titles_fts", [])?;
+            tx.execute(
+                "INSERT INTO titles_fts(key, title)
+                 SELECT key, title FROM sessions WHERE title != ''",
+                [],
+            )?;
+            cleaned += 1;
+        }
+
+        tx.commit()?;
+        drop(conn);
+
+        let checkpoint_needed = cleaned > 0 || wal_bytes >= INDEX_WAL_CHECKPOINT_THRESHOLD;
+        let vacuum_needed = force_vacuum || cleaned > 0 || wal_bytes >= INDEX_WAL_VACUUM_THRESHOLD;
+
+        let conn = self.write.lock().unwrap();
+        conn.execute_batch("PRAGMA optimize")?;
+        if checkpoint_needed {
+            // Step the pragma so SQLite actually performs the checkpoint. The
+            // returned busy/page counts are diagnostic only.
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        }
+        if vacuum_needed {
+            conn.execute_batch("VACUUM")?;
+        }
+        Ok(())
+    }
+
     /// 逻辑会话级墓碑:同 key 的任何副本(别的 location 里的拷贝)都不得
     /// 让已删会话复活(2026-08-24 Codex review P1,不变量 3 的多副本延伸)
     pub fn is_key_tombstoned(&self, key: &str) -> bool {
@@ -1239,6 +2098,68 @@ impl Store {
         .optional()
         .map(|o| o.is_some())
         .unwrap_or(false)
+    }
+
+    /// Returns whether a tombstone still matches this exact file snapshot. A
+    /// changed file at the tombstoned path is treated as a revived session.
+    /// Legacy tombstones without a snapshot remain hidden until explicitly
+    /// restored, since their prior file state cannot be inferred safely.
+    pub fn is_session_tombstoned(
+        &self,
+        key: &str,
+        file_path: &str,
+        file_mtime: i64,
+        file_size: i64,
+    ) -> Result<bool> {
+        let rows: Vec<(String, Option<i64>, Option<i64>, i64)> = {
+            let conn = self.read.lock().unwrap();
+            if self.tombstone_fingerprints {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT file_path, deleted_file_mtime, deleted_file_size, deleted_at
+                     FROM tombstones WHERE key = ?1 OR file_path = ?2",
+                )?;
+                let rows = stmt
+                    .query_map(params![key, file_path], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                rows
+            } else {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT file_path, deleted_at FROM tombstones
+                     WHERE key = ?1 OR file_path = ?2",
+                )?;
+                let rows = stmt
+                    .query_map(params![key, file_path], |row| {
+                        Ok((row.get(0)?, None, None, row.get(1)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                rows
+            }
+        };
+        if rows.is_empty() {
+            return Ok(false);
+        }
+
+        let changed = rows.iter().any(|(deleted_path, mtime, size, deleted_at)| {
+            if !same_tombstone_path(deleted_path, file_path) {
+                return false;
+            }
+            match mtime.zip(*size) {
+                Some((mtime, size)) => mtime != file_mtime || size != file_size,
+                None => file_mtime > *deleted_at,
+            }
+        });
+        if !changed {
+            return Ok(true);
+        }
+
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "DELETE FROM tombstones WHERE key = ?1 OR file_path = ?2",
+            params![key, file_path],
+        )?;
+        Ok(false)
     }
 
     pub fn list_sessions(&self, f: &SessionFilter) -> Result<(Vec<SessionMeta>, i64)> {
@@ -1270,9 +2191,12 @@ impl Store {
             (true, SortKey::Updated, true) => ROOT_UPDATED_ALL,
             (true, SortKey::Messages, false) => ROOT_MESSAGES_ACTIVE,
             (true, SortKey::Messages, true) => ROOT_MESSAGES_ALL,
+            (true, SortKey::Tokens, false) => ROOT_TOKENS_ACTIVE,
+            (true, SortKey::Tokens, true) => ROOT_TOKENS_ALL,
             (_, SortKey::Updated, _) => "s.updated_at",
             (_, SortKey::Created, _) => "s.created_at",
             (_, SortKey::Messages, _) => "s.message_count",
+            (_, SortKey::Tokens, _) => "COALESCE(s.tokens_used, 0)",
         };
         let order_dir = if f.ascending { "ASC" } else { "DESC" };
         let pin_order = pin_order(f);
@@ -1346,6 +2270,7 @@ impl Store {
             SortKey::Updated => "s.updated_at",
             SortKey::Created => "s.created_at",
             SortKey::Messages => "s.message_count",
+            SortKey::Tokens => "COALESCE(s.tokens_used, 0)",
         };
         let order_dir = if f.ascending { "ASC" } else { "DESC" };
         let pin_order = pin_order(f);
@@ -1449,6 +2374,463 @@ impl Store {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    pub fn list_workspace_roots(&self) -> Result<Vec<WorkspaceRoot>> {
+        let conn = self.read.lock().unwrap();
+        let sql = if self.workspace_root_sources {
+            "SELECT path, name FROM workspace_roots WHERE source = 'manual' ORDER BY lower(name), lower(path)"
+        } else {
+            // A sidecar MCP/CLI may open a database before the GUI has run
+            // the lightweight schema migration. Treat legacy rows as hidden
+            // here; the GUI will classify them as session_seed on next open.
+            "SELECT path, name FROM workspace_roots WHERE 0"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(WorkspaceRoot {
+                path: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn list_workspace_roots_for_watcher(&self) -> Result<Vec<(WorkspaceRoot, bool)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, name, imported_at FROM workspace_roots
+             WHERE source = 'manual' ORDER BY lower(name), lower(path)",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                WorkspaceRoot {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                },
+                row.get::<_, Option<i64>>(2)?.is_some(),
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn mark_workspace_root_imported(&self, path: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "UPDATE workspace_roots SET imported_at = ?1
+             WHERE path = ?2 COLLATE NOCASE AND source = 'manual'",
+            params![now_ms(), path],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_workspace_root(&self, path: &Path) -> Result<WorkspaceRoot> {
+        let canonical = std::fs::canonicalize(path)
+            .with_context(|| format!("could not resolve workspace path {}", path.display()))?;
+        anyhow::ensure!(
+            canonical.is_dir(),
+            "workspace path is not a directory: {}",
+            canonical.display()
+        );
+        let path = canonical.to_string_lossy().to_string();
+        let name = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&path)
+            .to_string();
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT INTO workspace_roots(path, name, added_at, source, imported_at)
+             VALUES (?1, ?2, ?3, 'manual', NULL)
+             ON CONFLICT(path) DO UPDATE SET
+               name = excluded.name, source = 'manual', imported_at = NULL",
+            params![path, name, now_ms()],
+        )?;
+        let (path, name) = conn.query_row(
+            "SELECT path, name FROM workspace_roots WHERE path = ?1 COLLATE NOCASE",
+            params![path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        Ok(WorkspaceRoot { path, name })
+    }
+
+    pub fn remove_workspace_root(&self, path: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "DELETE FROM workspace_roots WHERE path = ?1 COLLATE NOCASE",
+            params![path],
+        )?;
+        Ok(())
+    }
+
+    /// Persist an observed file state and emit an event when its content differs
+    /// from the last indexed state. Initial imports use the same snapshot/event
+    /// path as live changes, matching ZFileTimeMachine's activity model.
+    pub fn observe_workspace_file(
+        &self,
+        project_path: &str,
+        file_path: &str,
+        observation: WorkspaceFileObservation,
+        mode: WorkspaceObservationMode,
+        observed_at: i64,
+    ) -> Result<Option<WorkspaceChangeEvent>> {
+        Ok(self
+            .observe_workspace_files(
+                project_path,
+                vec![(file_path.to_string(), observation)],
+                mode,
+                observed_at,
+            )?
+            .into_iter()
+            .next())
+    }
+
+    pub fn observe_workspace_files(
+        &self,
+        project_path: &str,
+        observations: Vec<(String, WorkspaceFileObservation)>,
+        mode: WorkspaceObservationMode,
+        observed_at: i64,
+    ) -> Result<Vec<WorkspaceChangeEvent>> {
+        anyhow::ensure!(!project_path.is_empty(), "workspace project path is empty");
+        anyhow::ensure!(
+            observations.iter().all(|(path, _)| !path.is_empty()),
+            "workspace file path is empty"
+        );
+
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut events = Vec::new();
+        for (file_path, observation) in observations {
+            let previous: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT content_hash, size_bytes FROM workspace_file_state
+                     WHERE project_path = ?1 COLLATE NOCASE
+                       AND file_path = ?2 COLLATE NOCASE",
+                    params![project_path, file_path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+
+            let event = match observation {
+                WorkspaceFileObservation::Present {
+                    bytes,
+                    file_mtime,
+                    capture_text,
+                } => {
+                    let hash = format!("{:x}", Sha256::digest(&bytes));
+                    let size_bytes = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+                    let text_content = (capture_text
+                        && bytes.len() <= WORKSPACE_TEXT_SNAPSHOT_LIMIT
+                        && !bytes.contains(&0)
+                        && std::str::from_utf8(&bytes).is_ok())
+                    .then_some(bytes.as_slice());
+                    tx.execute(
+                        "INSERT OR IGNORE INTO workspace_file_snapshots
+                           (content_hash, content, is_text, size_bytes, captured_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            hash,
+                            text_content,
+                            text_content.is_some() as i64,
+                            size_bytes,
+                            observed_at
+                        ],
+                    )?;
+
+                    let kind = if mode == WorkspaceObservationMode::Import {
+                        Some(WorkspaceChangeKind::Created)
+                    } else {
+                        match previous.as_ref() {
+                            Some((previous_hash, _)) if previous_hash == &hash => None,
+                            Some(_) => Some(WorkspaceChangeKind::Modified),
+                            None => Some(WorkspaceChangeKind::Created),
+                        }
+                    };
+                    let event = if kind.is_some()
+                        && (mode == WorkspaceObservationMode::Import || previous.is_some())
+                    {
+                        Some(insert_workspace_change(
+                            &tx,
+                            project_path,
+                            &file_path,
+                            kind.unwrap(),
+                            observed_at,
+                            (mode != WorkspaceObservationMode::Import)
+                                .then(|| previous.as_ref().map(|(hash, _)| hash.as_str()))
+                                .flatten(),
+                            Some(&hash),
+                        )?)
+                    } else {
+                        None
+                    };
+
+                    tx.execute(
+                        "DELETE FROM workspace_file_state
+                         WHERE project_path = ?1 COLLATE NOCASE
+                           AND file_path = ?2 COLLATE NOCASE",
+                        params![project_path, file_path],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO workspace_file_state
+                           (project_path, file_path, content_hash, file_mtime, size_bytes, observed_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(project_path, file_path) DO UPDATE SET
+                           content_hash = excluded.content_hash,
+                           file_mtime = excluded.file_mtime,
+                           size_bytes = excluded.size_bytes,
+                           observed_at = excluded.observed_at",
+                        params![project_path, file_path, hash, file_mtime, size_bytes, observed_at],
+                    )?;
+                    event
+                }
+                WorkspaceFileObservation::Deleted => {
+                    let event = if let Some((previous_hash, _)) = previous.as_ref() {
+                        tx.execute(
+                            "DELETE FROM workspace_file_state WHERE project_path = ?1 AND file_path = ?2",
+                            params![project_path, file_path],
+                        )?;
+                        Some(insert_workspace_change(
+                            &tx,
+                            project_path,
+                            &file_path,
+                            WorkspaceChangeKind::Deleted,
+                            observed_at,
+                            Some(previous_hash),
+                            None,
+                        )?)
+                    } else {
+                        None
+                    };
+                    event
+                }
+            };
+            if let Some(event) = event {
+                events.push(event);
+            }
+        }
+        tx.commit()?;
+        Ok(events)
+    }
+
+    pub fn list_workspace_file_paths(&self, project_path: &str) -> Result<Vec<String>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT file_path FROM workspace_file_state WHERE project_path = ?1 COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![project_path], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delete_workspace_files(
+        &self,
+        project_path: &str,
+        file_paths: &[String],
+        observed_at: i64,
+    ) -> Result<Vec<WorkspaceChangeEvent>> {
+        anyhow::ensure!(!project_path.is_empty(), "workspace project path is empty");
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut events = Vec::new();
+        for file_path in file_paths {
+            let hash: Option<String> = tx
+                .query_row(
+                    "SELECT content_hash FROM workspace_file_state
+                     WHERE project_path = ?1 COLLATE NOCASE
+                       AND file_path = ?2 COLLATE NOCASE",
+                    params![project_path, file_path],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(hash) = hash else {
+                continue;
+            };
+            tx.execute(
+                "DELETE FROM workspace_file_state
+                 WHERE project_path = ?1 COLLATE NOCASE AND file_path = ?2 COLLATE NOCASE",
+                params![project_path, file_path],
+            )?;
+            events.push(insert_workspace_change(
+                &tx,
+                project_path,
+                file_path,
+                WorkspaceChangeKind::Deleted,
+                observed_at,
+                Some(&hash),
+                None,
+            )?);
+        }
+        tx.commit()?;
+        Ok(events)
+    }
+
+    /// Record a removed file or directory and all indexed descendants.
+    pub fn delete_workspace_path(
+        &self,
+        project_path: &str,
+        file_path: &str,
+        observed_at: i64,
+    ) -> Result<Vec<WorkspaceChangeEvent>> {
+        anyhow::ensure!(!project_path.is_empty(), "workspace project path is empty");
+
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "SELECT file_path, content_hash FROM workspace_file_state
+             WHERE project_path = ?1 COLLATE NOCASE
+               AND (?2 = '' OR file_path = ?2
+                    OR substr(file_path, 1, length(?2) + 1) = ?2 || '/')",
+        )?;
+        let rows = stmt.query_map(params![project_path, file_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let files = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut events = Vec::with_capacity(files.len());
+        for (path, hash) in files {
+            tx.execute(
+                "DELETE FROM workspace_file_state
+                 WHERE project_path = ?1 COLLATE NOCASE AND file_path = ?2 COLLATE NOCASE",
+                params![project_path, path],
+            )?;
+            events.push(insert_workspace_change(
+                &tx,
+                project_path,
+                &path,
+                WorkspaceChangeKind::Deleted,
+                observed_at,
+                Some(&hash),
+                None,
+            )?);
+        }
+        tx.commit()?;
+        Ok(events)
+    }
+
+    /// List one project's timeline newest-first. `before` is the last
+    /// (observed_at, id) pair from the previous page.
+    pub fn list_workspace_change_events(
+        &self,
+        project_path: &str,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        before: Option<(i64, i64)>,
+        limit: i64,
+    ) -> Result<Vec<WorkspaceChangeEvent>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, project_path, file_path, change_kind, observed_at,
+                    before_hash, after_hash
+             FROM workspace_change_events
+             WHERE project_path = ?1 COLLATE NOCASE
+               AND (?2 IS NULL OR observed_at >= ?2)
+               AND (?3 IS NULL OR observed_at < ?3)
+               AND (?4 IS NULL OR observed_at < ?4 OR (observed_at = ?4 AND id < ?5))
+             ORDER BY observed_at DESC, id DESC LIMIT ?6",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                project_path,
+                from_ms,
+                to_ms,
+                before.map(|(timestamp, _)| timestamp),
+                before.map(|(_, id)| id),
+                limit.clamp(1, 500)
+            ],
+            |row| {
+                let kind: String = row.get(3)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    kind,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (id, project_path, file_path, kind, observed_at, before_hash, after_hash) =
+                row?;
+            Ok(WorkspaceChangeEvent {
+                id,
+                project_path,
+                file_path,
+                kind: WorkspaceChangeKind::parse(&kind)?,
+                observed_at,
+                before_hash,
+                after_hash,
+            })
+        })
+        .collect()
+    }
+
+    pub fn workspace_change_detail(&self, id: i64) -> Result<Option<WorkspaceChangeDetail>> {
+        let conn = self.read.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT e.id, e.project_path, e.file_path, e.change_kind,
+                        e.observed_at, e.before_hash, e.after_hash,
+                        before.content, after.content
+                 FROM workspace_change_events e
+                 LEFT JOIN workspace_file_snapshots before ON before.content_hash = e.before_hash
+                 LEFT JOIN workspace_file_snapshots after ON after.content_hash = e.after_hash
+                 WHERE e.id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(7)?,
+                        row.get::<_, Option<Vec<u8>>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(
+            |(
+                id,
+                project_path,
+                file_path,
+                kind,
+                observed_at,
+                before_hash,
+                after_hash,
+                before_text,
+                after_text,
+            )| {
+                Ok(WorkspaceChangeDetail {
+                    event: WorkspaceChangeEvent {
+                        id,
+                        project_path,
+                        file_path,
+                        kind: WorkspaceChangeKind::parse(&kind)?,
+                        observed_at,
+                        before_hash,
+                        after_hash,
+                    },
+                    before_text: before_text
+                        .map(String::from_utf8)
+                        .transpose()
+                        .context("stored workspace snapshot is not UTF-8")?,
+                    after_text: after_text
+                        .map(String::from_utf8)
+                        .transpose()
+                        .context("stored workspace snapshot is not UTF-8")?,
+                })
+            },
+        )
+        .transpose()
     }
 
     pub fn starred_count(&self) -> Result<i64> {
@@ -1575,6 +2957,40 @@ impl Store {
             .into_iter()
             .map(PathBuf::from)
             .collect())
+    }
+
+    // ---------- Skill project folders ----------
+
+    /// Project roots explicitly added from the Skills page. Only the roots are persisted;
+    /// Skill contents remain filesystem-backed.
+    pub fn list_skill_project_roots(&self) -> Result<Vec<PathBuf>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt =
+            conn.prepare_cached("SELECT path FROM skill_project_roots ORDER BY added_at, path")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Returns true when a new root was inserted and false when it was already present.
+    pub fn add_skill_project_root(&self, path: &Path) -> Result<bool> {
+        let conn = self.write.lock().unwrap();
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO skill_project_roots(path, added_at) VALUES (?1, ?2)",
+            params![path.to_string_lossy(), now_ms()],
+        )? > 0)
+    }
+
+    pub fn remove_skill_project_root(&self, path: &Path) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "DELETE FROM skill_project_roots WHERE path = ?1",
+            params![path.to_string_lossy()],
+        )?;
+        Ok(())
     }
 
     // ---------- 记忆来源配置(Settings → Memory locations) ----------
@@ -1939,6 +3355,14 @@ impl Store {
     /// prompts),量级几十万行、几十毫秒——调用方走后台任务,别在 UI
     /// 线程等它。
     pub fn insights(&self, today: chrono::NaiveDate) -> Result<InsightsData> {
+        self.insights_for_agent(today, None)
+    }
+
+    pub fn insights_for_agent(
+        &self,
+        today: chrono::NaiveDate,
+        agent: Option<AgentId>,
+    ) -> Result<InsightsData> {
         use chrono::Datelike as _;
         // SQL 侧 date() 出来的本地日 → 可进分桶的日。时钟漂移的脏数据可能带
         // 未来日期:不进任何分桶(prompts 总数无日期语义仍计入)。热力图不画
@@ -1970,15 +3394,7 @@ impl Store {
         // 不能把一份对话数两遍(2026-09-14,0.4.0 遗留)。算一次放临时表——这条
         // 连接是本次调用私有的,只读连接也能建 temp 表;内联成子查询的话下面
         // 七条语句会各排一遍序
-        conn.execute_batch(
-            "CREATE TEMP TABLE canonical_sessions AS
-             SELECT key FROM (
-                 SELECT key, ROW_NUMBER() OVER (
-                     PARTITION BY agent_id, native_id, created_at,
-                                  CASE WHEN created_at > 0 THEN '' ELSE key END
-                     ORDER BY updated_at DESC, host) AS rn
-                 FROM sessions WHERE archived = 0) WHERE rn = 1",
-        )?;
+        create_canonical_sessions(&conn, agent)?;
         let mut data = InsightsData {
             as_of: today,
             // Agents asking Wake:窗同 Last 7 days,按调用时刻归窗;与其余语句同一
@@ -1993,12 +3409,23 @@ impl Store {
             data.first_ts,
             data.project_count,
         ) = conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(tokens_used),0),
+            "SELECT COUNT(*), COALESCE(SUM(
+                       CASE WHEN u.has_usage = 1 THEN u.tokens_used
+                            ELSE COALESCE(s.tokens_used,0) END),0),
                     COALESCE(MIN(NULLIF(created_at,0)),0),
                     COUNT(DISTINCT NULLIF(project_path,''))
-             FROM sessions WHERE archived = 0 AND key IN canonical_sessions",
+             FROM sessions s LEFT JOIN session_usage u ON u.file_path = s.file_path
+             WHERE s.archived = 0 AND s.key IN canonical_sessions",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        (data.scanned_tokens, data.session_tokens) = conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN u.has_usage = 1 THEN u.tokens_used ELSE 0 END),0),
+                    COALESCE(SUM(COALESCE(s.tokens_used,0)),0)
+             FROM sessions s LEFT JOIN session_usage u ON u.file_path = s.file_path
+             WHERE s.archived = 0 AND s.key IN canonical_sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
 
         // 第一遍:按(日,时)组合分桶(行数 = 活跃日×活跃时段,千级)。
@@ -2097,20 +3524,28 @@ impl Store {
                      prompts: &HashMap<String, i64>|
          -> Result<Vec<UsageTally>> {
             let sql = format!(
-                "SELECT {display}, {group}, COUNT(*), COALESCE(SUM(s.tokens_used),0)
-                 FROM sessions s WHERE s.archived = 0 AND s.key IN canonical_sessions{filter}
+                "SELECT {group}, {display}, COUNT(*), COALESCE(SUM(
+                     CASE WHEN u.has_usage = 1 THEN u.tokens_used
+                          ELSE COALESCE(s.tokens_used,0) END),0),
+                     COALESCE(SUM(CASE WHEN u.has_usage = 1 THEN u.tokens_used ELSE 0 END),0),
+                     COALESCE(SUM(COALESCE(s.tokens_used,0)),0)
+                 FROM sessions s LEFT JOIN session_usage u ON u.file_path = s.file_path
+                 WHERE s.archived = 0 AND s.key IN canonical_sessions{filter}
                  GROUP BY {group} ORDER BY COUNT(*) DESC, {display}"
             );
             let mut stmt = conn.prepare_cached(&sql)?;
             let rows = stmt.query_map([], |r| {
                 Ok((
                     UsageTally {
-                        name: r.get(0)?,
+                        key: r.get(0)?,
+                        name: r.get(1)?,
                         sessions: r.get(2)?,
                         tokens: r.get(3)?,
+                        scanned_tokens: r.get(4)?,
+                        session_tokens: r.get(5)?,
                         prompts: 0,
                     },
-                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(0)?,
                 ))
             })?;
             rows.map(|row| {
@@ -2159,6 +3594,499 @@ impl Store {
 
         (data.current_streak, data.longest_streak) = compute_streaks(&data.daily, today);
         Ok(data)
+    }
+
+    /// 在统一的时间范围内统计 Insights。会话按范围内的用户发言判断活跃，
+    /// Token 按逐请求事件时间归属；无时间戳事件不进入日期范围统计。
+    pub fn insights_for_agent_range(
+        &self,
+        today: chrono::NaiveDate,
+        agent: Option<AgentId>,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) -> Result<InsightsData> {
+        use chrono::{Datelike as _, Local, TimeZone as _};
+        let mut data = self.insights_for_agent(today, agent)?;
+        let conn = if self.read_only {
+            open_conn_ro(&self.path)?
+        } else {
+            open_conn(&self.path)?
+        };
+        create_canonical_sessions(&conn, agent)?;
+        conn.execute(
+            "CREATE TEMP TABLE active_sessions AS
+             SELECT DISTINCT s.key FROM sessions s
+             JOIN messages m ON m.session_key = s.key
+             WHERE s.key IN canonical_sessions AND m.role = 'user'
+               AND m.sidechain_id IS NULL
+               AND (?1 IS NULL OR m.ts > 0)
+               AND (?1 IS NULL OR m.ts >= ?1)
+               AND (?2 IS NULL OR m.ts IS NULL OR m.ts = 0 OR m.ts < ?2)",
+            params![start_ms, end_ms],
+        )?;
+        conn.execute(
+            "CREATE INDEX idx_active_sessions_key ON active_sessions(key)",
+            [],
+        )?;
+
+        data.sessions = conn.query_row("SELECT COUNT(*) FROM active_sessions", [], |r| r.get(0))?;
+        data.project_count = conn.query_row(
+            "SELECT COUNT(DISTINCT NULLIF(s.project_path,''))
+             FROM sessions s JOIN active_sessions a ON a.key = s.key",
+            [],
+            |r| r.get(0),
+        )?;
+        data.prompts = 0;
+        data.range_active_days = 0;
+        data.hourly = [0; 24];
+        data.weekday = [0; 7];
+        data.monthly = [0; 12];
+        let mut active_days = HashSet::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT CASE WHEN m.ts > 0 THEN date(m.ts/1000,'unixepoch','localtime') END d,
+                        CASE WHEN m.ts > 0 THEN CAST(strftime('%H', m.ts/1000,'unixepoch','localtime') AS INTEGER) END h,
+                        COUNT(*)
+                 FROM messages m JOIN sessions s ON s.key = m.session_key
+                 WHERE s.key IN canonical_sessions AND m.role = 'user'
+                   AND m.sidechain_id IS NULL
+                   AND (?1 IS NULL OR m.ts > 0)
+                   AND (?1 IS NULL OR m.ts >= ?1)
+                   AND (?2 IS NULL OR m.ts IS NULL OR m.ts = 0 OR m.ts < ?2)
+                 GROUP BY d, h ORDER BY d",
+            )?;
+            let rows = stmt.query_map(params![start_ms, end_ms], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (date, hour, count) = row?;
+                data.prompts += count;
+                let (Some(date), Some(hour)) = (date, hour) else {
+                    continue;
+                };
+                let Ok(date) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
+                    continue;
+                };
+                if date > today {
+                    continue;
+                }
+                data.hourly[hour.clamp(0, 23) as usize] += count;
+                data.weekday[date.weekday().num_days_from_monday() as usize] += count;
+                data.monthly[date.month0() as usize] += count;
+                active_days.insert(date);
+            }
+        }
+        data.range_active_days = active_days.len() as i64;
+
+        data.hourly_tokens = [0; 24];
+        data.weekday_tokens = [0; 7];
+        data.monthly_tokens = [0; 12];
+        data.weekly_tokens = vec![0; TREND_WEEKS];
+        {
+            let mut stmt = conn.prepare(
+                "SELECT date(e.timestamp_ms/1000,'unixepoch','localtime'),
+                        CAST(strftime('%H', e.timestamp_ms/1000,'unixepoch','localtime') AS INTEGER),
+                        SUM(e.tokens_used)
+                 FROM session_usage_events e JOIN sessions s ON s.file_path = e.file_path
+                 WHERE s.key IN canonical_sessions AND e.timestamp_ms IS NOT NULL
+                   AND e.timestamp_ms > 0
+                   AND (?1 IS NULL OR e.timestamp_ms >= ?1)
+                   AND (?2 IS NULL OR e.timestamp_ms < ?2)
+                 GROUP BY 1, 2 ORDER BY 1",
+            )?;
+            let rows = stmt.query_map(params![start_ms, end_ms], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (date, hour, tokens) = row?;
+                let Ok(date) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
+                    continue;
+                };
+                if date > today {
+                    continue;
+                }
+                data.hourly_tokens[hour.clamp(0, 23) as usize] += tokens;
+                data.weekday_tokens[date.weekday().num_days_from_monday() as usize] += tokens;
+                data.monthly_tokens[date.month0() as usize] += tokens;
+                if let Some(ix) = trend_week_index(today, date) {
+                    data.weekly_tokens[ix] += tokens;
+                }
+            }
+        }
+
+        let mut agent_sessions: HashMap<String, i64> = HashMap::new();
+        let mut project_sessions: HashMap<String, (String, i64)> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.agent_id, s.project_path, MAX(s.project_name), COUNT(DISTINCT s.key)
+                 FROM sessions s JOIN active_sessions a ON a.key = s.key
+                 GROUP BY s.agent_id, s.project_path",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (agent_id, path, name, count) = row?;
+                *agent_sessions.entry(agent_id).or_default() += count;
+                if !path.is_empty() {
+                    project_sessions.insert(path, (name, count));
+                }
+            }
+        }
+
+        let mut agent_prompts = HashMap::new();
+        let mut project_prompts = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.agent_id, s.project_path, COUNT(*)
+                 FROM messages m JOIN sessions s ON s.key = m.session_key
+                 WHERE s.key IN canonical_sessions AND m.role = 'user'
+                   AND m.sidechain_id IS NULL
+                   AND (?1 IS NULL OR m.ts > 0)
+                   AND (?1 IS NULL OR m.ts >= ?1)
+                   AND (?2 IS NULL OR m.ts IS NULL OR m.ts = 0 OR m.ts < ?2)
+                 GROUP BY s.agent_id, s.project_path",
+            )?;
+            let rows = stmt.query_map(params![start_ms, end_ms], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (agent_id, path, count) = row?;
+                *agent_prompts.entry(agent_id).or_insert(0) += count;
+                if !path.is_empty() {
+                    *project_prompts.entry(path).or_insert(0) += count;
+                }
+            }
+        }
+
+        let mut agent_tokens = HashMap::new();
+        let mut project_tokens = HashMap::new();
+        let mut model_tokens = HashMap::new();
+        let mut model_sessions: HashMap<String, HashSet<String>> = HashMap::new();
+        data.tokens = 0;
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.agent_id, s.project_path, COALESCE(e.model,''), s.key, e.tokens_used
+                 FROM session_usage_events e JOIN sessions s ON s.file_path = e.file_path
+                 WHERE s.key IN canonical_sessions AND e.timestamp_ms IS NOT NULL
+                   AND e.timestamp_ms > 0
+                   AND (?1 IS NULL OR e.timestamp_ms >= ?1)
+                   AND (?2 IS NULL OR e.timestamp_ms < ?2)",
+            )?;
+            let rows = stmt.query_map(params![start_ms, end_ms], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (agent_id, path, model, session_key, tokens) = row?;
+                data.tokens += tokens;
+                *agent_tokens.entry(agent_id).or_insert(0) += tokens;
+                if !path.is_empty() {
+                    *project_tokens.entry(path).or_insert(0) += tokens;
+                }
+                if !model.is_empty() {
+                    *model_tokens.entry(model.clone()).or_insert(0) += tokens;
+                    model_sessions.entry(model).or_default().insert(session_key);
+                }
+            }
+        }
+
+        let mut agent_names: HashSet<String> = agent_sessions.keys().cloned().collect();
+        agent_names.extend(agent_tokens.keys().cloned());
+        data.agents = agent_names
+            .into_iter()
+            .map(|key| UsageTally {
+                name: key.clone(),
+                key: key.clone(),
+                sessions: agent_sessions.get(&key).copied().unwrap_or(0),
+                prompts: agent_prompts.get(&key).copied().unwrap_or(0),
+                tokens: agent_tokens.get(&key).copied().unwrap_or(0),
+                ..Default::default()
+            })
+            .collect();
+        data.agents.sort_by(|a, b| {
+            b.sessions
+                .cmp(&a.sessions)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        let mut project_keys: HashSet<String> = project_sessions.keys().cloned().collect();
+        project_keys.extend(project_tokens.keys().cloned());
+        data.projects = project_keys
+            .into_iter()
+            .map(|key| {
+                let (name, sessions) = project_sessions
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| (key.clone(), 0));
+                UsageTally {
+                    key: key.clone(),
+                    name,
+                    sessions,
+                    prompts: project_prompts.get(&key).copied().unwrap_or(0),
+                    tokens: project_tokens.get(&key).copied().unwrap_or(0),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        data.projects.sort_by(|a, b| {
+            b.sessions
+                .cmp(&a.sessions)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        data.models = model_tokens
+            .into_iter()
+            .map(|(name, tokens)| UsageTally {
+                key: name.clone(),
+                name: name.clone(),
+                sessions: model_sessions
+                    .get(&name)
+                    .map_or(0, |sessions| sessions.len() as i64),
+                tokens,
+                ..Default::default()
+            })
+            .collect();
+        data.models
+            .sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.name.cmp(&b.name)));
+
+        data.daily_tokens.clear();
+        let heat_start = data
+            .trend_start()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|dt| Local.from_local_datetime(&dt).single())
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0);
+        let heat_end = Local::now().timestamp_millis();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT date(e.timestamp_ms/1000,'unixepoch','localtime'), SUM(e.tokens_used)
+                 FROM session_usage_events e JOIN sessions s ON s.file_path = e.file_path
+                 WHERE s.key IN canonical_sessions AND e.timestamp_ms IS NOT NULL
+                   AND e.timestamp_ms >= ?1 AND e.timestamp_ms < ?2
+                 GROUP BY 1 ORDER BY 1",
+            )?;
+            let rows = stmt.query_map(params![heat_start, heat_end], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (date, tokens) = row?;
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+                    data.daily_tokens.push((date, tokens));
+                }
+            }
+        }
+
+        data.trend_agents.clear();
+        let mut weekly: HashMap<String, Vec<i64>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.agent_id, date(m.ts/1000,'unixepoch','localtime'), COUNT(*)
+                 FROM messages m JOIN sessions s ON s.key = m.session_key
+                 WHERE s.key IN canonical_sessions AND m.role = 'user'
+                   AND m.sidechain_id IS NULL AND m.ts > 0
+                   AND (?1 IS NULL OR m.ts >= ?1) AND (?2 IS NULL OR m.ts < ?2)
+                 GROUP BY s.agent_id, 2",
+            )?;
+            let rows = stmt.query_map(params![start_ms, end_ms], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (agent_id, date, count) = row?;
+                let Ok(date) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
+                    continue;
+                };
+                if let Some(ix) = trend_week_index(today, date) {
+                    weekly
+                        .entry(agent_id)
+                        .or_insert_with(|| vec![0; TREND_WEEKS])[ix] += count;
+                }
+            }
+        }
+        data.trend_agents = weekly
+            .into_iter()
+            .map(|(name, weekly)| TrendSeries { name, weekly })
+            .collect();
+        data.trend_agents
+            .sort_by(|a, b| b.total().cmp(&a.total()).then_with(|| a.name.cmp(&b.name)));
+
+        data.wake_lookups_7d.clear();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.agent_id, SUM(l.channel = 'mcp'), SUM(l.channel = 'cli')
+                 FROM wake_lookups l JOIN sessions s ON s.key = l.session_key
+                 WHERE s.key IN canonical_sessions
+                   AND COALESCE(l.ts, s.updated_at) >= COALESCE(?1, 0)
+                   AND COALESCE(l.ts, s.updated_at) < COALESCE(?2, 9223372036854775807)
+                 GROUP BY s.agent_id ORDER BY COUNT(*) DESC, s.agent_id",
+            )?;
+            let rows = stmt.query_map(params![start_ms, end_ms], |r| {
+                Ok(LookupTally {
+                    name: r.get(0)?,
+                    mcp: r.get(1)?,
+                    cli: r.get(2)?,
+                })
+            })?;
+            data.wake_lookups_7d = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        Ok(data)
+    }
+
+    /// 选中日所在周期的细分分布(热力图点击联动的数据源)。一次查询覆盖三档
+    /// 视图:`day_hours`(当天逐时 24 桶)、`week_days`(所在周逐日 7 桶)、
+    /// `month_days`(所在月逐日)。口径与 insights() 同:主线 user 消息、
+    /// archived 不计、未来时间戳不认;无 ts 的行无周期可归,自然缺席
+    pub fn period_breakdown(&self, day: chrono::NaiveDate) -> Result<PeriodBreakdown> {
+        self.period_breakdown_for_agent(day, None)
+    }
+
+    pub fn period_breakdown_for_agent(
+        &self,
+        day: chrono::NaiveDate,
+        agent: Option<AgentId>,
+    ) -> Result<PeriodBreakdown> {
+        use chrono::{Datelike as _, Days};
+        // 三个视图各自的窗口:当天 / 周一~周日 / 月初~月末。查询窗取三者并集
+        // ——月初那周的周一周二落在上月,月末那周的周末落在下月,只按当月开窗
+        // 会让 week_days 的两端日漏数
+        let monday = day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64);
+        let month_start = day.with_day(1).unwrap_or(day);
+        let next_month = if month_start.month() == 12 {
+            chrono::NaiveDate::from_ymd_opt(month_start.year() + 1, 1, 1)
+        } else {
+            chrono::NaiveDate::from_ymd_opt(month_start.year(), month_start.month() + 1, 1)
+        }
+        .unwrap_or(month_start + Days::new(31));
+        let month_end = next_month - Days::new(1);
+        let week_end = monday + Days::new(6);
+        let (lo, hi_day) = (monday.min(month_start), week_end.max(month_end));
+        // 本地日历日 → epoch 秒。`'localtime'`(SQL 侧)与 chrono::Local 同取
+        // 系统时区,日界与 insights() 一致
+        let secs = |d: chrono::NaiveDate, h: u32| {
+            use chrono::TimeZone as _;
+            chrono::Local
+                .with_ymd_and_hms(d.year(), d.month(), d.day(), h, 0, 0)
+                .single()
+                .map(|dt| dt.timestamp())
+                .unwrap_or(0)
+        };
+        let conn = if self.read_only {
+            open_conn_ro(&self.path)?
+        } else {
+            open_conn(&self.path)?
+        };
+        create_canonical_sessions(&conn, agent)?;
+        // (时, 日) 两列一次扫;落哪个视图由 Rust 侧按窗口归属切分,窗口外的行
+        // (跨月补白)不落任何桶
+        let mut stmt = conn.prepare_cached(
+            "SELECT CASE WHEN m.ts > 0 THEN CAST(strftime('%H', m.ts/1000,'unixepoch','localtime') AS INTEGER) END h,
+                    CASE WHEN m.ts > 0 THEN date(m.ts/1000,'unixepoch','localtime') END d,
+                    COUNT(*)
+             FROM messages m JOIN sessions s ON s.key = m.session_key
+             WHERE s.archived = 0 AND m.role = 'user' AND m.sidechain_id IS NULL
+               AND s.key IN canonical_sessions
+               AND m.ts >= ?1 AND m.ts < ?2
+             GROUP BY 1, 2",
+        )?;
+        let mut out = PeriodBreakdown {
+            day,
+            ..Default::default()
+        };
+        let rows = stmt.query_map(
+            params![secs(lo, 0) * 1000, secs(hi_day, 23) * 1000 + 3_600_000],
+            |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (h, d, n) = row?;
+            let Some(d) = d
+                .as_deref()
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            else {
+                continue;
+            };
+            if h.is_none() {
+                continue;
+            }
+            let h = h.unwrap().clamp(0, 23) as usize;
+            if d == day {
+                out.day_hours[h] += n;
+            }
+            let week_ix = (d - monday).num_days();
+            if (0..7).contains(&week_ix) {
+                out.week_days[week_ix as usize] += n;
+            }
+            let month_ix = (d - month_start).num_days();
+            if (0..31).contains(&month_ix) {
+                out.month_days[month_ix as usize] += n;
+            }
+        }
+        drop(stmt);
+
+        let mut token_rows = conn.prepare_cached(
+            "SELECT CAST(strftime('%H', e.timestamp_ms/1000,'unixepoch','localtime') AS INTEGER) h,
+                    date(e.timestamp_ms/1000,'unixepoch','localtime') d,
+                    SUM(e.tokens_used)
+             FROM session_usage_events e JOIN sessions s ON s.file_path = e.file_path
+             WHERE e.timestamp_ms IS NOT NULL AND s.archived = 0
+               AND s.key IN canonical_sessions
+               AND e.timestamp_ms >= ?1 AND e.timestamp_ms < ?2
+             GROUP BY h, d",
+        )?;
+        let mut token_rows = token_rows.query(params![
+            secs(lo, 0) * 1000,
+            secs(hi_day + Days::new(1), 0) * 1000
+        ])?;
+        while let Some(row) = token_rows.next()? {
+            let hour: i64 = row.get(0)?;
+            let date: String = row.get(1)?;
+            let tokens: i64 = row.get(2)?;
+            let Some(date) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok() else {
+                continue;
+            };
+            if date == day {
+                out.day_hour_tokens[hour.clamp(0, 23) as usize] += tokens;
+            }
+            let week_ix = (date - monday).num_days();
+            if (0..7).contains(&week_ix) {
+                out.week_day_tokens[week_ix as usize] += tokens;
+            }
+            let month_ix = (date - month_start).num_days();
+            if (0..31).contains(&month_ix) {
+                out.month_day_tokens[month_ix as usize] += tokens;
+            }
+        }
+        Ok(out)
     }
 
     /// 全文搜索:trigram MATCH(每段 ≥3 码点)或 LIKE 降级。返回 (hits, degraded)
@@ -2401,6 +4329,435 @@ impl Store {
         }
         Ok((hits, degraded))
     }
+
+    pub fn compression_document_fingerprints(
+        &self,
+        roots: &[String],
+    ) -> Result<HashMap<String, (i64, i64)>> {
+        if roots.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT path, modified_at, size_bytes FROM compression_documents WHERE root_path IN ({})",
+            placeholders(roots.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(roots), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// Synchronize the rebuildable compression-document mirror for the roots scanned by
+    /// the caller. `documents` contains only new or changed files; `seen_paths` includes
+    /// unchanged files as well, so files removed from disk can be deleted transactionally.
+    pub fn sync_compression_documents(
+        &self,
+        roots: &[String],
+        seen_paths: &HashSet<String>,
+        documents: &[CompressionDocumentRecord],
+    ) -> Result<usize> {
+        if roots.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let sql = format!(
+            "SELECT id, path FROM compression_documents WHERE root_path IN ({})",
+            placeholders(roots.len())
+        );
+        let existing = {
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(roots), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, path) in existing {
+            if seen_paths.contains(&path) {
+                continue;
+            }
+            tx.execute(
+                "DELETE FROM compression_document_sources WHERE document_id = ?1",
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM compression_documents_fts WHERE rowid = ?1",
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM compression_documents WHERE id = ?1",
+                params![id],
+            )?;
+        }
+
+        for document in documents {
+            let sources_json = serde_json::to_string(&document.sources)?;
+            let id: i64 = tx.query_row(
+                "INSERT INTO compression_documents(
+                   path, root_path, scope, project_path, title, body, sources,
+                   modified_at, size_bytes, indexed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(path) DO UPDATE SET
+                   root_path=excluded.root_path, scope=excluded.scope,
+                   project_path=excluded.project_path, title=excluded.title,
+                   body=excluded.body, sources=excluded.sources,
+                   modified_at=excluded.modified_at, size_bytes=excluded.size_bytes,
+                   indexed_at=excluded.indexed_at
+                 RETURNING id",
+                params![
+                    document.path,
+                    document.root_path,
+                    document.scope,
+                    document.project_path,
+                    document.title,
+                    document.body,
+                    sources_json,
+                    document.modified_at,
+                    document.size_bytes,
+                    now_ms(),
+                ],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "DELETE FROM compression_document_sources WHERE document_id = ?1",
+                params![id],
+            )?;
+            for source in &document.sources {
+                tx.execute(
+                    "INSERT OR IGNORE INTO compression_document_sources(document_id, session_key)
+                     VALUES (?1, ?2)",
+                    params![id, source],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM compression_documents_fts WHERE rowid = ?1",
+                params![id],
+            )?;
+            tx.execute(
+                "INSERT INTO compression_documents_fts(rowid, path, title, body, sources)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id,
+                    document.path,
+                    document.title,
+                    document.body,
+                    document.sources.join("\n"),
+                ],
+            )?;
+        }
+        tx.commit()?;
+
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT COUNT(*) FROM compression_documents WHERE root_path IN ({})",
+            placeholders(roots.len())
+        );
+        Ok(
+            conn.query_row(&sql, rusqlite::params_from_iter(roots), |row| {
+                row.get::<_, i64>(0)
+            })? as usize,
+        )
+    }
+
+    pub fn get_compression_document(
+        &self,
+        path: &str,
+    ) -> Result<Option<CompressionDocumentRecord>> {
+        let conn = self.read.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT path, root_path, scope, project_path, title, body, sources,
+                        modified_at, size_bytes
+                 FROM compression_documents WHERE path = ?1",
+                params![path],
+                compression_document_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn compression_documents_for_sessions(
+        &self,
+        session_keys: &[String],
+    ) -> Result<Vec<(String, String, String)>> {
+        if session_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT cds.session_key, d.path, d.title
+             FROM compression_document_sources cds
+             JOIN compression_documents d ON d.id = cds.document_id
+             WHERE cds.session_key IN ({})
+             ORDER BY d.modified_at DESC, d.path",
+            placeholders(session_keys.len())
+        );
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(session_keys), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn last_exchange(&self, key: &str) -> Result<(Option<String>, Option<String>)> {
+        let conn = self.read.lock().unwrap();
+        let last = |role: &str, limit: i64| -> Result<Option<String>> {
+            let mut stmt = conn.prepare_cached(
+                "SELECT text FROM messages WHERE session_key = ?1 AND sidechain_id IS NULL AND role = ?2 ORDER BY id DESC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![key, role, limit], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let value = row?;
+                let value = value.trim();
+                if !value.is_empty() && !value.starts_with('<') && !value.starts_with('[') {
+                    return Ok(Some(value.chars().take(320).collect()));
+                }
+            }
+            Ok(None)
+        };
+        Ok((last("user", 50)?, last("assistant", 200)?))
+    }
+
+    pub fn search_compression_documents(
+        &self,
+        query: &str,
+        roots: &[String],
+        limit: usize,
+    ) -> Result<(Vec<CompressionSearchHit>, bool)> {
+        if roots.is_empty() || limit == 0 {
+            return Ok((Vec::new(), false));
+        }
+        let segments = fts_terms(query);
+        let degraded = !segments.is_empty() && needs_like_fallback(&segments);
+        let roots_sql = placeholders(roots.len());
+        let conn = self.read.lock().unwrap();
+        let mut hits = Vec::new();
+
+        if segments.is_empty() {
+            let sql = format!(
+                "SELECT path, scope, project_path, title, body, sources, modified_at
+                 FROM compression_documents WHERE root_path IN ({roots_sql})
+                 ORDER BY modified_at DESC, path LIMIT ?"
+            );
+            let mut args: Vec<Box<dyn rusqlite::ToSql>> = roots
+                .iter()
+                .cloned()
+                .map(|root| Box::new(root) as _)
+                .collect();
+            args.push(Box::new(limit as i64));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())),
+                compression_hit_from_plain_row,
+            )?;
+            hits.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+            return Ok((hits, false));
+        }
+
+        if !degraded {
+            let sql = format!(
+                "SELECT d.path, d.scope, d.project_path,
+                        highlight(compression_documents_fts, 1, ?, ?),
+                        snippet(compression_documents_fts, 2, ?, ?, '…', 24),
+                        d.sources, d.modified_at,
+                        -bm25(compression_documents_fts, 2.0, 5.0, 1.0, 2.0)
+                 FROM compression_documents_fts
+                 JOIN compression_documents d ON d.id = compression_documents_fts.rowid
+                 WHERE compression_documents_fts MATCH ?
+                   AND d.root_path IN ({roots_sql})
+                 ORDER BY bm25(compression_documents_fts, 2.0, 5.0, 1.0, 2.0),
+                          d.modified_at DESC LIMIT ?"
+            );
+            let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(HL_OPEN.to_string()),
+                Box::new(HL_CLOSE.to_string()),
+                Box::new(HL_OPEN.to_string()),
+                Box::new(HL_CLOSE.to_string()),
+                Box::new(fts_match_expr(&segments)),
+            ];
+            args.extend(roots.iter().cloned().map(|root| Box::new(root) as _));
+            args.push(Box::new(limit as i64));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())),
+                compression_hit_from_search_row,
+            )?;
+            hits.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        } else {
+            let like = like_where(
+                &["d.path", "d.title", "d.body", "d.sources"],
+                segments.len(),
+            );
+            let sql = format!(
+                "SELECT d.path, d.scope, d.project_path, d.title, d.body, d.sources,
+                        d.modified_at
+                 FROM compression_documents d
+                 WHERE {like} AND d.root_path IN ({roots_sql})
+                 ORDER BY d.modified_at DESC LIMIT ?"
+            );
+            let mut args = like_args(&segments, 4);
+            args.extend(roots.iter().cloned().map(|root| Box::new(root) as _));
+            args.push(Box::new(limit as i64));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())),
+                |row| {
+                    let body = row.get::<_, String>(4)?;
+                    Ok(CompressionSearchHit {
+                        path: row.get(0)?,
+                        scope: row.get(1)?,
+                        project_path: row.get(2)?,
+                        title: mark_like_match(&row.get::<_, String>(3)?, segments[0]),
+                        snippet: make_like_snippet(&body, segments[0]),
+                        sources: parse_compression_sources(&row.get::<_, String>(5)?),
+                        modified_at: row.get(6)?,
+                        score: 0.0,
+                        direct_match: true,
+                        related_by: Vec::new(),
+                    })
+                },
+            )?;
+            hits.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok((hits, degraded))
+    }
+
+    pub fn compression_documents_by_sources(
+        &self,
+        source_keys: &[String],
+        roots: &[String],
+        excluded_paths: &HashSet<String>,
+        limit: usize,
+    ) -> Result<Vec<(CompressionSearchHit, String)>> {
+        if source_keys.is_empty() || roots.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT d.path, d.scope, d.project_path, d.title, d.body, d.sources,
+                    d.modified_at, cds.session_key
+             FROM compression_document_sources cds
+             JOIN compression_documents d ON d.id = cds.document_id
+             WHERE cds.session_key IN ({}) AND d.root_path IN ({})
+             ORDER BY d.modified_at DESC LIMIT ?",
+            placeholders(source_keys.len()),
+            placeholders(roots.len())
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = source_keys
+            .iter()
+            .cloned()
+            .map(|key| Box::new(key) as _)
+            .collect();
+        args.extend(roots.iter().cloned().map(|root| Box::new(root) as _));
+        args.push(Box::new((limit.saturating_mul(3)) as i64));
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())),
+            |row| {
+                let body = row.get::<_, String>(4)?;
+                Ok((
+                    CompressionSearchHit {
+                        path: row.get(0)?,
+                        scope: row.get(1)?,
+                        project_path: row.get(2)?,
+                        title: row.get(3)?,
+                        snippet: compression_body_preview(&body),
+                        sources: parse_compression_sources(&row.get::<_, String>(5)?),
+                        modified_at: row.get(6)?,
+                        score: 0.0,
+                        direct_match: false,
+                        related_by: Vec::new(),
+                    },
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )?;
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for row in rows {
+            let (hit, source) = row?;
+            if excluded_paths.contains(&hit.path) || !seen.insert(hit.path.clone()) {
+                continue;
+            }
+            out.push((hit, source));
+            if out.len() == limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn parse_compression_sources(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn compression_document_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CompressionDocumentRecord> {
+    Ok(CompressionDocumentRecord {
+        path: row.get(0)?,
+        root_path: row.get(1)?,
+        scope: row.get(2)?,
+        project_path: row.get(3)?,
+        title: row.get(4)?,
+        body: row.get(5)?,
+        sources: parse_compression_sources(&row.get::<_, String>(6)?),
+        modified_at: row.get(7)?,
+        size_bytes: row.get(8)?,
+    })
+}
+
+fn compression_body_preview(body: &str) -> String {
+    body.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn compression_hit_from_plain_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CompressionSearchHit> {
+    let body = row.get::<_, String>(4)?;
+    Ok(CompressionSearchHit {
+        path: row.get(0)?,
+        scope: row.get(1)?,
+        project_path: row.get(2)?,
+        title: row.get(3)?,
+        snippet: compression_body_preview(&body),
+        sources: parse_compression_sources(&row.get::<_, String>(5)?),
+        modified_at: row.get(6)?,
+        score: 0.0,
+        direct_match: true,
+        related_by: Vec::new(),
+    })
+}
+
+fn compression_hit_from_search_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CompressionSearchHit> {
+    Ok(CompressionSearchHit {
+        path: row.get(0)?,
+        scope: row.get(1)?,
+        project_path: row.get(2)?,
+        title: row.get(3)?,
+        snippet: row.get(4)?,
+        sources: parse_compression_sources(&row.get::<_, String>(5)?),
+        modified_at: row.get(6)?,
+        score: row.get(7)?,
+        direct_match: true,
+        related_by: Vec::new(),
+    })
+}
+
+fn mark_like_match(text: &str, needle: &str) -> String {
+    make_like_snippet(text, needle)
 }
 
 const SESSION_COLS: &str =
@@ -2425,6 +4782,14 @@ const ROOT_MESSAGES_ACTIVE: &str =
 const ROOT_MESSAGES_ALL: &str =
     "s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
       WHERE c.parent_key = s.key), 0)";
+/// token 与消息数同形制:根自带的加上活跃/全部子会话的。没报 token 的行
+/// (tokens_used 为 NULL)当 0——排序沉底,列表值展示也让位给"未报"语义
+const ROOT_TOKENS_ACTIVE: &str =
+    "COALESCE(s.tokens_used, 0) + COALESCE((SELECT SUM(c.tokens_used) FROM sessions c
+      WHERE c.parent_key = s.key AND c.archived = 0), 0)";
+const ROOT_TOKENS_ALL: &str =
+    "COALESCE(s.tokens_used, 0) + COALESCE((SELECT SUM(c.tokens_used) FROM sessions c
+      WHERE c.parent_key = s.key), 0)";
 const ROOT_SESSION_COLS_ACTIVE: &str =
     "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
      s.git_branch, s.created_at,
@@ -2432,7 +4797,9 @@ const ROOT_SESSION_COLS_ACTIVE: &str =
        WHERE c.parent_key = s.key AND c.archived = 0), 0)),
      s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
        WHERE c.parent_key = s.key AND c.archived = 0), 0),
-     s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
+     COALESCE(s.tokens_used, 0) + COALESCE((SELECT SUM(c.tokens_used) FROM sessions c
+       WHERE c.parent_key = s.key AND c.archived = 0), 0),
+     s.model, s.source, s.archived, s.file_path, s.file_size,
      COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
 const ROOT_SESSION_COLS_ALL: &str =
     "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
@@ -2441,8 +4808,62 @@ const ROOT_SESSION_COLS_ALL: &str =
        WHERE c.parent_key = s.key), 0)),
      s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
        WHERE c.parent_key = s.key), 0),
-     s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
+     COALESCE(s.tokens_used, 0) + COALESCE((SELECT SUM(c.tokens_used) FROM sessions c
+       WHERE c.parent_key = s.key), 0),
+     s.model, s.source, s.archived, s.file_path, s.file_size,
      COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
+
+fn relation_row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRelation> {
+    Ok(SessionRelation {
+        relation: row.get(0)?,
+        source: row.get(1)?,
+        session: SessionMeta {
+            key: row.get(2)?,
+            agent: AgentId::from_str(&row.get::<_, String>(3)?).unwrap_or(AgentId::Codex),
+            id: row.get(4)?,
+            title: row.get(5)?,
+            project_path: row.get(6)?,
+            project_name: row.get(7)?,
+            git_branch: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            message_count: row.get(11)?,
+            tokens_used: row.get(12)?,
+            model: row.get(13)?,
+            source: row.get(14)?,
+            archived: row.get::<_, i64>(15)? != 0,
+            file_path: row.get(16)?,
+            size_bytes: row.get(17)?,
+            favorite: row.get::<_, i64>(18)? != 0,
+            pinned: row.get::<_, i64>(19)? != 0,
+            host: row.get(20)?,
+        },
+    })
+}
+
+fn relation_session_meta(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<SessionMeta> {
+    Ok(SessionMeta {
+        key: row.get(offset)?,
+        agent: AgentId::from_str(&row.get::<_, String>(offset + 1)?).unwrap_or(AgentId::Codex),
+        id: row.get(offset + 2)?,
+        title: row.get(offset + 3)?,
+        project_path: row.get(offset + 4)?,
+        project_name: row.get(offset + 5)?,
+        git_branch: row.get(offset + 6)?,
+        created_at: row.get(offset + 7)?,
+        updated_at: row.get(offset + 8)?,
+        message_count: row.get(offset + 9)?,
+        tokens_used: row.get(offset + 10)?,
+        model: row.get(offset + 11)?,
+        source: row.get(offset + 12)?,
+        archived: row.get::<_, i64>(offset + 13)? != 0,
+        file_path: row.get(offset + 14)?,
+        size_bytes: row.get(offset + 15)?,
+        favorite: row.get::<_, i64>(offset + 16)? != 0,
+        pinned: row.get::<_, i64>(offset + 17)? != 0,
+        host: row.get(offset + 18)?,
+    })
+}
 
 fn child_filter_sql(
     filter: &SessionFilter,
@@ -2499,6 +4920,24 @@ fn push_session_filters(
         ));
         for p in &f.project_paths {
             args.push(Box::new(p.clone()));
+        }
+    }
+    if !f.tags.is_empty() {
+        wheres.push(format!(
+            "EXISTS (
+               SELECT 1 FROM session_tags st
+               WHERE st.session_key = s.key AND st.tag IN ({})
+             )",
+            placeholders(f.tags.len())
+        ));
+        for tag in &f.tags {
+            args.push(Box::new(tag.clone()));
+        }
+    }
+    if !f.models.is_empty() {
+        wheres.push(format!("s.model IN ({})", placeholders(f.models.len())));
+        for m in &f.models {
+            args.push(Box::new(m.clone()));
         }
     }
     if let Some(t) = f.updated_since {
@@ -2705,6 +5144,23 @@ fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         pinned: r.get::<_, i64>(17)? == 1,
         host: r.get(18)?,
     })
+}
+
+/// Insights 与日期细分共用的会话范围:去重远程副本,并可选限制到一家 Agent。
+fn create_canonical_sessions(conn: &Connection, agent: Option<AgentId>) -> Result<()> {
+    conn.execute(
+        "CREATE TEMP TABLE canonical_sessions AS
+         SELECT key FROM (
+             SELECT key, ROW_NUMBER() OVER (
+                 PARTITION BY agent_id, native_id, created_at,
+                              CASE WHEN created_at > 0 THEN '' ELSE key END
+                 ORDER BY updated_at DESC, host) AS rn
+             FROM sessions WHERE archived = 0
+               AND (?1 IS NULL OR agent_id = ?1)
+         ) WHERE rn = 1",
+        params![agent.map(|agent| agent.as_str())],
+    )?;
+    Ok(())
 }
 
 /// Insights 的 "Agents asking Wake":各家 agent 在 `since_ms` 之后查 Wake 的次数,按接入
@@ -2973,39 +5429,70 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+fn insert_workspace_change(
+    tx: &rusqlite::Transaction<'_>,
+    project_path: &str,
+    file_path: &str,
+    kind: WorkspaceChangeKind,
+    observed_at: i64,
+    before_hash: Option<&str>,
+    after_hash: Option<&str>,
+) -> Result<WorkspaceChangeEvent> {
+    tx.execute(
+        "INSERT INTO workspace_change_events
+           (project_path, file_path, change_kind, observed_at, before_hash, after_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            project_path,
+            file_path,
+            kind.as_str(),
+            observed_at,
+            before_hash,
+            after_hash
+        ],
+    )?;
+    let change_id = tx.last_insert_rowid();
+    Ok(WorkspaceChangeEvent {
+        id: change_id,
+        project_path: project_path.to_string(),
+        file_path: file_path.to_string(),
+        kind,
+        observed_at,
+        before_hash: before_hash.map(str::to_string),
+        after_hash: after_hash.map(str::to_string),
+    })
+}
+
+fn same_tombstone_path(left: &str, right: &str) -> bool {
+    let normalize = |path: &str| {
+        let path = path.replace('\\', "/");
+        path.strip_prefix("//?/").unwrap_or(&path).to_string()
+    };
+    let left = normalize(left);
+    let right = normalize(right);
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(&right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 /// `--db` 给了就用它,否则取 GUI 那份。调用点一律**惰性**求值:
-/// `default_db_path` 首次调用会把旧 vibex 库拷过来,`--help` 不该触发它
+/// `--help` 不该触发目录创建。
 pub fn path_or_default(db: Option<&Path>) -> PathBuf {
     db.map(Path::to_path_buf).unwrap_or_else(default_db_path)
 }
 
-/// 索引库路径:macOS 为 ~/Library/Application Support/wake,Linux 为
-/// ~/.local/share/wake,Windows 为 %LOCALAPPDATA%\wake
-/// (从旧 vibex 路径一次性迁移,保留收藏等 user_data)。
+/// 索引库路径:macOS 为 ~/Library/Application Support/ContextOS,Linux 为
+/// ~/.local/share/ContextOS,Windows 为 %LOCALAPPDATA%\ContextOS。
 ///
 /// Windows 取 data_local_dir 而非 data_dir:后者是漫游 %APPDATA%,而本库
 /// 开 WAL——WAL 要 -shm 共享内存映射,重定向到网络盘的漫游目录上根本打不开
 /// (域环境 Folder Redirection 是标配),Wake 会在启动即致命退出;何况这是
 /// 可随时重建的索引,几百 MB 跟着登录/注销来回同步纯属浪费(2026-08-25 review)
 pub fn default_db_path() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    let data = dirs::data_local_dir();
-    #[cfg(not(target_os = "windows"))]
-    let data = dirs::data_dir();
-    let data = data.unwrap_or_else(|| std::path::PathBuf::from("."));
-    let dir = data.join("wake");
-    let db = dir.join("wake.db");
-    if !db.exists() {
-        let old_db = data.join("vibex").join("vibex-rs.db");
-        if old_db.exists() {
-            let _ = std::fs::create_dir_all(&dir);
-            for suffix in ["", "-wal", "-shm"] {
-                let src = data.join("vibex").join(format!("vibex-rs.db{suffix}"));
-                if src.exists() {
-                    let _ = std::fs::copy(&src, dir.join(format!("wake.db{suffix}")));
-                }
-            }
-        }
-    }
-    db
+    crate::storage::root().join("contextos.db")
 }

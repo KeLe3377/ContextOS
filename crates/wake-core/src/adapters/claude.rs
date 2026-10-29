@@ -134,6 +134,7 @@ struct ParseResult {
     git_branch: Option<String>,
     model: Option<String>,
     tokens_used: i64,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     created_at: i64,
     updated_at: i64,
     unknown_lines: u32,
@@ -204,6 +205,9 @@ fn parse_claude_jsonl(
     let mut git_branch: Option<String> = None;
     let mut model: Option<String> = None;
     let mut tokens_used: i64 = 0;
+    let mut usage_by_message =
+        HashMap::<String, (bool, i64, i64, Option<i64>, Option<String>)>::new();
+    let mut usage_events = Vec::new();
     let mut created_at: i64 = 0;
     let mut updated_at: i64 = 0;
     let mut unknown_lines: u32 = 0;
@@ -408,18 +412,64 @@ fn parse_claude_jsonl(
             }
         }
         if let Some(usage) = message.get("usage") {
-            tokens_used += usage
-                .get("input_tokens")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0)
-                + usage
-                    .get("output_tokens")
-                    .and_then(|v| v.as_i64())
+            let usage_total = [
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
+            .iter()
+            .map(|field| {
+                usage
+                    .get(*field)
+                    .and_then(Value::as_i64)
                     .unwrap_or(0)
-                + usage
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
+                    .max(0)
+            })
+            .fold(0i64, i64::saturating_add);
+            let output = usage
+                .get("output_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0);
+            if let Some(id) = p.msg_id.clone() {
+                let completed = message
+                    .get("stop_reason")
+                    .is_some_and(|value| !value.is_null());
+                let replace = usage_by_message.get(&id).is_none_or(
+                    |(previous_completed, previous_output, _, _, _)| {
+                        (completed && !*previous_completed)
+                            || (completed == *previous_completed && output > *previous_output)
+                    },
+                );
+                if replace {
+                    usage_by_message.insert(
+                        id,
+                        (
+                            completed,
+                            output,
+                            usage_total,
+                            ts_opt(ts),
+                            message
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        ),
+                    );
+                }
+            } else {
+                tokens_used = tokens_used.saturating_add(usage_total);
+                if usage_total > 0 {
+                    usage_events.push(crate::models::SessionUsageEvent {
+                        timestamp: ts_opt(ts),
+                        tokens_used: usage_total,
+                        model: message
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    });
+                }
+            }
         }
         match message.get("content") {
             Some(Value::Array(blocks)) => {
@@ -463,6 +513,20 @@ fn parse_claude_jsonl(
         }
     }
     flush_assistant(&mut pending, &mut messages, &mut tool_index);
+    tokens_used = usage_by_message
+        .values()
+        .fold(tokens_used, |total, (_, _, usage, _, _)| {
+            total.saturating_add(*usage)
+        });
+    usage_events.extend(usage_by_message.values().filter_map(
+        |(_, _, tokens, timestamp, model)| {
+            (*tokens > 0).then(|| crate::models::SessionUsageEvent {
+                timestamp: *timestamp,
+                tokens_used: *tokens,
+                model: model.clone(),
+            })
+        },
+    ));
     assign_seq(&mut messages);
 
     Ok(ParseResult {
@@ -478,6 +542,7 @@ fn parse_claude_jsonl(
         git_branch,
         model,
         tokens_used,
+        usage_events,
         created_at,
         updated_at,
         unknown_lines,
@@ -536,11 +601,7 @@ fn build_meta(r: &SessionFileRef, p: &ParseResult) -> SessionMeta {
         size_bytes: r.size,
         git_branch: p.git_branch.clone(),
         model: p.model.clone(),
-        tokens_used: if p.tokens_used > 0 {
-            Some(p.tokens_used)
-        } else {
-            None
-        },
+        tokens_used: (p.tokens_used > 0).then_some(p.tokens_used),
         archived: false,
         source: None,
         favorite: false,
@@ -679,6 +740,7 @@ impl AgentAdapter for ClaudeAdapter {
             meta: build_meta(r, &parsed),
             mainline,
             sidechains,
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }

@@ -1,4 +1,4 @@
-//! wake-cli 的解析层:argv → 一次 MCP 工具调用。bin 只做 I/O 与退出码,有
+//! contextos-cli 的解析层:argv → 一次 MCP 工具调用。bin 只做 I/O 与退出码,有
 //! 判断的东西全在这里、可单测。文案恒英文(wake-core 不参与 i18n,别包 t())。
 //!
 //! **值一律原样当字符串塞进 JSON**:数字不解析、范围不裁剪、agent 名不认、
@@ -79,6 +79,8 @@ pub struct CommandSpec {
     pub name: &'static str,
     /// 恒取 tools 的常量、不写字面量——常量改名即编译错
     pub tool: &'static str,
+    /// `sessions` / `memories` 无 operation 时保留旧查询；带 operation 时切到领域工具。
+    pub domain_tool: Option<&'static str>,
     /// 位置参数的 (JSON 键, 占位符);None = 不收位置参数
     pub positional: Option<(&'static str, &'static str)>,
     pub flags: &'static [FlagSpec],
@@ -107,7 +109,17 @@ const PLAIN: &[PlainSpec] = &[
     PlainSpec {
         name: "index",
         action: Action::Index,
-        summary: "build the index once, when Wake has never run here",
+        summary: "build the index once, when ContextOS has never run here",
+    },
+    PlainSpec {
+        name: "context",
+        action: Action::Context,
+        summary: "show recent project sessions for a session-start hook",
+    },
+    PlainSpec {
+        name: "refresh-context",
+        action: Action::RefreshContext,
+        summary: "refresh the index, then print project context for a session-start hook",
     },
 ];
 
@@ -145,7 +157,7 @@ const F_STARRED: FlagSpec = FlagSpec::new(
     "starred",
     Arity::Switch,
     "",
-    "only sessions starred in Wake",
+    "only sessions starred in ContextOS",
 );
 const F_FROM: FlagSpec = FlagSpec::new(
     "--from",
@@ -174,6 +186,13 @@ const F_MESSAGE_CHARS: FlagSpec = FlagSpec::new(
     Arity::Value,
     "N",
     "truncate each message to this many characters",
+);
+const F_MAX_CHARS: FlagSpec = FlagSpec::new(
+    "--max-chars",
+    "max_chars",
+    Arity::Value,
+    "N",
+    "maximum snapshot characters to print",
 );
 const F_TOOLS: FlagSpec = FlagSpec::new(
     "--tools",
@@ -208,14 +227,24 @@ const SHOW_FLAGS: &[FlagSpec] = &[
     F_THINKING,
     F_SUBAGENT,
 ];
+const WORKSPACE_CHANGES_FLAGS: &[FlagSpec] = &[F_PROJECT, F_SINCE, F_LIMIT];
+const WORKSPACE_CHANGE_FLAGS: &[FlagSpec] = &[F_MAX_CHARS];
 const PROJECTS_FLAGS: &[FlagSpec] = &[F_SINCE, F_LIMIT];
 const MEMORIES_FLAGS: &[FlagSpec] = &[F_PROJECT, F_AGENT, F_LIMIT];
+const LAYA_FLAGS: &[FlagSpec] = &[FlagSpec::new(
+    "--delete-models",
+    "delete_models",
+    Arity::Switch,
+    "",
+    "for uninstall, also remove the downloaded model cache",
+)];
 
 /// 子命令与 MCP 工具一一对应。加一家工具就在这里加一行,否则单测红
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "search",
         tool: tools::SEARCH,
+        domain_tool: None,
         positional: Some(("query", "QUERY")),
         flags: SEARCH_FLAGS,
         summary: "search transcripts across every indexed session",
@@ -223,13 +252,15 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "sessions",
         tool: tools::LIST_SESSIONS,
-        positional: None,
+        domain_tool: Some(tools::SESSIONS),
+        positional: Some(("operation", "OPERATION")),
         flags: SESSIONS_FLAGS,
         summary: "list the most recently updated sessions",
     },
     CommandSpec {
         name: "show",
         tool: tools::GET_SESSION,
+        domain_tool: None,
         positional: Some(("key", "KEY")),
         flags: SHOW_FLAGS,
         summary: "print one transcript as compact Markdown",
@@ -237,6 +268,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "projects",
         tool: tools::LIST_PROJECTS,
+        domain_tool: None,
         positional: None,
         flags: PROJECTS_FLAGS,
         summary: "list projects that have session history",
@@ -244,9 +276,74 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "memories",
         tool: tools::LIST_MEMORIES,
-        positional: None,
+        domain_tool: Some(tools::MEMORIES),
+        positional: Some(("operation", "OPERATION")),
         flags: MEMORIES_FLAGS,
         summary: "list the memory files agents keep, grouped by project",
+    },
+    CommandSpec {
+        name: "workspace-changes",
+        tool: tools::LIST_WORKSPACE_CHANGES,
+        domain_tool: None,
+        positional: None,
+        flags: WORKSPACE_CHANGES_FLAGS,
+        summary: "list changes observed in monitored workspaces",
+    },
+    CommandSpec {
+        name: "workspace-change",
+        tool: tools::GET_WORKSPACE_CHANGE,
+        domain_tool: None,
+        positional: Some(("id", "ID")),
+        flags: WORKSPACE_CHANGE_FLAGS,
+        summary: "read one monitored workspace change and its snapshots",
+    },
+    CommandSpec {
+        name: "workspace-delete-change",
+        tool: tools::DELETE_WORKSPACE_CHANGE,
+        domain_tool: None,
+        positional: Some(("id", "ID")),
+        flags: &[],
+        summary: "delete one monitored workspace change and unreferenced snapshots",
+    },
+    CommandSpec {
+        name: "settings",
+        tool: tools::SETTINGS,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "read or update ContextOS business settings",
+    },
+    CommandSpec {
+        name: "relations",
+        tool: tools::RELATIONS,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "list or manage manual session relationships",
+    },
+    CommandSpec {
+        name: "compression",
+        tool: tools::COMPRESSION,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "compress sessions or manage derived documents",
+    },
+    CommandSpec {
+        name: "data-sources",
+        tool: tools::DATA_SOURCES,
+        domain_tool: None,
+        positional: Some(("operation", "OPERATION")),
+        flags: &[],
+        summary: "manage local session and memory sources",
+    },
+    CommandSpec {
+        name: "laya",
+        tool: tools::LAYA,
+        domain_tool: Some(tools::LAYA),
+        positional: Some(("operation", "OPERATION")),
+        flags: LAYA_FLAGS,
+        summary: "inspect or control the managed Laya runtime",
     },
 ];
 
@@ -259,6 +356,10 @@ pub enum Action {
     Setup,
     /// 从零建一次索引。**只在索引不存在时**——已存在的库归 GUI 管
     Index,
+    /// 新会话启动时输出当前项目最近会话及其压缩文档位置
+    Context,
+    /// SessionStart 专用:先增量刷新,再输出上下文
+    RefreshContext,
     /// 一次工具调用。`args` **恒为 JSON object**——mcp/mod.rs 那道
     /// `arguments` 形状检查在这条路上不可达,别再补一遍
     Tool {
@@ -274,12 +375,12 @@ pub struct Invocation {
     pub action: Action,
 }
 
-/// 已经是给人看的整句(小写开头、不带 `wake-cli: ` 前缀)
+/// 已经是给人看的整句(小写开头、不带 `contextos-cli: ` 前缀)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     pub message: String,
     /// 命令级的错(没给命令 / 命令不认识 / 选项不认识 / 位置参数缺或多)附短
-    /// USAGE;"这个选项缺值"一类本身已完整,不附——wake_mcp.rs 的这处不对称
+    /// USAGE;"这个选项缺值"一类本身已完整,不附——MCP 直调的这处不对称
     /// 是有意的,别顺手抹平
     pub with_usage: bool,
 }
@@ -299,7 +400,7 @@ pub struct Report {
 
 impl CliError {
     pub fn report(&self) -> Report {
-        let mut text = format!("wake-cli: {}", self.message);
+        let mut text = format!("contextos-cli: {}", self.message);
         if self.with_usage {
             text.push_str("\n\n");
             text.push_str(USAGE);
@@ -323,18 +424,18 @@ pub fn report(result: Result<String, tools::ToolError>) -> Report {
             code: 0,
         },
         // 值不对就是命令行敲错了(--since/--limit/--agent 的值全交给 tools.rs
-        // 校验),与 "unknown option" 同一类,退 2。`wake-mcp call` 把它压成 1
+        // 校验),与 "unknown option" 同一类,退 2。`contextos-mcp call` 把它压成 1
         // 是因为那条路过 JSON-RPC 信封、分类由 payload 携带,退出码不是通道
         Err(tools::ToolError::InvalidParams(m)) => Report {
             stream: Stream::Stderr,
-            text: format!("wake-cli: {m}"),
+            text: format!("contextos-cli: {m}"),
             code: 2,
         },
         // Failed = 这份会话读不出来;Internal = 库在但查询炸了(索引损坏 /
         // schema 漂移)。对用户是同一件事:跑起来了,然后失败
         Err(tools::ToolError::Failed(m) | tools::ToolError::Internal(m)) => Report {
             stream: Stream::Stderr,
-            text: format!("wake-cli: {m}"),
+            text: format!("contextos-cli: {m}"),
             code: 1,
         },
     }
@@ -351,7 +452,7 @@ pub fn emit(text: &str, out: &mut impl Write) -> std::io::Result<()> {
     out.flush()
 }
 
-/// `wake-cli index` 在终端上的进度行:同一行 `\r` 原地刷新,终态**只补一个换行**。
+/// `contextos-cli index` 在终端上的进度行:同一行 `\r` 原地刷新,终态**只补一个换行**。
 /// 不在这里宣布 "Indexed …"——那句由 bin 用库里查出来的会话数在 stdout 说,进度
 /// 只知道文件数(墓碑/解析失败的文件也计 done),两个数字并排只会互相打架;而且
 /// 扫描收尾(parent_links / backfill)出错时 done 已经等于 total,先打一行成功再
@@ -374,7 +475,7 @@ fn err(message: String, with_usage: bool) -> CliError {
     }
 }
 
-/// 缺值的错**不附 USAGE**(与 wake_mcp.rs 的 `--db needs a path` 同款)
+/// 缺值的错**不附 USAGE**(与 contextos-mcp 的 `--db needs a path` 同款)
 fn next_value(it: &mut std::slice::Iter<'_, String>, msg: &str) -> Result<String, CliError> {
     it.next()
         .cloned()
@@ -428,10 +529,11 @@ enum Seen {
 }
 
 /// argv(**不含** argv[0])→ 一次调用。纯函数:不读环境、不碰文件系统、不
-/// exit。wake_mcp.rs 在 parse_args 里直接 process::exit(0) 处理 --help /
+/// exit。contextos-mcp 在 parse_args 里直接 process::exit(0) 处理 --help /
 /// --version,那样这两条路没法单测,这里改成返回 Action
 pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
     let mut db: Option<PathBuf> = None;
+    let mut input: Option<String> = None;
     let mut seen = Seen::Nothing;
     let mut map = Map::new();
     let mut positional: Option<String> = None;
@@ -440,14 +542,22 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
     while let Some(a) = it.next() {
         let s = a.as_str();
         if !only_positional {
-            // 1) 全局:位置无关,与 wake_mcp.rs 同形。--db 后面那个词恒被吃掉
-            //    (`--db --help` 把 --help 当路径),行为与 wake-mcp 一致
+            // 1) 全局:位置无关,与 contextos-mcp 同形。--db 后面那个词恒被吃掉
+            //    (`--db --help` 把 --help 当路径),行为与 contextos-mcp 一致
             if s == "--db" {
                 db = Some(PathBuf::from(next_value(&mut it, "--db needs a path")?));
                 continue;
             }
             if let Some(v) = s.strip_prefix("--db=") {
                 db = Some(PathBuf::from(v));
+                continue;
+            }
+            if s == "--input" {
+                input = Some(next_value(&mut it, "--input needs a path or -")?);
+                continue;
+            }
+            if let Some(v) = s.strip_prefix("--input=") {
+                input = Some(v.to_string());
                 continue;
             }
             if s == "--help" || s == "-h" {
@@ -542,7 +652,7 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
                 if positional.is_some() {
                     return Err(err(
                         format!(
-                            "{} takes one {ph} — quote it: wake-cli {} \"…\"",
+                            "{} takes one {ph} — quote it: contextos-cli {} \"…\"",
                             cmd.name, cmd.name
                         ),
                         true,
@@ -562,18 +672,32 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
         Seen::Nothing => return Err(err("needs a command".into(), true)),
         Seen::Command(c) => c,
     };
+    let mut tool = cmd.tool;
     if let Some((key, ph)) = cmd.positional {
         match positional {
             Some(v) => {
                 map.insert(key.to_string(), Value::String(v));
+                if let Some(domain) = cmd.domain_tool {
+                    tool = domain;
+                }
             }
+            None if cmd.domain_tool.is_some() => {}
             None => return Err(err(format!("{} needs a {ph}", cmd.name), true)),
         }
+    }
+    if let Some(input) = input {
+        if !crate::services::control::NAMES.contains(&tool) {
+            return Err(err(
+                "--input is only valid for domain operations".into(),
+                true,
+            ));
+        }
+        map.insert("_input".into(), Value::String(input));
     }
     Ok(Invocation {
         db,
         action: Action::Tool {
-            tool: cmd.tool,
+            tool,
             args: Value::Object(map),
         },
     })
@@ -583,31 +707,36 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
 
 /// 短用法:命令级错误后附在 stderr。全文另有 `help()`——把 50 行参考手册贴在
 /// "`--limit` needs a value" 后面是骚扰,所以拆成两份(单测卡这份的行数)
-const USAGE: &str = "wake-cli — query your Wake session index from the terminal
+const USAGE: &str = "contextos-cli — query your ContextOS session index from the terminal
 
 USAGE:
-  wake-cli search QUERY [OPTIONS]
-  wake-cli sessions [OPTIONS]
-  wake-cli show KEY [OPTIONS]
-  wake-cli projects [OPTIONS]
-  wake-cli setup
-  wake-cli --help | --version
+  contextos-cli search QUERY [OPTIONS]
+  contextos-cli sessions [OPTIONS]
+  contextos-cli show KEY [OPTIONS]
+  contextos-cli projects [OPTIONS]
+  contextos-cli <domain> OPERATION [--input FILE|-]
+  contextos-cli setup
+  contextos-cli context
+  contextos-cli refresh-context
+  contextos-cli --help | --version
 
-Run `wake-cli --help` for every option.";
+Run `contextos-cli --help` for every option.";
 
-const HELP_HEAD: &str = "wake-cli — query your Wake session index from the terminal
+const HELP_HEAD: &str = "contextos-cli — query your ContextOS session index from the terminal
 
-Wake indexes every coding-agent session on this machine (Claude Code, Codex,
-Cursor, Gemini CLI and more). This reads that index; it never writes to it.
+ContextOS indexes every coding-agent session on this machine (Claude Code, Codex,
+Cursor, Gemini CLI and more). Domain operations can update the explicitly exposed
+business data; original conversation messages remain immutable.
 
 USAGE:
-  wake-cli <command> [ARGS] [OPTIONS]
+  contextos-cli <command> [ARGS] [OPTIONS]
 
 COMMANDS:";
 
 const HELP_GLOBALS: &str = "
 GLOBAL OPTIONS:
-  --db PATH           index database (default: Wake's own, e.g. ~/Library/Application Support/wake/wake.db)
+  --db PATH           index database (default: ContextOS's own, e.g. ~/Library/Application Support/ContextOS/contextos.db)
+  --input FILE|-      merge a domain request JSON object from a file or stdin
   --help, -h          print this help
   --version, -V       print the version
   --                  treat everything after it as arguments, not options
@@ -631,18 +760,21 @@ KEYS AND REFERENCES:
   Pass a reference to `show` and the page starts at that message.
 
 EXAMPLES:
-  wake-cli sessions --project \"$PWD\" --limit 5
-  wake-cli search \"useEffect(\" --project \"$PWD\" --since 7d
-  wake-cli search \"rate limiter\" --agent codex --agent claude-code
-  wake-cli show 'wake://session/claude-code:1b2c…#42' --tools
-  wake-cli search -- --dry-run          # a query that starts with a dash
+  contextos-cli sessions --project \"$PWD\" --limit 5
+  contextos-cli search \"useEffect(\" --project \"$PWD\" --since 7d
+  contextos-cli search \"rate limiter\" --agent codex --agent claude-code
+  contextos-cli show 'wake://session/claude-code:1b2c…#42' --tools
+  contextos-cli context
+  contextos-cli refresh-context
+  contextos-cli search -- --dry-run     # a query that starts with a dash
 
 EXIT CODES:
   0  it ran — including \"no matches\" and \"no such project\"
-  1  a session could not be read (unknown key, or a transcript that would not parse)
+  1  the operation ran but failed; domain commands print a JSON error envelope
   2  the command line was wrong, or the index is missing / unreadable / too old
 
-Everything is read-only. Full reference: docs/cli.md";
+Original conversation messages are immutable. Delete operations move supported files to
+the OS trash; permanent deletion and recovery are not exposed. Full reference: docs/cli.md";
 
 /// 命令块与选项块的说明列起始列
 const CMD_COL: usize = 36;
@@ -719,13 +851,17 @@ pub fn help() -> String {
             .map(|(_, ph)| format!(" {ph}"))
             .unwrap_or_default();
         out.push_str(&row(
-            format!("  wake-cli {}{arg}", c.name),
+            format!("  contextos-cli {}{arg}", c.name),
             c.summary,
             CMD_COL,
         ));
     }
     for p in PLAIN {
-        out.push_str(&row(format!("  wake-cli {}", p.name), p.summary, CMD_COL));
+        out.push_str(&row(
+            format!("  contextos-cli {}", p.name),
+            p.summary,
+            CMD_COL,
+        ));
     }
     out.push_str(HELP_GLOBALS);
     for c in COMMANDS {
@@ -757,14 +893,14 @@ pub fn help() -> String {
 /// 退出码);这里只留最短的一版
 const AGENT_MEMO: &str =
     "Earlier sessions with every coding agent on this machine are searchable with
-wake-cli. Reach for it when the user asks about an earlier conversation, a past
+contextos-cli. Reach for it when the user asks about an earlier conversation, a past
 decision, why something was done a certain way, where previous work stopped, or
 whether an error has been seen before — git history does not hold that.
 
-    wake-cli sessions --project \"$PWD\" --limit 10
-    wake-cli search \"<terms>\" --project \"$PWD\"
-    wake-cli show <key>
-    wake-cli memories --project \"$PWD\"
+    contextos-cli sessions --project \"$PWD\" --limit 10
+    contextos-cli search \"<terms>\" --project \"$PWD\"
+    contextos-cli show <key>
+    contextos-cli memories --project \"$PWD\"
 
 `sessions` and `search` print a key for every session; `search` also prints a
 `wake://session/<key>#<seq>` reference that `show` accepts. `memories` lists the
@@ -772,13 +908,14 @@ notes agents keep for themselves about the project, each with a `wake://memory/�
 reference `show` accepts. Always pass --project \"$PWD\" — without it every
 project on the machine is in scope. Everything is read-only.";
 
-/// 一行装好 skill。`owner/repo` 形式由 vercel-labs 的 skills CLI 认,仓库里
-/// 有 `skills/` 目录即可被发现。Settings → Connect 的 Skill 卡展示的就是它,
-/// 与 `wake-cli setup` 同一个来源
-pub const SKILL_INSTALL: &str = "npx skills add iAmCorey/Wake";
+/// 一行装好 skill。当前 ContextOS 尚未绑定公开 GitHub 仓库,所以给本地仓库
+/// 安装命令;Settings → Connect 的 Skill 卡展示的就是它,与 `contextos-cli setup`
+/// 同一个来源。
+pub const SKILL_INSTALL: &str =
+    "mkdir -p ~/.claude/skills && cp -R skills/contextos ~/.claude/skills/contextos";
 
 /// 把 CLI 放进 PATH 的那一条**可粘命令**,给 GUI 的 Copy 按钮用。与
-/// `wake-cli setup` 打印的是同一个来源。返回 None 的两种情况都不该给按钮:
+/// `contextos-cli setup` 打印的是同一个来源。返回 None 的两种情况都不该给按钮:
 /// 已经装在 `…/bin` 里(deb / tar)、以及 Windows——那边 path_hint 给的是
 /// "把这个目录加进 PATH" 的说明,不是能粘进终端跑的东西
 pub fn path_command(cli_bin: &Path) -> Option<String> {
@@ -788,31 +925,50 @@ pub fn path_command(cli_bin: &Path) -> Option<String> {
     path_hint(cli_bin)
 }
 
-/// 详情页 "Copy handoff" 复制的那段话:粘进另一家 agent 的输入框,它就知道去 Wake 读
-/// 这段会话——装了 MCP 的按 key 调 wake_get_session,只会 shell 的跑 wake-cli(#33 的
-/// 用户在手工拷文件路径给别家 agent 读,精简渲染比原始 JSONL 省得多)。两条路都认
-/// 裸 key,不再多一种 wake:// 形态要解释;`cli_bin` 找不到时退裸名,交对方的 PATH
-pub fn handoff_text(key: &str, title: &str, cli_bin: Option<&Path>) -> String {
+/// 详情页 "Copy handoff" 复制的那段话:粘进另一家 agent 的输入框,它就知道去 ContextOS 读
+/// 这段会话——装了 MCP 的按 key 调 contextos_get_session,只会 shell 的跑 contextos-cli。
+/// 如果会话有项目路径,同时给出工作区改动查询,让下一个 agent 能直接查看当前项目的
+/// 文件变化;这只查询 ContextOS 的历史观察,不会读取或修改工作区文件。
+pub fn handoff_text(
+    key: &str,
+    title: &str,
+    project_path: Option<&str>,
+    cli_bin: Option<&Path>,
+) -> String {
     let title = crate::text::one_line(title, 120);
     let cli = cli_bin
         .map(|p| sh_quote(&p.to_string_lossy()))
-        .unwrap_or_else(|| "wake-cli".to_string());
+        .unwrap_or_else(|| "contextos-cli".to_string());
     let opener = if title.is_empty() {
-        "Continue from an earlier coding-agent session indexed by Wake.".to_string()
+        "Continue from an earlier coding-agent session indexed by ContextOS.".to_string()
     } else {
-        format!("Continue from an earlier coding-agent session indexed by Wake: \"{title}\"")
+        format!("Continue from an earlier coding-agent session indexed by ContextOS: \"{title}\"")
     };
+    let workspace = project_path
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            let quoted = sh_quote(path);
+            format!(
+                "Workspace changes for this project (if it is monitored):\n\
+                 Use the contextos_list_workspace_changes MCP tool with project=\"{path}\",\n\
+                 or run:\n{cli} workspace-changes --project {quoted}\n",
+                path = path,
+                cli = cli,
+            )
+        })
+        .unwrap_or_default();
     format!(
         "{opener}\nSession key: {key}\n\
-         Read it with the wake_get_session MCP tool (key above), or from a shell:\n\
-         {cli} show {key}\n"
+         Read it with the contextos_get_session MCP tool (key above), or from a shell:\n\
+         {cli} show {key}\n\
+         {workspace}"
     )
 }
 
-/// `wake-cli setup` 要说的事实(由 bin 查好传进来,函数本身仍是纯的)
+/// `contextos-cli setup` 要说的事实(由 bin 查好传进来,函数本身仍是纯的)
 pub struct SetupFacts<'a> {
     pub cli_bin: &'a Path,
-    /// 同目录的 wake-mcp(存在才给)
+    /// 同目录的 contextos-mcp(存在才给)
     pub mcp_bin: Option<&'a Path>,
     pub db: &'a Path,
     /// 库打不开的原因(`{e:#}`);能打开是 None
@@ -833,17 +989,17 @@ fn path_hint(bin: &Path) -> Option<String> {
     Some(if cfg!(target_os = "macos") {
         // 出厂 macOS 的 /usr/local/bin 是 root:wheel,而且可能压根不存在——
         // 不带 sudo 的 ln 在干净机器上必然 Permission denied
-        format!("sudo mkdir -p /usr/local/bin && sudo ln -sf {quoted} /usr/local/bin/wake-cli")
+        format!("sudo mkdir -p /usr/local/bin && sudo ln -sf {quoted} /usr/local/bin/contextos-cli")
     } else {
-        format!("mkdir -p ~/.local/bin && ln -sf {quoted} ~/.local/bin/wake-cli")
+        format!("mkdir -p ~/.local/bin && ln -sf {quoted} ~/.local/bin/contextos-cli")
     })
 }
 
-/// `## {标题} — {怎么用这段}` 与 `wake-mcp setup` 同形,两个 bin 的输出读起来
+/// `## {标题} — {怎么用这段}` 与 `contextos-mcp setup` 同形,两个 bin 的输出读起来
 /// 才是一家人
 pub fn setup_text(f: &SetupFacts<'_>) -> String {
     let mut out = format!(
-        "wake-cli binary: {}\nIndex database: {}\n",
+        "contextos-cli binary: {}\nIndex database: {}\n",
         f.cli_bin.display(),
         f.db.display()
     );
@@ -858,9 +1014,16 @@ pub fn setup_text(f: &SetupFacts<'_>) -> String {
     out.push_str(&format!(
         "\n## Install it once for every project — Run in a terminal\n\n{SKILL_INSTALL}\n\n\
          That adds the same guidance as a skill, so you do not have to paste it per\n\
-         project. Manual install: copy `skills/wake/` from the repository into\n\
-         `~/.claude/skills/wake/`.\n"
+         project. Manual install: copy `skills/contextos/` from the repository into\n\
+         `~/.claude/skills/contextos/`.\n"
     ));
+    for snippet in session_start_snippets(f.cli_bin) {
+        out.push_str(&snippet_section(
+            snippet.client,
+            &snippet,
+            "Merge this into the client's existing SessionStart hooks. It prints nothing when the project has no indexed sessions.",
+        ));
+    }
     // 片段按 agent 认,不按下标——那个顺序是 Connect 页的事;hint 也用它自己
     // 带的,两个 bin 的 setup 输出才真的同形
     if let Some(snippet) = f.mcp_bin.and_then(|mcp| {
@@ -870,7 +1033,7 @@ pub fn setup_text(f: &SetupFacts<'_>) -> String {
     }) {
         out.push_str(&format!(
             "\n## Tool-calling clients: prefer MCP — {}\n\n{}\n\n\
-             `wake-mcp setup` prints the same for Codex and Cursor.\n",
+             `contextos-mcp setup` prints the same for Codex and Cursor.\n",
             snippet.hint, snippet.text
         ));
     }
@@ -879,6 +1042,47 @@ pub fn setup_text(f: &SetupFacts<'_>) -> String {
         out.push_str(&format!("\nNote: {e}\n"));
     }
     out
+}
+
+pub fn session_start_snippets(cli_bin: &Path) -> Vec<crate::mcp::SetupSnippet> {
+    let command = if cfg!(target_os = "windows") {
+        let exe = cli_bin.to_string_lossy().replace('\'', "''");
+        format!("powershell.exe -NoProfile -Command \"& '{exe}' refresh-context 2>$null; exit 0\"")
+    } else {
+        format!(
+            "{} refresh-context 2>/dev/null || true",
+            sh_quote(&cli_bin.to_string_lossy())
+        )
+    };
+    let json_command = serde_json::to_string(&command).unwrap_or_default();
+    let toml_command = json_command.clone();
+    vec![
+        crate::mcp::SetupSnippet {
+            client: "Claude Code session hook",
+            agent: AgentId::ClaudeCode,
+            hint: "Merge into ~/.claude/settings.json",
+            copy_label: "Copy config",
+            text: format!(
+                "{{\n  \"hooks\": {{\n    \"SessionStart\": [\n      {{\n        \"matcher\": \"startup|clear\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {json_command} }}]\n      }}\n    ]\n  }}\n}}"
+            ),
+        },
+        crate::mcp::SetupSnippet {
+            client: "Codex session hook",
+            agent: AgentId::Codex,
+            hint: "Add to ~/.codex/config.toml, then approve in /hooks",
+            copy_label: "Copy config",
+            text: format!(
+                "[[hooks.SessionStart]]\nmatcher = \"startup|clear\"\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = {toml_command}\ntimeout = 30"
+            ),
+        },
+    ]
+}
+
+fn snippet_section(client: &str, snippet: &crate::mcp::SetupSnippet, note: &str) -> String {
+    format!(
+        "\n## {client} — {}\n\n```text\n{}\n```\n\n{}\n",
+        snippet.hint, snippet.text, note
+    )
 }
 
 #[cfg(test)]
@@ -894,7 +1098,7 @@ mod tests {
     /// 得点到名,否则只读这段的 agent 不知道有它(2026-09-21 review)
     #[test]
     fn agent_memo_mentions_memories() {
-        assert!(AGENT_MEMO.contains("wake-cli memories --project"));
+        assert!(AGENT_MEMO.contains("contextos-cli memories --project"));
         assert!(AGENT_MEMO.contains("wake://memory/"));
     }
 
@@ -913,37 +1117,39 @@ mod tests {
         p(a).expect_err("should not parse").message
     }
 
-    /// Copy handoff 的文本:key 出现两次(给 MCP 的与给 shell 的),wake-cli 路径按
-    /// POSIX 引号,标题折成一行;没标题就不留空引号,找不到 wake-cli 退裸名
+    /// Copy handoff 的文本:key 出现两次(给 MCP 的与给 shell 的),CLI 路径按
+    /// POSIX 引号,标题折成一行;没标题就不留空引号,找不到 CLI 退裸名
     #[test]
     fn handoff_text_names_both_ways_in() {
         let text = handoff_text(
             "claude-code:abc",
             "Fix the\nscanner  again",
+            Some("/workspace/project"),
             Some(Path::new(
-                "/Applications/Wake Dev.app/Contents/MacOS/wake-cli",
+                "/Applications/ContextOS Dev.app/Contents/MacOS/contextos-cli",
             )),
         );
         assert!(
             text.starts_with(
-                "Continue from an earlier coding-agent session indexed by Wake: \"Fix the scanner again\"\n"
+                "Continue from an earlier coding-agent session indexed by ContextOS: \"Fix the scanner again\"\n"
             ),
             "{text}"
         );
         assert!(text.contains("\nSession key: claude-code:abc\n"));
-        assert!(text.contains("wake_get_session"));
+        assert!(text.contains("contextos_get_session"));
+        assert!(text.contains("contextos_list_workspace_changes"));
+        assert!(text.contains("workspace-changes --project '/workspace/project'"));
         assert!(
-            text.ends_with(
-                "'/Applications/Wake Dev.app/Contents/MacOS/wake-cli' show claude-code:abc\n"
+            text.contains(
+                "'/Applications/ContextOS Dev.app/Contents/MacOS/contextos-cli' show claude-code:abc\n"
             ),
             "{text}"
         );
 
-        let bare = handoff_text("codex:1", "", None);
-        assert!(
-            bare.starts_with("Continue from an earlier coding-agent session indexed by Wake.\n")
-        );
-        assert!(bare.ends_with("\nwake-cli show codex:1\n"), "{bare}");
+        let bare = handoff_text("codex:1", "", None, None);
+        assert!(bare
+            .starts_with("Continue from an earlier coding-agent session indexed by ContextOS.\n"));
+        assert!(bare.ends_with("\ncontextos-cli show codex:1\n"), "{bare}");
     }
 
     /// 这个文件的看家测试:CLI 的旗标表与 MCP 工具的 inputSchema 必须双射。
@@ -956,18 +1162,34 @@ mod tests {
             if NOT_IN_CLI.contains(&name) {
                 continue;
             }
-            let cmd = COMMANDS.iter().find(|c| c.tool == name).unwrap_or_else(|| {
-                panic!("{name} has no wake-cli subcommand; add one to COMMANDS or list it in NOT_IN_CLI")
+            let cmd = COMMANDS.iter().find(|c| c.tool == name || c.domain_tool == Some(name)).unwrap_or_else(|| {
+                panic!("{name} has no contextos-cli subcommand; add one to COMMANDS or list it in NOT_IN_CLI")
             });
             let props = d["inputSchema"]["properties"]
                 .as_object()
                 .expect("inputSchema has properties");
-            let mut mine: Vec<&str> = cmd.flags.iter().map(|f| f.key).collect();
-            if let Some((key, _)) = cmd.positional {
-                mine.push(key);
+            let domain_mapping = cmd.domain_tool == Some(name);
+            let domain_schema = crate::services::control::NAMES.contains(&name);
+            let flags = if domain_mapping { &[][..] } else { cmd.flags };
+            let mut mine: Vec<&str> = if domain_mapping {
+                Vec::new()
+            } else {
+                flags.iter().map(|f| f.key).collect()
+            };
+            if domain_mapping || cmd.domain_tool.is_none() {
+                if let Some((key, _)) = cmd.positional {
+                    mine.push(key);
+                }
             }
             mine.sort_unstable();
-            let mut theirs: Vec<&str> = props.keys().map(String::as_str).collect();
+            // Domain commands deliberately carry their operation-specific fields in
+            // --input JSON. Only `operation` is a positional CLI argument; the MCP
+            // schema still documents every accepted field for Agent discovery.
+            let mut theirs: Vec<&str> = props
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !domain_schema || *key == "operation")
+                .collect();
             theirs.sort_unstable();
             assert_eq!(mine, theirs, "{name}: CLI 旗标与工具参数对不上");
 
@@ -980,7 +1202,7 @@ mod tests {
                     "{name}: 必填参数 {r} 在 CLI 里不是位置参数"
                 );
             }
-            for f in cmd.flags {
+            for f in flags {
                 let ty = props[f.key]["type"].as_str().unwrap_or_default();
                 let ok = match f.arity {
                     Arity::Switch => ty == "boolean",
@@ -1000,6 +1222,9 @@ mod tests {
                 "COMMANDS 里的 {} 在 tools::definitions() 中不存在",
                 c.tool
             );
+            if let Some(domain) = c.domain_tool {
+                assert!(defs.iter().any(|d| d["name"] == domain));
+            }
         }
     }
 
@@ -1138,7 +1363,7 @@ mod tests {
         assert!(message(&["projects", "--starred"]).contains("only valid for"));
     }
 
-    /// 缺值的错不附 USAGE、形状错附——wake_mcp.rs 的这处不对称是有意的
+    /// 缺值的错不附 USAGE、形状错附——contextos-mcp 的这处不对称是有意的
     #[test]
     fn missing_values_and_unknown_options_are_parse_errors() {
         assert!(!p(&["--db"]).unwrap_err().with_usage);
@@ -1153,7 +1378,8 @@ mod tests {
         assert!(message(&["search"]).contains("needs a QUERY"));
         assert!(message(&["search", "a", "b"]).contains("quote it"));
         assert!(message(&["show"]).contains("needs a KEY"));
-        assert!(message(&["sessions", "x"]).contains("takes no arguments"));
+        assert_eq!(args_of(&["sessions", "list"])["operation"], "list");
+        assert!(message(&["sessions", "list", "x"]).contains("quote it"));
         assert!(message(&["setup", "x"]).contains("takes no arguments"));
         assert!(message(&["index", "x"]).contains("takes no arguments"));
         // PLAIN 命令不收旗标,包括全局之外的任何一个
@@ -1186,6 +1412,18 @@ mod tests {
         assert_eq!(p(&["-V"]).unwrap().action, Action::Version);
         assert_eq!(p(&["setup"]).unwrap().action, Action::Setup);
         assert_eq!(p(&["index"]).unwrap().action, Action::Index);
+        assert_eq!(p(&["context"]).unwrap().action, Action::Context);
+        assert_eq!(
+            p(&["refresh-context"]).unwrap().action,
+            Action::RefreshContext
+        );
+        assert_eq!(
+            p(&["laya", "uninstall", "--delete-models"]).unwrap().action,
+            Action::Tool {
+                tool: tools::LAYA,
+                args: json!({"operation":"uninstall", "delete_models":true}),
+            }
+        );
         assert!(USAGE.lines().count() < 15, "USAGE 不该长回参考手册");
         assert!(!USAGE.ends_with('\n'));
     }
@@ -1243,7 +1481,7 @@ mod tests {
         let r = report(Err(tools::ToolError::InvalidParams("x".into())));
         assert_eq!(
             (r.stream, r.code, r.text.as_str()),
-            (Stream::Stderr, 2, "wake-cli: x")
+            (Stream::Stderr, 2, "contextos-cli: x")
         );
         let r = report(Err(tools::ToolError::Failed("x".into())));
         assert_eq!((r.stream, r.code), (Stream::Stderr, 1));
@@ -1325,9 +1563,9 @@ mod tests {
 
     #[test]
     fn setup_text_names_the_binary_and_the_gap() {
-        let cli_bin = PathBuf::from("/Apps/Wake.app/Contents/MacOS/wake-cli");
-        let mcp_bin = PathBuf::from("/Apps/Wake.app/Contents/MacOS/wake-mcp");
-        let db = PathBuf::from("/tmp/wake.db");
+        let cli_bin = PathBuf::from("/Apps/ContextOS.app/Contents/MacOS/contextos-cli");
+        let mcp_bin = PathBuf::from("/Apps/ContextOS.app/Contents/MacOS/contextos-mcp");
+        let db = PathBuf::from("/tmp/contextos.db");
         let t = setup_text(&SetupFacts {
             cli_bin: &cli_bin,
             mcp_bin: Some(&mcp_bin),
@@ -1335,60 +1573,68 @@ mod tests {
             db_error: None,
         });
         assert!(t.contains(&cli_bin.display().to_string()));
-        assert!(t.contains("/tmp/wake.db"));
+        assert!(t.contains("/tmp/contextos.db"));
         assert!(t.contains("docs/cli.md"));
         assert!(t.contains("--project \"$PWD\""));
         // setup 必须给出真正能跑的安装方式(阶段 1 那句"还没有 skill 包"的棘轮)
         assert!(t.contains(SKILL_INSTALL), "{t}");
-        assert!(t.contains("~/.claude/skills/wake/"), "{t}");
+        assert!(t.contains("~/.claude/skills/contextos/"), "{t}");
         assert!(t.contains("claude mcp add"));
+        assert!(session_start_snippets(&cli_bin)
+            .iter()
+            .all(|snippet| snippet.text.contains("refresh-context")));
 
         let t = setup_text(&SetupFacts {
             cli_bin: &cli_bin,
             mcp_bin: None,
             db: &db,
-            db_error: Some("no Wake index at /tmp/wake.db".into()),
+            db_error: Some("no ContextOS index at /tmp/contextos.db".into()),
         });
         assert!(
             !t.contains("claude mcp add"),
-            "没有 wake-mcp 就不该给 MCP 片段"
+            "没有 contextos-mcp 就不该给 MCP 片段"
         );
         assert!(t
             .trim_end()
-            .ends_with("Note: no Wake index at /tmp/wake.db"));
+            .ends_with("Note: no ContextOS index at /tmp/contextos.db"));
     }
 
     #[test]
     fn path_command_is_pasteable_or_absent() {
-        let bundled = PathBuf::from("/Apps/Wake.app/Contents/MacOS/wake-cli");
+        let bundled = PathBuf::from("/Apps/ContextOS.app/Contents/MacOS/contextos-cli");
         if cfg!(target_os = "windows") {
             // Windows 的 path_hint 是散文,绝不能进剪贴板
             assert_eq!(path_command(&bundled), None);
         } else {
             let c = path_command(&bundled).expect("bundle 里要给命令");
-            assert!(c.contains("wake-cli"), "{c}");
+            assert!(c.contains("contextos-cli"), "{c}");
             assert_eq!(c.lines().count(), 1, "要能一行粘进终端: {c}");
         }
         // 已经在 …/bin 里就不必说了
-        assert_eq!(path_command(Path::new("/usr/bin/wake-cli")), None);
+        assert_eq!(path_command(Path::new("/usr/bin/contextos-cli")), None);
         // current_exe 失败时的裸名兜底,没有目录可言
-        assert_eq!(path_command(Path::new("wake-cli")), None);
+        assert_eq!(path_command(Path::new("contextos-cli")), None);
     }
 
     #[test]
     fn path_hint_quotes_spaces_and_skips_bin_dirs() {
-        assert_eq!(path_hint(Path::new("/usr/bin/wake-cli")), None);
-        assert_eq!(path_hint(Path::new("/home/me/.local/bin/wake-cli")), None);
+        assert_eq!(path_hint(Path::new("/usr/bin/contextos-cli")), None);
+        assert_eq!(
+            path_hint(Path::new("/home/me/.local/bin/contextos-cli")),
+            None
+        );
         // current_exe 失败时的兜底裸名:没有目录可说,别给自指的 ln
-        assert_eq!(path_hint(Path::new("wake-cli")), None);
-        let hint = path_hint(Path::new("/Apps/My Wake.app/Contents/MacOS/wake-cli"))
-            .expect("bundle 里要给提示");
+        assert_eq!(path_hint(Path::new("contextos-cli")), None);
+        let hint = path_hint(Path::new(
+            "/Apps/My ContextOS.app/Contents/MacOS/contextos-cli",
+        ))
+        .expect("bundle 里要给提示");
         if cfg!(target_os = "windows") {
             // Windows 没有 ln -s,给的是"把这个目录加进 PATH"
             assert!(hint.contains("MacOS"), "{hint}");
         } else {
             assert!(
-                hint.contains("'/Apps/My Wake.app/Contents/MacOS/wake-cli'"),
+                hint.contains("'/Apps/My ContextOS.app/Contents/MacOS/contextos-cli'"),
                 "{hint}"
             );
         }

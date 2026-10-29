@@ -68,6 +68,8 @@ impl GeminiAdapter {
 struct GeminiParse {
     session_id: Option<String>,
     messages: Vec<TranscriptMessage>,
+    tokens_used: i64,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     created_at: i64,
     updated_at: i64,
     unknown_lines: u32,
@@ -116,9 +118,27 @@ fn parse_gemini_jsonl(path: &Path, decode_images: bool) -> Result<GeminiParse> {
     }
 
     let mut messages: Vec<TranscriptMessage> = Vec::new();
+    let mut tokens_used = 0i64;
+    let mut usage_events = Vec::new();
     if let Some(set) = last_set {
         if let Some(arr) = set.get("messages").and_then(|m| m.as_array()) {
             for m in arr {
+                let mut request_tokens = 0i64;
+                if m.get("type").and_then(Value::as_str) == Some("gemini") {
+                    if let Some(tokens) = m.get("tokens") {
+                        let count = |key: &str| {
+                            tokens
+                                .get(key)
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0)
+                                .min(i64::MAX as u64) as i64
+                        };
+                        request_tokens = count("input")
+                            .saturating_add(count("output"))
+                            .saturating_add(count("thoughts"));
+                        tokens_used = tokens_used.saturating_add(request_tokens);
+                    }
+                }
                 let role = match m.get("type").and_then(|v| v.as_str()) {
                     Some("user") => Role::User,
                     Some(_) => Role::Assistant,
@@ -136,6 +156,13 @@ fn parse_gemini_jsonl(path: &Path, decode_images: bool) -> Result<GeminiParse> {
                     .and_then(|v| v.as_str())
                     .map(iso_ms)
                     .unwrap_or(0);
+                if request_tokens > 0 {
+                    usage_events.push(crate::models::SessionUsageEvent {
+                        timestamp: (ts > 0).then_some(ts),
+                        tokens_used: request_tokens,
+                        model: m.get("model").and_then(Value::as_str).map(str::to_owned),
+                    });
+                }
                 if ts > 0 {
                     if created_at == 0 {
                         created_at = ts;
@@ -152,6 +179,8 @@ fn parse_gemini_jsonl(path: &Path, decode_images: bool) -> Result<GeminiParse> {
     Ok(GeminiParse {
         session_id,
         messages,
+        tokens_used,
+        usage_events,
         created_at,
         updated_at,
         unknown_lines: unknown,
@@ -188,7 +217,7 @@ fn build_meta(r: &SessionFileRef, p: &GeminiParse, cwd: &str) -> SessionMeta {
         size_bytes: r.size,
         git_branch: None,
         model: None,
-        tokens_used: None,
+        tokens_used: (p.tokens_used > 0).then_some(p.tokens_used),
         archived: false,
         source: None,
         favorite: false,
@@ -273,6 +302,7 @@ impl AgentAdapter for GeminiAdapter {
             meta: build_meta(r, &parsed, &self.cwd_for(r)),
             mainline: parsed.messages,
             sidechains: Vec::new(),
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }

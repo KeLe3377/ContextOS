@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -52,7 +52,62 @@ impl CodexAdapter {
 
 /// 路径末段,`/` 与 `\` 都算分隔符(state DB 可能是 Windows 机器写的)
 fn rollout_file_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.strip_suffix(".zst")
+        .filter(|plain| plain.ends_with(".jsonl"))
+        .unwrap_or(name)
+}
+
+fn is_compressed_rollout(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.zst"))
+}
+
+fn logical_rollout_stem(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    name.strip_suffix(".jsonl.zst")
+        .or_else(|| name.strip_suffix(".jsonl"))
+}
+
+fn rollout_entries(root: &Path) -> Vec<PathBuf> {
+    let paths: Vec<PathBuf> = walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && (entry.file_name().to_string_lossy().ends_with(".jsonl")
+                    || entry.file_name().to_string_lossy().ends_with(".jsonl.zst"))
+        })
+        .map(|entry| entry.into_path())
+        .collect();
+    let plain_paths: HashSet<PathBuf> = paths
+        .iter()
+        .filter(|path| !is_compressed_rollout(path))
+        .cloned()
+        .collect();
+    paths
+        .into_iter()
+        .filter(|path| {
+            !is_compressed_rollout(path)
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_suffix(".zst"))
+                    .is_none_or(|plain| !plain_paths.contains(&path.with_file_name(plain)))
+        })
+        .collect()
+}
+
+fn rollout_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+    let file = fs::File::open(path)?;
+    if is_compressed_rollout(path) {
+        let decoder = zstd::stream::read::Decoder::new(file)?;
+        Ok(Box::new(BufReader::with_capacity(1 << 20, decoder)))
+    } else {
+        Ok(Box::new(BufReader::with_capacity(1 << 20, file)))
+    }
 }
 
 /// Codex 把它启动的**每一条**线程都写进同一棵 rollout 树:用户线程之外还有
@@ -121,13 +176,13 @@ impl SpawnMeta {
 }
 
 fn read_thread_kind(path: &Path) -> ThreadKind {
-    let Ok(file) = fs::File::open(path) else {
+    let Ok(mut reader) = rollout_reader(path) else {
         return ThreadKind::User;
     };
     // payload 还带 base_instructions:实测首行中位数 18 KB、最大 49 KB
     // (2026-09-15),预留容量免得 read_line 反复倍增
     let mut first_line = String::with_capacity(1 << 16);
-    if BufReader::new(file).read_line(&mut first_line).unwrap_or(0) == 0 {
+    if reader.read_line(&mut first_line).unwrap_or(0) == 0 {
         return ThreadKind::User;
     }
     let Ok(head) = serde_json::from_str::<SessionMetaHead>(&first_line) else {
@@ -307,6 +362,7 @@ struct CodexParse {
     /// Codex Desktop 与 IDE 扩展都归为 "vscode",originator 才分得开。
     source: Option<String>,
     tokens_used: i64,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     created_at: i64,
     updated_at: i64,
     unknown_lines: u32,
@@ -462,8 +518,7 @@ fn format_review_json(text: &str) -> Option<String> {
 
 fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
     let _image_budget = transcript_image_decode_budget(decode_images);
-    let file = fs::File::open(path)?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    let reader = rollout_reader(path)?;
 
     let mut messages: Vec<TranscriptMessage> = Vec::new();
     let mut event_fallback: Vec<TranscriptMessage> = Vec::new();
@@ -474,6 +529,12 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
     let mut model: Option<String> = None;
     let mut source: Option<String> = None;
     let mut tokens_used: i64 = 0;
+    let mut usage_events = Vec::new();
+    let mut pending_usage_record: Option<(i64, Option<i64>, Option<String>)> = None;
+    let mut seen_usage_records = HashSet::<String>::new();
+    let mut token_signatures_by_source = HashMap::<String, String>::new();
+    let mut previous_token_signature: Option<String> = None;
+    let mut usage_high_water: Option<CodexUsageCounters> = None;
     let mut created_at: i64 = 0;
     let mut updated_at: i64 = 0;
     let mut unknown_lines: u32 = 0;
@@ -527,6 +588,28 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
             }
             continue;
         };
+
+        // Newer Codex rollouts write the exact response usage separately. Keep
+        // it pending until token_count tells us whether the cumulative snapshot
+        // already covered it; remote compaction can leave that snapshot at zero.
+        if typ == "token_usage_record" {
+            pending_usage_record = None;
+            let response_id = payload
+                .get("response_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty());
+            let unseen = response_id.is_none_or(|id| seen_usage_records.insert(id.to_string()));
+            if unseen {
+                if let Some(total) = payload
+                    .get("usage")
+                    .and_then(codex_usage_total)
+                    .filter(|total| *total > 0)
+                {
+                    pending_usage_record = Some((total, (ts > 0).then_some(ts), model.clone()));
+                }
+            }
+            continue;
+        }
 
         match typ {
             "session_meta" => {
@@ -745,13 +828,65 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
                 let pt = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match pt {
                     "token_count" => {
-                        if let Some(total) = payload
-                            .get("info")
-                            .and_then(|i| i.get("total_token_usage"))
-                            .and_then(|u| u.get("total_tokens"))
-                            .and_then(|v| v.as_i64())
+                        let info = payload.get("info").unwrap_or(&Value::Null);
+                        let total = info.get("total_token_usage").and_then(codex_usage_counters);
+                        let last = info.get("last_token_usage").and_then(codex_usage_total);
+                        let signature = serde_json::to_string(&(
+                            info.get("total_token_usage"),
+                            info.get("last_token_usage"),
+                        ))
+                        .unwrap_or_default();
+                        let source = payload
+                            .pointer("/rate_limits/limit_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let duplicate = token_signatures_by_source.get(&source) == Some(&signature)
+                            || previous_token_signature.as_ref() == Some(&signature);
+                        token_signatures_by_source.insert(source, signature.clone());
+                        previous_token_signature = Some(signature);
+
+                        let total_delta = total
+                            .as_ref()
+                            .map(|current| current.delta_from(&mut usage_high_water));
+                        let mut event_tokens = 0;
+                        if !duplicate {
+                            if let Some(last) = last.filter(|value| *value > 0) {
+                                // last_token_usage is the exact request usage.
+                                tokens_used = tokens_used.saturating_add(last);
+                                event_tokens = last;
+                            } else if let Some(delta) = total_delta.filter(|value| *value > 0) {
+                                // Older Codex versions only expose cumulative
+                                // counters; convert the snapshot to a delta.
+                                tokens_used = tokens_used.saturating_add(delta);
+                                event_tokens = delta;
+                            }
+                        }
+                        if let Some((usage, timestamp, request_model)) = pending_usage_record.take()
                         {
-                            tokens_used = total;
+                            let cumulative_advanced = total_delta.is_some_and(|value| value > 0);
+                            if last.is_none_or(|value| value == 0) && !cumulative_advanced {
+                                tokens_used = tokens_used.saturating_add(usage);
+                                usage_events.push(crate::models::SessionUsageEvent {
+                                    timestamp,
+                                    tokens_used: usage,
+                                    model: request_model,
+                                });
+                            } else if event_tokens > 0 {
+                                usage_events.push(crate::models::SessionUsageEvent {
+                                    timestamp: (ts > 0).then_some(ts),
+                                    tokens_used: event_tokens,
+                                    model: model.clone(),
+                                });
+                                event_tokens = 0;
+                            }
+                        }
+                        if event_tokens > 0 {
+                            usage_events.push(crate::models::SessionUsageEvent {
+                                timestamp: (ts > 0).then_some(ts),
+                                tokens_used: event_tokens,
+                                model: model.clone(),
+                            });
                         }
                     }
                     "user_message" => {
@@ -832,6 +967,17 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
         }
     }
 
+    // A completed usage record can exist without its trailing token_count when
+    // a rollout is interrupted. It is still a provider-reported request.
+    if let Some((usage, timestamp, request_model)) = pending_usage_record {
+        tokens_used = tokens_used.saturating_add(usage);
+        usage_events.push(crate::models::SessionUsageEvent {
+            timestamp,
+            tokens_used: usage,
+            model: request_model,
+        });
+    }
+
     // fork 段先折叠再判 has_real:折完只剩一条 Meta 的子线程要走得到
     // event_msg 回退,与普通会话同一条路。回退流只截断、**不留标记**——
     // 它一非空就会在 has_real 为假时被选中,一条标记足以把子线程自己的
@@ -861,11 +1007,110 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
         model,
         source,
         tokens_used,
+        usage_events,
         created_at,
         updated_at,
         unknown_lines,
         spawn,
     })
+}
+
+fn codex_usage_total(usage: &Value) -> Option<i64> {
+    let total = usage
+        .get("total_tokens")
+        .and_then(Value::as_i64)
+        .filter(|total| *total >= 0);
+    if let Some(total) = total.filter(|total| *total > 0) {
+        return Some(total);
+    }
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let has_counters = [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+    ]
+    .iter()
+    .any(|key| usage.get(*key).is_some());
+    (input > 0 || output > 0)
+        .then(|| input.saturating_add(output))
+        .or_else(|| (total == Some(0) || has_counters).then_some(0))
+}
+
+#[derive(Clone, Copy)]
+struct CodexUsageCounters {
+    input: Option<i64>,
+    output: Option<i64>,
+    total: Option<i64>,
+}
+
+impl CodexUsageCounters {
+    fn delta_from(self, high_water: &mut Option<Self>) -> i64 {
+        let previous = *high_water;
+        let has_components = self.input.is_some() || self.output.is_some();
+        let delta = if has_components {
+            let input_delta = self.input.map_or(0, |current| {
+                previous
+                    .and_then(|value| value.input)
+                    .map_or(current, |old| current.saturating_sub(old))
+            });
+            let output_delta = self.output.map_or(0, |current| {
+                previous
+                    .and_then(|value| value.output)
+                    .map_or(current, |old| current.saturating_sub(old))
+            });
+            input_delta.saturating_add(output_delta)
+        } else {
+            self.total.map_or(0, |current| {
+                previous
+                    .and_then(|value| value.total)
+                    .map_or(current, |old| current.saturating_sub(old))
+            })
+        };
+        *high_water = Some(match previous {
+            Some(old) => Self {
+                input: max_counter(old.input, self.input),
+                output: max_counter(old.output, self.output),
+                total: max_counter(old.total, self.total),
+            },
+            None => self,
+        });
+        delta
+    }
+}
+
+fn max_counter(previous: Option<i64>, current: Option<i64>) -> Option<i64> {
+    match (previous, current) {
+        (Some(previous), Some(current)) => Some(previous.max(current)),
+        (Some(previous), None) => Some(previous),
+        (None, current) => current,
+    }
+}
+
+fn codex_usage_counters(usage: &Value) -> Option<CodexUsageCounters> {
+    let counter = |key: &str| {
+        usage
+            .get(key)
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+    };
+    let counters = CodexUsageCounters {
+        input: counter("input_tokens"),
+        output: counter("output_tokens"),
+        total: counter("total_tokens"),
+    };
+    (counters.input.is_some() || counters.output.is_some() || counters.total.is_some())
+        .then_some(counters)
 }
 
 /// `spawn_agent` 的 `fork_turns` 会把父线程的历史逐条复制进子线程的 rollout
@@ -1097,8 +1342,8 @@ impl AgentAdapter for CodexAdapter {
         Ok(self
             .data_roots()
             .iter()
-            .flat_map(|root| jsonl_entries(root))
-            .filter_map(|entry| self.file_ref(entry.path()))
+            .flat_map(|root| rollout_entries(root))
+            .filter_map(|path| self.file_ref(&path))
             .collect())
     }
 
@@ -1175,7 +1420,22 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
-        let mut r = default_file_ref(self.agent(), path)?;
+        let name = path.file_name()?.to_string_lossy();
+        if name.starts_with('.') {
+            return None;
+        }
+        let stem = logical_rollout_stem(path)?;
+        let meta = fs::metadata(path).ok()?;
+        if !meta.is_file() || meta.len() == 0 {
+            return None;
+        }
+        let mut r = SessionFileRef {
+            agent: self.agent(),
+            native_id: stem.to_string(),
+            file_path: path.to_string_lossy().to_string(),
+            mtime_ms: mtime_ms(&meta),
+            size: meta.len() as i64,
+        };
         if matches!(read_thread_kind(path), ThreadKind::Internal) {
             return None;
         }
@@ -1254,6 +1514,7 @@ impl AgentAdapter for CodexAdapter {
             meta: build_meta(r, &parsed, &self.archived_dir),
             mainline: parsed.messages,
             sidechains: Vec::new(),
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }

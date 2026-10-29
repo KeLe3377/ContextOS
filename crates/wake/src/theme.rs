@@ -1,5 +1,5 @@
-//! Wake 的双模式主题:Things / Bear 基准的 macOS 原生质感。
-//! 浅色 = 纸感白 + 暖灰侧栏;深色 = 暖黑 + 柔和层次。accent 取系统蓝。
+//! ContextOS 的双模式主题:冷白 / slate 工具台质感。
+//! 浅色对齐 `D:\project\ContextOS\frontend` 的冷灰 CSS token;深色保持同一冷调层级。
 use gpui::{App, Hsla, Rgba, Window};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 
@@ -34,14 +34,52 @@ pub fn appearance_preference() -> AppearancePreference {
         .unwrap_or(AppearancePreference::System)
 }
 
-fn apply_appearance(preference: AppearancePreference, window: Option<&mut Window>, cx: &mut App) {
+fn apply_appearance(
+    preference: AppearancePreference,
+    mut window: Option<&mut Window>,
+    cx: &mut App,
+) {
     match preference {
-        AppearancePreference::System => Theme::sync_system_appearance(window, cx),
-        AppearancePreference::Light => Theme::change(ThemeMode::Light, window, cx),
-        AppearancePreference::Dark => Theme::change(ThemeMode::Dark, window, cx),
+        AppearancePreference::System => Theme::sync_system_appearance(window.as_deref_mut(), cx),
+        AppearancePreference::Light => Theme::change(ThemeMode::Light, window.as_deref_mut(), cx),
+        AppearancePreference::Dark => Theme::change(ThemeMode::Dark, window.as_deref_mut(), cx),
     }
     apply_wake_theme(cx);
+    #[cfg(target_os = "windows")]
+    if let Some(window) = window.as_deref_mut() {
+        sync_windows_titlebar(window, cx.theme().mode.is_dark());
+    }
     cx.refresh_windows();
+}
+
+#[cfg(target_os = "windows")]
+fn sync_windows_titlebar(window: &Window, dark: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+
+    let handle = match HasWindowHandle::window_handle(window) {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("Could not get native window handle for title bar appearance: {error}");
+            return;
+        }
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+
+    let use_dark_mode = i32::from(dark);
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            handle.hwnd.get() as _,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&use_dark_mode as *const i32).cast(),
+            std::mem::size_of_val(&use_dark_mode) as u32,
+        )
+    };
+    if result < 0 {
+        eprintln!("Could not update native Windows title bar appearance: HRESULT {result:#x}");
+    }
 }
 
 pub fn set_appearance(
@@ -114,134 +152,132 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
 /// 趋势图里库内冒出未知 agent_id(降级防御)时的备选序列色
 pub const SERIES_FALLBACK: u32 = 0x4C8DFF;
 
-/// 在 gpui-component 默认主题之上覆写 Wake 的 token。
+/// 在 gpui-component 默认主题之上覆写 ContextOS 的 token。
 /// 每次外观切换后都要重新调用(sync_system_appearance 会重置为默认)。
 pub fn apply_wake_theme(cx: &mut App) {
     let dark = cx.theme().mode.is_dark();
     let theme = Theme::global_mut(cx);
 
     if dark {
-        // ---- 深色：石墨材质，层级从侧栏向阅读面逐步提亮 ----
-        theme.background = c(0x242422);
-        theme.foreground = c(0xF0EFED);
-        theme.border = c(0x353431);
-        theme.ring = c(0x4C8DFF);
+        // ---- 深色：VS Code Dark+ 炭灰层级与蓝色焦点色 ----
+        theme.background = c(0x1E1E1E);
+        theme.foreground = c(0xD4D4D4);
+        theme.border = c(0x3C3C3C);
+        theme.ring = c(0x007ACC);
 
-        theme.sidebar = c(0x1B1B1A);
-        theme.sidebar_foreground = c(0xD3D2CE);
-        theme.sidebar_border = c(0x292927);
-        theme.sidebar_accent = c(0x343432);
-        theme.sidebar_accent_foreground = c(0xF5F4F1);
-        theme.sidebar_primary = c(0x4C8DFF);
+        theme.sidebar = c(0x252526);
+        theme.sidebar_foreground = c(0xCCCCCC);
+        theme.sidebar_border = c(0x333333);
+        theme.sidebar_accent = c(0x37373D);
+        theme.sidebar_accent_foreground = c(0xF0F0F0);
+        theme.sidebar_primary = c(0x007ACC);
         theme.sidebar_primary_foreground = c(0xFFFFFF);
 
-        theme.colors.list = c(0x20201F);
-        theme.list_hover = c(0x2A2A28);
-        theme.list_active = c(0x303B4C);
-        theme.list_active_border = c(0x303B4C);
-        theme.list_even = c(0x20201F);
-        theme.list_head = c(0x20201F);
+        theme.colors.list = c(0x1E1E1E);
+        theme.list_hover = c(0x2A2D2E);
+        theme.list_active = c(0x04395E);
+        theme.list_active_border = c(0x007ACC);
+        theme.list_even = c(0x1E1E1E);
+        theme.list_head = c(0x252526);
 
-        theme.muted = c(0x323230);
-        theme.muted_foreground = c(0xA9A8A2);
-        theme.accent = c(0x383836);
-        theme.accent_foreground = c(0xF4F3F0);
+        theme.muted = c(0x2D2D30);
+        theme.muted_foreground = c(0xA0A0A0);
+        theme.accent = c(0x37373D);
+        theme.accent_foreground = c(0xD4D4D4);
 
-        theme.primary = c(0x4C8DFF);
-        theme.primary_hover = c(0x5E99FF);
-        theme.primary_active = c(0x3D7EF0);
+        theme.primary = c(0x007ACC);
+        theme.primary_hover = c(0x1684D8);
+        theme.primary_active = c(0x005A9E);
         theme.primary_foreground = c(0xFFFFFF);
 
-        theme.secondary = c(0x30302E);
-        theme.secondary_hover = c(0x3A3A37);
-        theme.secondary_active = c(0x41413D);
-        theme.secondary_foreground = c(0xECEBE8);
+        theme.secondary = c(0x333333);
+        theme.secondary_hover = c(0x3E3E42);
+        theme.secondary_active = c(0x4A4A4F);
+        theme.secondary_foreground = c(0xD4D4D4);
 
-        theme.popover = c(0x2C2C2A);
-        theme.popover_foreground = c(0xF0EFED);
-        theme.group_box = c(0x2C2C2A);
-        theme.group_box_foreground = c(0xF0EFED);
-        theme.input = c(0x44423E);
-        theme.selection = ca(0x4C8DFF, 0.32);
-        theme.caret = c(0x4C8DFF);
+        theme.popover = c(0x252526);
+        theme.popover_foreground = c(0xD4D4D4);
+        theme.group_box = c(0x252526);
+        theme.group_box_foreground = c(0xD4D4D4);
+        theme.input = c(0x3C3C3C);
+        theme.selection = ca(0x264F78, 0.55);
+        theme.caret = c(0xAEAFAD);
 
-        theme.title_bar = c(0x1B1B1A);
-        theme.title_bar_border = c(0x1B1B1A);
+        theme.title_bar = c(0x3C3C3C);
+        theme.title_bar_border = c(0x3C3C3C);
 
-        theme.scrollbar_thumb = c(0x3E3E3B);
-        theme.scrollbar_thumb_hover = c(0x4A4A47);
+        theme.scrollbar_thumb = c(0x424242);
+        theme.scrollbar_thumb_hover = c(0x4F4F4F);
 
-        theme.link = c(0x6EA3FF);
-        theme.danger = c(0xFF6B60);
-        theme.danger_hover = c(0xFF7B72);
-        theme.danger_active = c(0xEE5D54);
+        theme.link = c(0x3794FF);
+        theme.danger = c(0xF14C4C);
+        theme.danger_hover = c(0xF26464);
+        theme.danger_active = c(0xD83B3B);
         theme.danger_foreground = c(0xFFFFFF);
-        theme.success = c(0x56C789);
-        theme.success_foreground = c(0x10271B);
-        // 琥珀(侧栏 "Live updates off" 状态点用)
-        theme.warning = c(0xD9A741);
-        theme.warning_foreground = c(0x2A2105);
+        theme.success = c(0x89D185);
+        theme.success_foreground = c(0x1E1E1E);
+        theme.warning = c(0xCCA700);
+        theme.warning_foreground = c(0x1E1E1E);
         theme.overlay = gpui::hsla(0., 0., 0., 0.45);
     } else {
-        // ---- 浅色：银白材质，阅读卡悬在分区背景之上 ----
-        theme.background = c(0xF1F1EF);
-        theme.foreground = c(0x1D1D1F);
-        theme.border = c(0xE3E3DF);
-        theme.ring = c(0x0A84FF);
+        // ---- 浅色：与 ContextOS frontend 的冷白 / slate token 对齐 ----
+        theme.background = c(0xF8FAFC);
+        theme.foreground = c(0x0F172A);
+        theme.border = c(0xE2E8F0);
+        theme.ring = c(0x2563EB);
 
-        theme.sidebar = c(0xEDEDEA);
-        theme.sidebar_foreground = c(0x41413D);
-        theme.sidebar_border = c(0xE1E1DD);
-        theme.sidebar_accent = c(0xDEDEDA);
-        theme.sidebar_accent_foreground = c(0x1D1D1F);
-        theme.sidebar_primary = c(0x0A84FF);
+        theme.sidebar = c(0xFFFFFF);
+        theme.sidebar_foreground = c(0x475569);
+        theme.sidebar_border = c(0xE2E8F0);
+        theme.sidebar_accent = c(0xF1F5F9);
+        theme.sidebar_accent_foreground = c(0x0F172A);
+        theme.sidebar_primary = c(0x2563EB);
         theme.sidebar_primary_foreground = c(0xFFFFFF);
 
-        theme.colors.list = c(0xF7F7F5);
-        theme.list_hover = c(0xEDEDEA);
-        theme.list_active = c(0xE3EBF6);
-        theme.list_active_border = c(0xE3EBF6);
-        theme.list_even = c(0xF7F7F5);
-        theme.list_head = c(0xF7F7F5);
+        theme.colors.list = c(0xFFFFFF);
+        theme.list_hover = c(0xF1F5F9);
+        theme.list_active = c(0xEDF4FE);
+        theme.list_active_border = c(0x2563EB);
+        theme.list_even = c(0xFFFFFF);
+        theme.list_head = c(0xF8FAFC);
 
-        theme.muted = c(0xE8E8E5);
-        theme.muted_foreground = c(0x686761);
-        theme.accent = c(0xE7E7E3);
-        theme.accent_foreground = c(0x1D1D1F);
+        theme.muted = c(0xF1F5F9);
+        theme.muted_foreground = c(0x64748B);
+        theme.accent = c(0xE8EDF5);
+        theme.accent_foreground = c(0x0F172A);
 
-        theme.primary = c(0x0A84FF);
-        theme.primary_hover = c(0x268FFF);
-        theme.primary_active = c(0x0071E3);
+        theme.primary = c(0x2563EB);
+        theme.primary_hover = c(0x1D4ED8);
+        theme.primary_active = c(0x1E40AF);
         theme.primary_foreground = c(0xFFFFFF);
 
-        theme.secondary = c(0xE8E8E5);
-        theme.secondary_hover = c(0xDEDEDA);
-        theme.secondary_active = c(0xD4D4D0);
-        theme.secondary_foreground = c(0x2B2B2D);
+        theme.secondary = c(0xF1F5F9);
+        theme.secondary_hover = c(0xE8EDF5);
+        theme.secondary_active = c(0xE2E8F0);
+        theme.secondary_foreground = c(0x475569);
 
-        theme.popover = c(0xFDFDFC);
-        theme.popover_foreground = c(0x1D1D1F);
-        theme.group_box = c(0xFDFDFC);
-        theme.group_box_foreground = c(0x1D1D1F);
-        theme.input = c(0xDADAD6);
-        theme.selection = ca(0x0A7AFF, 0.22);
-        theme.caret = c(0x0A84FF);
+        theme.popover = c(0xFFFFFF);
+        theme.popover_foreground = c(0x0F172A);
+        theme.group_box = c(0xFFFFFF);
+        theme.group_box_foreground = c(0x0F172A);
+        theme.input = c(0xCBD5E1);
+        theme.selection = ca(0x2563EB, 0.18);
+        theme.caret = c(0x2563EB);
 
-        theme.title_bar = c(0xEDEDEA);
-        theme.title_bar_border = c(0xEDEDEA);
+        theme.title_bar = c(0xFFFFFF);
+        theme.title_bar_border = c(0xE2E8F0);
 
-        theme.scrollbar_thumb = c(0xD2D2CF);
-        theme.scrollbar_thumb_hover = c(0xBFBFBC);
+        theme.scrollbar_thumb = c(0xCBD5E1);
+        theme.scrollbar_thumb_hover = c(0x94A3B8);
 
-        theme.link = c(0x0A84FF);
-        theme.danger = c(0xE5484D);
-        theme.danger_hover = c(0xEE5C61);
-        theme.danger_active = c(0xD93C42);
+        theme.link = c(0x2563EB);
+        theme.danger = c(0xB91C1C);
+        theme.danger_hover = c(0xDC2626);
+        theme.danger_active = c(0x991B1B);
         theme.danger_foreground = c(0xFFFFFF);
-        theme.success = c(0x2F9E63);
+        theme.success = c(0x15803D);
         theme.success_foreground = c(0xFFFFFF);
-        // 琥珀(侧栏 "Live updates off" 状态点用),白字对比 4.9:1
-        theme.warning = c(0xA16207);
+        theme.warning = c(0xB45309);
         theme.warning_foreground = c(0xFFFFFF);
         theme.overlay = gpui::hsla(0., 0., 0., 0.25);
     }
@@ -266,7 +302,7 @@ pub fn apply_wake_theme(cx: &mut App) {
     theme.shadow = true;
 }
 
-/// 跟随系统外观:同步模式 → 重套 Wake token。
+/// 跟随系统外观:同步模式 → 重套 ContextOS token。
 pub fn sync_appearance(window: Option<&mut Window>, cx: &mut App) {
     // WAKE_THEME=dark|light 可强制模式(调试/截图用)
     let preference = match std::env::var("WAKE_THEME").as_deref() {

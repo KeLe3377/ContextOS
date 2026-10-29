@@ -1,5 +1,7 @@
 use super::parse_utils::*;
-use super::sqlite_ro::{open_sqlite_ro, strip_virtual_path, virtual_path, SqliteRo};
+use super::sqlite_ro::{
+    db_cache_stamp, open_sqlite_ro, strip_virtual_path, virtual_path, SqliteRo,
+};
 use super::AgentAdapter;
 use crate::models::*;
 use anyhow::{anyhow, Result};
@@ -27,7 +29,7 @@ struct OcDb {
 
 /// 两代 session 表的公共列(别名 s;content_len 子查询两代不同,单独拼)
 const ROW_COLS: &str = "s.id, s.directory, s.title, s.time_created, s.time_updated,
-        s.model, s.tokens_input + s.tokens_output + s.tokens_reasoning,
+        s.model, COALESCE(s.tokens_input,0) + COALESCE(s.tokens_output,0) + COALESCE(s.tokens_reasoning,0),
         s.time_archived, s.version";
 
 fn select_from(table: &str, content_len: &str, v2_messages: &str) -> String {
@@ -287,7 +289,12 @@ impl OpencodeAdapter {
         &self,
         r: &SessionFileRef,
         decode_images: bool,
-    ) -> Result<(SessionMeta, Vec<TranscriptMessage>, u32)> {
+    ) -> Result<(
+        SessionMeta,
+        Vec<TranscriptMessage>,
+        u32,
+        Vec<crate::models::SessionUsageEvent>,
+    )> {
         let _image_budget = transcript_image_decode_budget(decode_images);
         let db = self
             .db_for_ref(r)
@@ -307,13 +314,122 @@ impl OpencodeAdapter {
                 |_, _, _| {},
             )?,
         };
+        let cache_tokens = query_message_cache_tokens(&ro.conn, &r.native_id, row.v2_messages)?;
+        let usage_events = if decode_images {
+            query_message_usage_events(&ro.conn, &r.native_id, row.v2_messages)?
+        } else {
+            Vec::new()
+        };
         let count = messages
             .iter()
             .filter(|m| m.kind == MessageKind::Text)
             .count() as i64;
-        let meta = self.build_meta(r, &row, &db.path, count);
-        Ok((meta, messages, unknown))
+        let mut meta = self.build_meta(r, &row, &db.path, count);
+        if cache_tokens > 0 {
+            meta.tokens_used = Some(row.tokens.saturating_add(cache_tokens));
+        }
+        Ok((meta, messages, unknown, usage_events))
     }
+}
+
+/// OpenCode keeps cache read/write counters on each assistant message rather
+/// than in the session aggregate columns. Include those provider-reported
+/// counters in the session total, including V2 compaction usage rows.
+fn query_message_cache_tokens(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    v2: bool,
+) -> Result<i64> {
+    let sql = if v2 {
+        "SELECT type, data FROM session_message WHERE session_id = ?1 AND type IN ('assistant', 'compaction') ORDER BY seq"
+    } else {
+        "SELECT 'assistant', data FROM message WHERE session_id = ?1 ORDER BY time_created, id"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut total = 0i64;
+    for row in rows {
+        let (_kind, data) = row?;
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if !v2 && value.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let tokens = value.get("tokens").unwrap_or(&Value::Null);
+        for count in [
+            tokens.pointer("/cache/read"),
+            tokens.pointer("/cache/write"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .filter(|value| *value > 0)
+        {
+            total = total.saturating_add(count);
+        }
+    }
+    Ok(total)
+}
+
+fn query_message_usage_events(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    v2: bool,
+) -> Result<Vec<crate::models::SessionUsageEvent>> {
+    let sql = if v2 {
+        "SELECT type, data FROM session_message WHERE session_id = ?1 AND type IN ('assistant', 'compaction') ORDER BY seq"
+    } else {
+        "SELECT 'assistant', data FROM message WHERE session_id = ?1 ORDER BY time_created, id"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (kind, data) = row?;
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if !v2 && value.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let tokens = value.get("tokens").unwrap_or(&Value::Null);
+        let count = [
+            tokens.get("input"),
+            tokens.get("output"),
+            tokens.get("reasoning"),
+            tokens.pointer("/cache/read"),
+            tokens.pointer("/cache/write"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .filter(|count| *count > 0)
+        .fold(0i64, i64::saturating_add);
+        if count == 0 {
+            continue;
+        }
+        let model = value
+            .get("modelID")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/model/id").and_then(Value::as_str))
+            .or_else(|| value.get("model").and_then(Value::as_str))
+            .map(str::to_owned);
+        events.push(crate::models::SessionUsageEvent {
+            timestamp: value
+                .pointer("/time/created")
+                .and_then(Value::as_i64)
+                .filter(|timestamp| *timestamp > 0),
+            tokens_used: count,
+            model,
+        });
+        let _ = kind;
+    }
+    Ok(events)
 }
 
 /// v1 两表路径的排序子句。OpenCode 按 id(前缀时间有序);ZCode 的两张表另有
@@ -721,10 +837,17 @@ impl AgentAdapter for OpencodeAdapter {
         AgentId::Opencode
     }
 
+    fn begin_scan(&self) {
+        for db in &self.dbs {
+            db.rows_cache.invalidate();
+        }
+    }
+
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut out = Vec::new();
         for db in &self.dbs {
             let Some(rows) = Self::rows(db) else { continue };
+            let source_stamp = db_cache_stamp(&db.path);
             out.extend(
                 rows.into_iter()
                     .filter(|row| row.content_len > 0)
@@ -732,7 +855,8 @@ impl AgentAdapter for OpencodeAdapter {
                         agent: AgentId::Opencode,
                         native_id: row.id.clone(),
                         file_path: virtual_path(&db.path, &row.id),
-                        mtime_ms: row.updated_ms,
+                        // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                        mtime_ms: source_stamp,
                         size: row.content_len,
                     }),
             );
@@ -761,16 +885,17 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (meta, messages, unknown) = self.parse(r, false)?;
+        let (meta, messages, unknown, _) = self.parse(r, false)?;
         Ok(ParsedSession::derive(meta, &messages, unknown))
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (meta, messages, unknown) = self.parse(r, true)?;
+        let (meta, messages, unknown, usage_events) = self.parse(r, true)?;
         Ok(ParsedTranscript {
             meta,
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events,
             unknown_line_count: unknown,
         })
     }

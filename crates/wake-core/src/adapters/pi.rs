@@ -55,6 +55,7 @@ struct PiParse {
     /// 最后一行消息的时间(合并后的消息保留回合首行时间,updated 单独追踪)
     last_ts: i64,
     messages: Vec<TranscriptMessage>,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     model: Option<String>,
     tokens_used: Option<i64>,
     unknown_lines: u32,
@@ -71,6 +72,7 @@ fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
         created_at: 0,
         last_ts: 0,
         messages: Vec::new(),
+        usage_events: Vec::new(),
         model: None,
         tokens_used: None,
         unknown_lines: 0,
@@ -125,6 +127,7 @@ fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
         }
     }
     p.messages = render.messages;
+    p.usage_events = render.usage_events;
     p.model = render.model;
     p.tokens_used = render.tokens_used;
     assign_seq(&mut p.messages);
@@ -196,6 +199,7 @@ impl AgentAdapter for PiAdapter {
             meta: build_meta(self.agent, r, &parsed),
             mainline: parsed.messages,
             sidechains: Vec::new(),
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use wake_core::adapters::{adapter_for, create_adapter_roster_for};
 use wake_core::db::Store;
+use wake_core::mcp::tools;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, NullEvents};
 
@@ -31,14 +32,14 @@ struct Client {
 
 impl Client {
     fn spawn(db: &Path) -> Client {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_wake-mcp"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_contextos-mcp"))
             .arg("--db")
             .arg(db)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn wake-mcp");
+            .expect("spawn contextos-mcp");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Client {
@@ -59,7 +60,7 @@ impl Client {
     fn read_reply(&mut self) -> Value {
         let mut line = String::new();
         let n = self.stdout.read_line(&mut line).expect("read reply");
-        assert!(n > 0, "wake-mcp closed stdout unexpectedly");
+        assert!(n > 0, "contextos-mcp closed stdout unexpectedly");
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("reply is not JSON: {e}: {line}"))
     }
 
@@ -97,8 +98,8 @@ impl Client {
 
     fn finish(mut self) {
         drop(self.stdin.take());
-        let status = self.child.wait().expect("wait wake-mcp");
-        assert!(status.success(), "wake-mcp exited with {status}");
+        let status = self.child.wait().expect("wait contextos-mcp");
+        assert!(status.success(), "contextos-mcp exited with {status}");
     }
 }
 
@@ -119,7 +120,7 @@ fn next_seq_hint(text: &str) -> Option<i64> {
 #[test]
 fn stdio_contract_end_to_end() {
     let tmp = tempfile::Builder::new()
-        .prefix("wake-mcp-e2e-")
+        .prefix("contextos-mcp-e2e-")
         .tempdir()
         .unwrap();
     let home = tmp.path().join("home");
@@ -184,12 +185,12 @@ fn stdio_contract_end_to_end() {
         }),
     );
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(init["result"]["serverInfo"]["name"], "wake");
+    assert_eq!(init["result"]["serverInfo"]["name"], "contextos");
     assert!(init["result"]["capabilities"]["tools"].is_object());
     assert!(init["result"]["instructions"]
         .as_str()
         .unwrap()
-        .contains("wake_search"));
+        .contains("contextos_search"));
     c.notify("notifications/initialized");
     assert_eq!(c.request("ping", json!({}))["result"], json!({}));
 
@@ -200,16 +201,7 @@ fn stdio_contract_end_to_end() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        names,
-        [
-            "wake_search",
-            "wake_list_sessions",
-            "wake_get_session",
-            "wake_list_projects",
-            "wake_list_memories"
-        ]
-    );
+    assert_eq!(names, tools::NAMES);
 
     let unknown = c.request("resources/list", json!({}));
     assert_eq!(unknown["error"]["code"], -32601);
@@ -438,13 +430,13 @@ fn stdio_contract_end_to_end() {
 
     // 7. 全程只读
     let after = std::fs::read(&db).unwrap();
-    assert!(before == after, "wake-mcp must never write the index");
+    assert!(before == after, "contextos-mcp must never write the index");
 }
 
 #[test]
 fn missing_index_exits_with_a_clear_error() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_wake-mcp"))
+    let out = Command::new(env!("CARGO_BIN_EXE_contextos-mcp"))
         .arg("--db")
         .arg(tmp.path().join("nope.db"))
         .stdin(Stdio::null())

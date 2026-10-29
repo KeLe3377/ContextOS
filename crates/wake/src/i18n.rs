@@ -1,4 +1,4 @@
-//! Wake 的多语言层。
+//! ContextOS 的多语言层。
 //!
 //! **key 就是英文原文**:漏翻译天然回退英文(查不到即返回 key 自身),改文案
 //! 不必同步改 key,代码里读到的还是那句话。代价是同一英文在两处需要不同译文时
@@ -308,7 +308,7 @@ fn match_system(locale: &str, choices: &[Locale]) -> Option<&'static str> {
 
 /// gpui-component 自带组件(日期选择器、颜色选择器等)的语言。它的 tag 体系
 /// 与我们的语言包不同名(en / zh-CN / zh-HK / zh-TW / it),按主语言码加书写
-/// 系统映射;没有对应的就退英文——组件文案是英文、Wake 自己的文案仍是译文,
+/// 系统映射;没有对应的就退英文——组件文案是英文、ContextOS 自己的文案仍是译文,
 /// 比整个界面回退英文强
 fn component_locale(tag: Option<&str>) -> &'static str {
     let Some(tag) = tag else { return "en" };
@@ -622,6 +622,7 @@ mod tests {
             include_str!("workbench/cleanup/history.rs"),
             include_str!("workbench/cleanup/rows.rs"),
             include_str!("workbench/memory.rs"),
+            include_str!("workbench/skills.rs"),
             include_str!("settings.rs"),
             include_str!("main.rs"),
             include_str!("markdown_links.rs"),
@@ -651,6 +652,9 @@ mod tests {
         wake_core::mcp::setup_snippets(std::path::Path::new("x"))
             .iter()
             .any(|s| s.hint == key || s.copy_label == key)
+            || wake_core::cli::session_start_snippets(std::path::Path::new("contextos-cli"))
+                .iter()
+                .any(|s| s.hint == key || s.copy_label == key || s.client == key)
     }
 
     /// 文本扫描找不到的 key:ui.rs 由 `concat!` 拼出整句(平台名词只写一次),

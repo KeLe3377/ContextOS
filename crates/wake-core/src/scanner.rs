@@ -17,6 +17,7 @@ pub struct ScanProgress {
 pub trait ScanEvents: Send + Sync {
     fn on_progress(&self, p: &ScanProgress);
     fn on_sessions_changed(&self);
+    fn on_workspace_changes_changed(&self) {}
     /// 文件监听后端报告事件丢失(FSEvents 的 MustScanSubDirs / inotify 队列
     /// 溢出):丢失期间的改动没人知道,需要一轮增量扫描兜底。默认忽略——
     /// scan CLI 与测试不跑 watcher;GUI 接到后经现有扫描状态机排队
@@ -59,6 +60,17 @@ impl Drop for ScanFinale<'_> {
 /// 级,要挡的正是两个 Store 实例开同一个库文件;扫描 panic 会毒化锁,
 /// into_inner 照常放行。排在后面的照常出终态事件,UI 只是多等一会儿
 static SCAN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn acquire_cross_process_scan_lock(store: &Store) -> Result<std::fs::File> {
+    let lock_path = std::path::PathBuf::from(format!("{}.scan.lock", store.path().display()));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    file.lock()?;
+    Ok(file)
+}
 
 /// 从零建一次索引:**只在索引文件不存在时**建,已经有库就原样留给 GUI
 /// (`Ok(None)`)。这是"重建权只归 GUI 的 `open_or_rebuild`"(db.rs)唯一的
@@ -122,7 +134,7 @@ impl Staging {
     }
 
     fn clear(&self) {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", ".scan.lock"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
         }
     }
@@ -146,6 +158,7 @@ pub fn run_scan(
     let _gate = SCAN_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _scan_lock = acquire_cross_process_scan_lock(store)?;
     let mut fin = ScanFinale {
         events,
         progress: ScanProgress {
@@ -192,6 +205,11 @@ fn run_scan_inner(
     full: bool,
     progress: &mut ScanProgress,
 ) -> Result<()> {
+    let workspace_db_path = crate::workspace_store::workspace_db_path_for(store.path());
+    let workspace_store = crate::workspace_store::WorkspaceStore::open(
+        &workspace_db_path,
+        &crate::workspace_store::workspace_cas_path_for(store.path()),
+    )?;
     for adapter in adapters {
         adapter.begin_scan();
     }
@@ -200,6 +218,8 @@ fn run_scan_inner(
     // 跑完就清旗子,不按"全部成功"重试——解析失败的文件下次也不会自己好,它变了
     // 自然走增量重解析;留着旗子只会让每次启动都全量一遍
     let force_reindex = store.needs_fts_reindex();
+    // Existing transcript indexes predate independent session file-change records.
+    let force_session_change_backfill = store.needs_session_file_change_backfill();
     let known = store.known_files()?;
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     struct WorkItem<'a> {
@@ -244,7 +264,9 @@ fn run_scan_inner(
             //(2026-08-24 Codex review P1)。key 按实例 host 构造(远程三段)
             // ——阶段 1 远程禁删故无远程墓碑,但格式先写对,放开时不欠债
             .filter(|r| {
-                !store.is_tombstoned(&r.file_path) && !store.is_key_tombstoned(&key_of(ix, r))
+                !store
+                    .is_session_tombstoned(&key_of(ix, r), &r.file_path, r.mtime_ms, r.size)
+                    .unwrap_or(true)
             })
             // 无任何根认领的引用(越界枚举或合成测试)保守放行给枚举者;
             // 过滤只裁决"确有更深的根拥有它"的情形
@@ -317,6 +339,9 @@ fn run_scan_inner(
         }
 
         // 快路径:新/变化的先写 meta 让列表立即可见
+        // SQLite sources are always fully parsed below. Their parser already
+        // returns complete metadata, so a quick placeholder would only cause
+        // a second session/title write in the same scan.
         let quick_map = adapter.quick_meta(&refs);
         if let Some(map) = &quick_map {
             let fresh: Vec<(SessionMeta, i64)> = refs
@@ -332,7 +357,11 @@ fn run_scan_inner(
                     // 墓碑要按**这个最终 key** 再卡——write_meta_only 是第三条
                     // 写库路径,漏了它,已删会话会以空正文卡片复活
                     //(2026-08-24 Codex review P1)
-                    if (changed || full || force_adapter) && !store.is_key_tombstoned(&meta.key) {
+                    if (changed || full || force_adapter)
+                        && !store
+                            .is_session_tombstoned(&meta.key, &r.file_path, r.mtime_ms, r.size)
+                            .unwrap_or(true)
+                    {
                         // fileMtime=0 → 后续全量解析仍会执行
                         Some((meta.clone(), 0))
                     } else {
@@ -352,7 +381,7 @@ fn run_scan_inner(
                     None => true,
                     Some((mtime, size, _)) => *mtime != r.mtime_ms || *size != r.size,
                 };
-            if full || force_adapter || changed {
+            if full || force_adapter || force_session_change_backfill || changed {
                 let quick = quick_map
                     .as_ref()
                     .and_then(|m| m.get(&r.file_path).cloned());
@@ -392,7 +421,27 @@ fn run_scan_inner(
 
     let mut last_notify = std::time::Instant::now();
     let mut grok_backfill_succeeded = true;
+    let mut session_change_backfill_succeeded = true;
+    let mut session_changes_changed = false;
     for item in &queue {
+        if force_session_change_backfill {
+            match record_session_file_changes(item.adapter, &item.r, &workspace_store) {
+                Ok(recorded) => session_changes_changed |= recorded,
+                Err(error) => {
+                    session_change_backfill_succeeded = false;
+                    eprintln!(
+                        "[scanner] session change backfill failed {}: {error:#}",
+                        item.r.file_path
+                    );
+                }
+            }
+            progress.done += 1;
+            if last_notify.elapsed().as_millis() > 800 || progress.done == progress.total {
+                last_notify = std::time::Instant::now();
+                events.on_progress(progress);
+            }
+            continue;
+        }
         let forced_grok = force_grok_backfill && item.adapter.agent() == AgentId::Grok;
         let mut item_written = false;
         match item.adapter.parse_session(&item.r) {
@@ -405,7 +454,15 @@ fn run_scan_inner(
                 };
                 // 合并可能改写 key(codex 的 state thread-id):改名后的 key
                 // 也要受墓碑约束,否则改名副本绕过上面的枚举过滤
-                if store.is_key_tombstoned(&meta.key) {
+                if store
+                    .is_session_tombstoned(
+                        &meta.key,
+                        &item.r.file_path,
+                        item.r.mtime_ms,
+                        item.r.size,
+                    )
+                    .unwrap_or(true)
+                {
                     progress.done += 1;
                     continue;
                 }
@@ -420,7 +477,19 @@ fn run_scan_inner(
                     &rank_of(adapters, meta.agent),
                     None,
                 ) {
-                    Ok(written) => item_written = written,
+                    Ok(written) => {
+                        item_written = written;
+                        if written {
+                            match record_session_file_changes(item.adapter, &item.r, &workspace_store) {
+                                Ok(true) => events.on_workspace_changes_changed(),
+                                Ok(false) => {}
+                                Err(error) => eprintln!(
+                                    "[scanner] session file changes skipped for {}: {error:#}",
+                                    item.r.file_path
+                                ),
+                            }
+                        }
+                    }
                     Err(e) => eprintln!("[scanner] write failed {}: {e}", item.r.file_path),
                 }
             }
@@ -439,7 +508,15 @@ fn run_scan_inner(
                                 Some(q) => fb_adapter.merge_quick_meta(parsed.meta, q),
                                 None => parsed.meta,
                             };
-                            if store.is_key_tombstoned(&meta.key) {
+                            if store
+                                .is_session_tombstoned(
+                                    &meta.key,
+                                    &fb.file_path,
+                                    fb.mtime_ms,
+                                    fb.size,
+                                )
+                                .unwrap_or(true)
+                            {
                                 item_written = true;
                                 break;
                             }
@@ -456,7 +533,23 @@ fn run_scan_inner(
                                 &rank_of(adapters, meta.agent),
                                 Some((item.r.file_path.as_str(), item.r.mtime_ms)),
                             ) {
-                                Ok(written) => item_written = written,
+                                Ok(written) => {
+                                    item_written = written;
+                                    if written {
+                                        match record_session_file_changes(
+                                            fb_adapter.as_ref(),
+                                            fb,
+                                            &workspace_store,
+                                        ) {
+                                            Ok(true) => events.on_workspace_changes_changed(),
+                                            Ok(false) => {}
+                                            Err(error) => eprintln!(
+                                                "[scanner] session file changes skipped for {}: {error:#}",
+                                                fb.file_path
+                                            ),
+                                        }
+                                    }
+                                }
                                 Err(e) => eprintln!(
                                     "[scanner] fallback write failed {}: {e}",
                                     fb.file_path
@@ -491,11 +584,35 @@ fn run_scan_inner(
     if force_grok_backfill && grok_backfill_succeeded {
         store.finish_grok_parent_backfill()?;
     }
+    if force_session_change_backfill && session_change_backfill_succeeded {
+        store.finish_session_file_change_backfill()?;
+    }
+    if session_changes_changed {
+        events.on_workspace_changes_changed();
+    }
     if force_reindex {
         store.finish_fts_reindex()?;
     }
 
+    // Index maintenance is deliberately after the scan's writes and flag
+    // updates. It is best effort: a UI reader may temporarily hold a SQLite
+    // read transaction, which must not turn a successful scan into a failure.
+    if let Err(error) = store.compact_after_scan(pruned) {
+        eprintln!("[scanner] index compaction skipped: {error}");
+    }
+
     Ok(())
+}
+
+fn record_session_file_changes(
+    adapter: &dyn AgentAdapter,
+    reference: &SessionFileRef,
+    workspace_store: &crate::workspace_store::WorkspaceStore,
+) -> Result<bool> {
+    let transcript = adapter.parse_transcript(reference)?;
+    let project_path = &transcript.meta.project_path;
+    let changes = crate::workspace_changes::explicit_session_file_changes(&transcript);
+    workspace_store.record_session_file_changes(project_path, &transcript.meta.key, &changes)
 }
 
 /// 记忆文档随每轮扫描整组刷新:同 (agent, host) 的各实例(默认根 + 自定义根;远程
@@ -843,7 +960,16 @@ fn reparse_for_parent_change(
         Some(quick) => adapter.merge_quick_meta(parsed.meta, quick),
         None => parsed.meta,
     };
-    if meta.key != key || store.is_key_tombstoned(&meta.key) {
+    if meta.key != key
+        || store
+            .is_session_tombstoned(
+                &meta.key,
+                &reference.file_path,
+                reference.mtime_ms,
+                reference.size,
+            )
+            .unwrap_or(true)
+    {
         return false;
     }
     match store.write_session_guarded(
@@ -871,6 +997,24 @@ pub fn scan_files(
     events: &dyn ScanEvents,
     refs: Vec<SessionFileRef>,
 ) {
+    let _gate = SCAN_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _scan_lock = match acquire_cross_process_scan_lock(store) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("[scanner] could not acquire index scan lock: {error}");
+            return;
+        }
+    };
+    let workspace_store = crate::workspace_store::WorkspaceStore::open(
+        &crate::workspace_store::workspace_db_path_for(store.path()),
+        &crate::workspace_store::workspace_cas_path_for(store.path()),
+    )
+    .map_err(|error| {
+        eprintln!("[scanner] could not open workspace store for session changes: {error:#}");
+    })
+    .ok();
     let affected_agents: std::collections::HashSet<AgentId> =
         refs.iter().map(|reference| reference.agent).collect();
     for adapter in adapters {
@@ -885,13 +1029,18 @@ pub fn scan_files(
     let mut by_adapter: std::collections::HashMap<usize, Vec<SessionFileRef>> =
         std::collections::HashMap::new();
     for r in refs {
-        if store.is_tombstoned(&r.file_path) {
-            continue;
-        }
         let Some(ix) = crate::adapters::adapter_ix_for(adapters, r.agent, &r.file_path) else {
             continue;
         };
-        if store.is_key_tombstoned(&session_key(r.agent, adapters[ix].host(), &r.native_id)) {
+        if store
+            .is_session_tombstoned(
+                &session_key(r.agent, adapters[ix].host(), &r.native_id),
+                &r.file_path,
+                r.mtime_ms,
+                r.size,
+            )
+            .unwrap_or(true)
+        {
             continue;
         }
         by_adapter.entry(ix).or_default().push(r);
@@ -909,7 +1058,10 @@ pub fn scan_files(
                         None => parsed.meta,
                     };
                     // 合并后 key 改名(codex thread-id)也受墓碑约束
-                    if store.is_key_tombstoned(&meta.key) {
+                    if store
+                        .is_session_tombstoned(&meta.key, &r.file_path, r.mtime_ms, r.size)
+                        .unwrap_or(true)
+                    {
                         continue;
                     }
                     // 路径易主(location 编辑改了 agent):旧 key 行不清,新 key
@@ -934,6 +1086,15 @@ pub fn scan_files(
                         .unwrap_or(false)
                     {
                         changed = true;
+                        if let Some(workspace_store) = workspace_store.as_ref() {
+                            match record_session_file_changes(adapter.as_ref(), r, workspace_store) {
+                                Ok(_) => events.on_workspace_changes_changed(),
+                                Err(error) => eprintln!(
+                                    "[scanner] session file changes skipped for {}: {error:#}",
+                                    r.file_path
+                                ),
+                            }
+                        }
                     }
                 }
                 Err(e) => eprintln!("[scanner] incremental parse failed {}: {e}", r.file_path),

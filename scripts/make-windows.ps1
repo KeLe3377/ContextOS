@@ -20,22 +20,21 @@ $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target
 
 cargo build --release -p wake
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo build --release -p wake-core --bin wake-mcp --bin wake-cli
+cargo build --release -p wake-core --bin contextos-mcp --bin contextos-cli
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# 二进制名 Wake.exe 来自 [[bin]](macOS 菜单栏取进程名所需);Windows 惯例
-# 首字母大写正好同形,不再改名
-$stage = Join-Path ([System.IO.Path]::GetTempPath()) "wake-stage\wake-$version-windows-$arch"
+# 二进制名 ContextOS.exe 来自 [[bin]](macOS 菜单栏取进程名所需);Windows
+# 惯例首字母大写正好同形,不再改名。zip 只是发行产物名,跟着改
+$stage = Join-Path ([System.IO.Path]::GetTempPath()) "contextos-stage\contextos-$version-windows-$arch"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
-Copy-Item (Join-Path $targetDir "release/Wake.exe") (Join-Path $stage "Wake.exe")
-# 只读 MCP server,与主程序并排(Settings → Connect 按同目录找它)
-Copy-Item (Join-Path $targetDir "release/wake-mcp.exe") (Join-Path $stage "wake-mcp.exe")
-# 会话查询 CLI,同样并排
-Copy-Item (Join-Path $targetDir "release/wake-cli.exe") (Join-Path $stage "wake-cli.exe")
+Copy-Item (Join-Path $targetDir "release/ContextOS.exe") (Join-Path $stage "ContextOS.exe")
+# 正式入口与主程序并排(Settings → Connect 只展示这两个)
+Copy-Item (Join-Path $targetDir "release/contextos-mcp.exe") (Join-Path $stage "contextos-mcp.exe")
+Copy-Item (Join-Path $targetDir "release/contextos-cli.exe") (Join-Path $stage "contextos-cli.exe")
 
 New-Item -ItemType Directory -Path dist -Force | Out-Null
-$zip = "dist/wake-$version-windows-$arch.zip"
+$zip = "dist/contextos-$version-windows-$arch.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip
 

@@ -214,14 +214,14 @@ pub fn usage_tokens(usage: &Value) -> i64 {
     ]
     .iter()
     .map(|key| usage.get(*key).and_then(Value::as_i64).unwrap_or(0))
-    .sum();
+    .fold(0i64, i64::saturating_add);
     if message_tokens > 0 {
         return message_tokens;
     }
     ["prompt_tokens", "completion_tokens"]
         .iter()
         .map(|key| usage.get(*key).and_then(Value::as_i64).unwrap_or(0))
-        .sum()
+        .fold(0i64, i64::saturating_add)
 }
 
 /// 递归枚举 `dir` 下的 `*.jsonl` 普通文件。file_type 来自 readdir、不额外
@@ -694,6 +694,13 @@ pub struct MtimeCache<T: Clone>(std::sync::Mutex<Option<(i64, T)>>);
 impl<T: Clone> MtimeCache<T> {
     pub fn new() -> Self {
         Self(std::sync::Mutex::new(None))
+    }
+
+    /// Forget the cached value before a new source scan.  This is needed for
+    /// SQLite-backed adapters: a database can change without changing the
+    /// timestamp used by the cache (for example while its WAL is merged).
+    pub fn invalidate(&self) {
+        *self.0.lock().unwrap() = None;
     }
 
     pub fn get_or_try_build(&self, mtime: i64, build: impl FnOnce() -> Option<T>) -> Option<T> {

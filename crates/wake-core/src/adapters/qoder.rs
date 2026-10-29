@@ -65,6 +65,7 @@ struct QoderParse {
     git_branch: Option<String>,
     model: Option<String>,
     tokens_used: i64,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     created_at: i64,
     updated_at: i64,
     unknown_lines: u32,
@@ -356,6 +357,7 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
     let mut pending: Option<PendingAssistant> = None;
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
     let mut usage_seen = HashSet::new();
+    let mut usage_events = Vec::new();
     let mut cwd = String::new();
     let mut git_branch = None;
     let mut model = runtime_model;
@@ -511,13 +513,21 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
                 model = Some(value);
             }
         }
-        let usage_key = msg_id
-            .clone()
-            .or_else(|| optional_string(row.get("uuid")))
-            .unwrap_or_default();
-        if usage_seen.insert(usage_key) {
+        let usage_key = msg_id.clone().or_else(|| optional_string(row.get("uuid")));
+        // Deduplicate fragmented entries when they have an identity. If both
+        // IDs are absent, each row is its own usage event; an empty key would
+        // otherwise suppress every later anonymous response.
+        if usage_key.is_none_or(|key| usage_seen.insert(key)) {
             if let Some(usage) = message.get("usage") {
-                tokens_used += usage_tokens(usage);
+                let count = usage_tokens(usage);
+                tokens_used = tokens_used.saturating_add(count);
+                if count > 0 {
+                    usage_events.push(crate::models::SessionUsageEvent {
+                        timestamp: (ts > 0).then_some(ts),
+                        tokens_used: count,
+                        model: model.clone(),
+                    });
+                }
             }
         }
         match message.get("content") {
@@ -584,6 +594,7 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
         git_branch,
         model,
         tokens_used,
+        usage_events,
         created_at,
         updated_at,
         unknown_lines: unknown,
@@ -667,6 +678,7 @@ impl AgentAdapter for QoderAdapter {
             meta: build_meta(r, &parsed),
             mainline: parsed.messages,
             sidechains: Vec::new(),
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }

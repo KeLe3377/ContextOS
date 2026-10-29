@@ -1,5 +1,7 @@
 use super::parse_utils::*;
-use super::sqlite_ro::{open_sqlite_ro, strip_virtual_path, virtual_path, SqliteRo};
+use super::sqlite_ro::{
+    db_cache_stamp, open_sqlite_ro, strip_virtual_path, virtual_path, SqliteRo,
+};
 use super::AgentAdapter;
 use crate::models::*;
 use anyhow::{anyhow, Result};
@@ -439,10 +441,17 @@ impl AgentAdapter for HermesAdapter {
         AgentId::Hermes
     }
 
+    fn begin_scan(&self) {
+        for db in &self.dbs {
+            db.rows_cache.invalidate();
+        }
+    }
+
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut out = Vec::new();
         for db in &self.dbs {
             let Some(rows) = Self::rows(db) else { continue };
+            let source_stamp = db_cache_stamp(&db.path);
             out.extend(
                 rows.into_iter()
                     // 空会话(刚起就退)与 session_search 工具内部的检索会话不列
@@ -451,7 +460,8 @@ impl AgentAdapter for HermesAdapter {
                         agent: AgentId::Hermes,
                         native_id: row.id.clone(),
                         file_path: virtual_path(&db.path, &row.id),
-                        mtime_ms: row.updated_ms,
+                        // SQLite 行没有可靠的文件 mtime;库/WAL 戳作为扫描指纹。
+                        mtime_ms: source_stamp,
                         size: row.content_len,
                     }),
             );
@@ -488,6 +498,7 @@ impl AgentAdapter for HermesAdapter {
             meta,
             mainline: messages,
             sidechains: Vec::new(),
+            usage_events: Vec::new(),
             unknown_line_count: 0,
         })
     }

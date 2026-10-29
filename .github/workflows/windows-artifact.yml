@@ -29,6 +29,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wake-windows
-          path: dist/wake-*-windows-*.zip
+          name: contextos-windows
+          path: dist/contextos-*-windows-*.zip
           if-no-files-found: error

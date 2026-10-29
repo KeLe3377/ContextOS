@@ -24,6 +24,7 @@ pub(crate) struct PiRender {
     pub messages: Vec<TranscriptMessage>,
     pub model: Option<String>,
     pub tokens_used: Option<i64>,
+    pub usage_events: Vec<SessionUsageEvent>,
     opts: PiRenderOptions,
     decode_images: bool,
     /// toolCallId → (消息下标, tool_calls 下标)
@@ -36,6 +37,7 @@ impl PiRender {
             messages: Vec::new(),
             model: None,
             tokens_used: None,
+            usage_events: Vec::new(),
             opts,
             decode_images,
             tool_index: HashMap::new(),
@@ -92,6 +94,7 @@ impl PiRender {
         // Each assistant entry reports one API call, including cache tokens.
         // Account before display filtering: empty/thinking-only calls can still
         // consume tokens even when they produce no visible transcript message.
+        let model = msg.get("model").and_then(Value::as_str).map(String::from);
         if let Some(tokens) = msg
             .get("usage")
             .and_then(|u| u.get("totalTokens"))
@@ -99,6 +102,13 @@ impl PiRender {
             .filter(|tokens| *tokens >= 0)
         {
             self.tokens_used = Some(self.tokens_used.unwrap_or(0).saturating_add(tokens));
+            if tokens > 0 {
+                self.usage_events.push(SessionUsageEvent {
+                    timestamp: (ts > 0).then_some(ts),
+                    tokens_used: tokens,
+                    model: model.clone(),
+                });
+            }
         }
         let parsed = content_parts(content, self.decode_images);
         let mut tools: Vec<ToolCallView> = Vec::new();
@@ -132,7 +142,6 @@ impl PiRender {
         {
             return;
         }
-        let model = msg.get("model").and_then(Value::as_str).map(String::from);
         if model.is_some() {
             self.model = model.clone();
         }

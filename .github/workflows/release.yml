@@ -87,7 +87,7 @@ jobs:
         run: |
           scripts/make-app.sh --universal
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          ditto -c -k --keepParent --sequesterRsrc dist/Wake.app "dist/Wake-${VERSION}-macos.zip"
+          ditto -c -k --keepParent --sequesterRsrc dist/ContextOS.app "dist/ContextOS-${VERSION}-macos.zip"
 
       - name: Upload (skip existing)
         env:
@@ -95,7 +95,7 @@ jobs:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
           existing=$(gh release view "$TAG" --json assets -q '.assets[].name')
-          for f in dist/Wake-*-macos.zip; do
+          for f in dist/ContextOS-*-macos.zip; do
             if grep -qxF "$(basename "$f")" <<< "$existing"; then
               echo "skip existing $(basename "$f")"
             else
@@ -171,7 +171,7 @@ jobs:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
           $existing = (gh release view $env:TAG --json assets -q '.assets[].name') -split "`n"
-          Get-ChildItem dist/wake-*-windows-*.zip | ForEach-Object {
+          Get-ChildItem dist/contextos-*-windows-*.zip | ForEach-Object {
             if ($existing -contains $_.Name) {
               "skip existing $($_.Name)"
             } else {

@@ -119,6 +119,7 @@ struct ParseResult {
     cwd: String,
     model: Option<String>,
     tokens_used: i64,
+    usage_events: Vec<crate::models::SessionUsageEvent>,
     created_at: i64,
     updated_at: i64,
     unknown_lines: u32,
@@ -178,7 +179,15 @@ fn assistant_slot<'a>(
     if model.is_some() {
         out.model = model.clone();
     }
-    out.tokens_used += row_usage(row);
+    let tokens = row_usage(row);
+    out.tokens_used = out.tokens_used.saturating_add(tokens);
+    if tokens > 0 {
+        out.usage_events.push(crate::models::SessionUsageEvent {
+            timestamp: (ts > 0).then_some(ts),
+            tokens_used: tokens,
+            model: model.clone(),
+        });
+    }
     if pending.as_ref().is_some_and(|p| p.results_seen) {
         flush_assistant(pending, &mut out.messages, tool_index);
     }
@@ -205,6 +214,7 @@ fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult
         cwd: String::new(),
         model: None,
         tokens_used: 0,
+        usage_events: Vec::new(),
         created_at: 0,
         updated_at: 0,
         unknown_lines: 0,
@@ -458,6 +468,7 @@ impl AgentAdapter for CodebuddyAdapter {
             meta: build_meta(self.agent, r, &parsed),
             mainline: parsed.messages,
             sidechains: Vec::new(),
+            usage_events: parsed.usage_events,
             unknown_line_count: parsed.unknown_lines,
         })
     }

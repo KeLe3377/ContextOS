@@ -2,14 +2,14 @@
 //! Store)建立之前就要用,都等不了库。统一目录、统一原子写法
 use std::path::PathBuf;
 
-/// `<config dir>/wake/`——语言包目录等也挂在它下面
+/// `<config dir>/ContextOS/`——语言包目录等也挂在它下面
 pub fn dir() -> Option<PathBuf> {
     dirs::config_dir()
         .or_else(dirs::data_dir)
-        .map(|dir| dir.join("wake"))
+        .map(|dir| dir.join("ContextOS"))
 }
 
-/// `<config dir>/wake/<name>`
+/// `<config dir>/ContextOS/<name>`
 fn path(name: &str) -> PathBuf {
     dir().unwrap_or_else(|| PathBuf::from(".")).join(name)
 }
