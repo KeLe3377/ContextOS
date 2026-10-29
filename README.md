@@ -1,239 +1,36 @@
-# Wake
+# ContextOS
 
-[![License](https://img.shields.io/github/license/iAmCorey/Wake?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20Linux%20beta%20%7C%20Windows%20beta-007AFF?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/iAmCorey/Wake/total?style=flat-square)](https://github.com/iAmCorey/Wake/releases)
-[![Stars](https://img.shields.io/github/stars/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/stargazers)
-[![CI](https://img.shields.io/github/actions/workflow/status/iAmCorey/Wake/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml)
+ContextOS 是一个面向 AI 编程 Agent 的桌面工作台。它把分散在本机各个 Agent 中的会话、项目改动和可复用上下文集中起来，让用户和 Agent 能够搜索历史、查看变更、整理记忆，并通过 MCP 或 CLI 继续组合这些能力。
 
-A native desktop app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5). macOS first; experimental Linux support since v0.2.5, experimental Windows support since v0.2.7.
+ContextOS 基于 [Wake](https://github.com/iAmCorey/Wake) 进行二次开发。感谢 Corey Chiu 和 Wake 项目为会话浏览器、数据适配器及 Rust + GPUI 应用提供的基础。
 
-Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local; Wake only contacts GitHub when you explicitly check for an update.
+## 功能
 
-![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
+- **统一浏览 Agent 会话**：扫描多个编程 Agent 的本地会话数据，按 Agent 和项目查看会话，全文搜索并定位到具体消息；支持查看对话、工具调用、模型与 Token 信息。
+- **继续和整理会话**：从原项目位置恢复会话，收藏、置顶、导出 Markdown，或将不需要的会话移入系统废纸篓。
+- **追踪项目改动**：监控用户指定的工作区，记录文件改动和前后快照；同时展示会话日志明确记录的文件操作，便于回看 Agent 在项目中的工作。
+- **压缩长会话**：组合机械规则、Jev 评估与可配置的 LLM 策略，按完整对话轮次处理内容，并管理生成的摘要和压缩文档。
+- **管理记忆与 Skill**：浏览和维护 Agent 记忆、项目指令及 Skill；查看 Skill 在不同 Agent 目录中的安装和同步状态。
+- **查看使用统计与清理记录**：按 Agent、项目、模型和时间查看会话及 Token 统计；整理历史索引和会话文件。
+- **通过 MCP 和 CLI 组合操作**：桌面应用、`contextos-mcp` 和 `contextos-cli` 共享业务实现。Agent 可按需组合会话、改动、记忆、关系、压缩、数据源和 Laya 运行时等操作。
+- **本机索引与可选外部服务**：会话索引保存在本机。可选的 LLM 或 Jev 压缩服务会按用户配置发送相应输入；远程工作区能力通过用户配置的 SSH 主机同步会话数据。
 
-## Features
+## 支持的 Agent
 
-- **Unified browsing** — all sessions grouped by agent / project, with Grok Build subagents nested under their parent and live file watching for incremental updates
-- **Full-text search** (⌘K / Ctrl+K) — SQLite FTS5 trigram index; handles CJK text and code substrings (like `useEffect(`) equally well; jumps straight to the matched message in the transcript
-- **Transcript view** — per-message rendering with user/assistant bubbles, inline images (copy or save them), collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
-- **One-click resume** — reopens the session in your terminal (Terminal/iTerm on macOS; native terminal hosts on Linux and Windows) at the original project directory (`claude --resume`, `codex resume`, …)
-- **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown or save an inline image through the system Save dialog (Wake remembers the last folder), delete (system Trash + tombstone so deleted sessions stay deleted)
-- **Insights** — a stats page for your whole library: GitHub-style activity heatmap with streaks, hour / weekday / month breakdowns, and Agents / Projects / Models leaderboards switchable between sessions, tokens, and prompts
-- **Remote hosts** — mirror the sessions on your other machines over SSH (Settings → Remote hosts); they show up next to local ones with an `@host` badge, searchable like everything else, and resume through a copied `ssh -t` command
-- **Connect your agents (MCP)** — a bundled read-only MCP server, `wake-mcp`, lets Claude Code, Codex, Cursor or any MCP client search your whole history, list recent sessions per project and read transcripts page by page, so a new agent can pick up where another one left off; Settings → Connect has copy-paste setup snippets
-- **Command line** — `wake-cli` gives the same four answers to anything that can run a shell command: `wake-cli sessions --project "$PWD"`, `wake-cli search "…"`, `wake-cli show <key>`; it prints the same text an MCP client sees; `npx skills add iAmCorey/Wake` installs a skill so agents reach for it on their own
+内置数据适配器覆盖 Claude Code、Codex、Cursor、Gemini CLI、OpenCode、Kiro、Pi、Qoder、Copilot CLI、Kimi Code、Grok Build、DeepSeek Harness、Hermes、OpenClaw、CodeBuddy、WorkBuddy、ZCode 等 Agent。各 Agent 可提供的会话字段和恢复方式取决于其本地数据格式。
 
-![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
+## 构建
 
-## Supported agents
+项目使用 Rust、Cargo 和 GPUI。请在目标操作系统上安装 Rust 工具链及 GPUI 所需的系统依赖，然后运行对应平台的发行脚本：
 
-| Agent | Data source | Model | Via |
-|---|---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | ✅ | — |
-| Codex CLI | `~/.codex/sessions` + `state_5.sqlite` (read-only) | ✅ | ✅ |
-| Qoder CLI | `~/.qoder/projects/*/*.jsonl` (`QODER_CONFIG_DIR` is respected) | ✅ | — |
-| Copilot CLI | `~/.copilot/session-store.db` | — | — |
-| Cursor | `~/.cursor/projects/**/agent-transcripts` (agent transcripts) + `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (IDE Chat/Composer history, read-only) | — | — |
-| OpenCode | `~/.local/share/opencode/opencode.db` | ✅ | — |
-| OpenCode 2 (`opencode2`) | `~/.local/share/opencode/{opencode.db,opencode-next.db}` (`session_v2` or `session` + `session_message`); both paths are scanned | ✅ | — |
-| Kiro | `~/.kiro/sessions/cli` | ✅ | — |
-| Gemini CLI | `~/.gemini/tmp/**/chats` | — | — |
-| Pi | `~/.pi/agent/sessions/**/*.jsonl` | ✅ | — |
-| Oh My Pi | `~/.omp/agent/sessions/**/*.jsonl` | ✅ | — |
-| Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
-| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
-| Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
-| DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session.jsonl[.zstd]` (zstd-compressed logs are decoded transparently) | ✅ | — |
-| Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` (`HERMES_HOME` is respected) | ✅ | ✅ |
-| OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + legacy `agents/*/sessions/*.jsonl` (`OPENCLAW_STATE_DIR` is respected) | ✅ | ✅ |
-| CodeBuddy | `~/.codebuddy/projects/*/*.jsonl` (`CODEBUDDY_CONFIG_DIR` is respected) | ✅ | — |
-| WorkBuddy | `~/.workbuddy/projects/*/*.jsonl` (`WORKBUDDY_CONFIG_DIR` is respected; desktop app, so no resume) | ✅ | — |
-| ZCode | `~/.zcode/cli/db/db.sqlite` + `v2/tasks-index.sqlite` (read-only; `ZCODE_STORAGE_DIR` is respected; desktop app, so no resume) | ✅ | — |
-
-**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …). A "—" means the agent's local data simply doesn't record that field, not a missing feature.
-
-Codex writes its background threads — the guardian auto-review, `/review`, compaction, memory consolidation and spawned sub-agents — into the same `sessions` directory as your conversations. Wake recognises them from the metadata on their first line and skips them; a file it cannot identify stays visible rather than risk hiding a real conversation.
-
-Cursor keeps two stores. A chat that has a full transcript under `~/.cursor/projects` is read from there; local workspace metadata and filesystem matching restore its project path, including spaces. Project metadata is refreshed on each scan even if the transcript is unchanged. Chats that only live in Cursor's own database — older ones, or Cursor versions that leave nothing but a `turn_ended` marker in the transcript — are read from `state.vscdb`. Older IDE chats that Cursor stored without a workspace show up under *Unknown project*.
-
-Token statistics depend on the usage recorded by each agent. Qoder CLI transcripts that contain only zero token counts leave token usage unknown in Wake, even when they include Credits or a context usage ratio. Those values measure different things and are not converted into tokens; the sessions remain visible in the Sessions and Prompts views of Insights.
-
-Windsurf and Trae encrypt their local data; Amp, Factory (Droid), and Warp keep sessions in the cloud — none of those are supported. Reasonix stores sessions locally but hasn't been mapped yet.
-
-## Remote hosts
-
-Wake can mirror the sessions on your other machines and show them next to the local ones. Add a host in Settings → Remote hosts (an alias from `~/.ssh/config`, or `user@host`); Wake then syncs on launch, on refresh, and whenever you click Sync now. Remote sessions carry an `@host` badge, are searchable like everything else, and resume through *Copy SSH command*, a ready-to-paste `ssh -t <host> 'cd <project> && codex resume <id>'`.
-
-Before you add a host:
-
-- SSH has to work without prompts: load your key into an agent (Wake runs without a terminal, so it can never answer a passphrase prompt) and connect once from a terminal so the host key is already trusted
-- `rsync` is needed on both ends — macOS and most Linux distributions ship one; on Windows install it yourself
-
-How it works, and what it doesn't do yet:
-
-- Wake first asks the remote which of the known agent directories exist, then mirrors only those with `rsync` into `remotes/<host>/` under its own data directory. Only session data and sidecar files are copied, never credentials, and nothing on the remote is ever written
-- Remote sessions are read-only in Wake: they can't be moved to the Trash, and the mirror simply follows whatever is on the remote
-- The remote is assumed to use each agent's default paths under the login user's home (`CODEX_HOME`-style overrides on the remote aren't detected), and remote Windows machines aren't supported
-
-## Connect your agents (MCP)
-
-Wake ships `wake-mcp`, a small read-only [MCP](https://modelcontextprotocol.io) server over stdio that sits next to the app binary (`Wake.app/Contents/MacOS/wake-mcp` on macOS, beside `wake` on Linux and Windows). Point an MCP client at it and the agent gets five tools:
-
-| Tool | What it does |
-|---|---|
-| `wake_search` | Full-text search across every agent's session titles and transcripts (CJK and code substrings work); each snippet carries a `wake://session/<key>#<seq>` reference |
-| `wake_list_sessions` | Most recently updated sessions, scoped by project (pass the agent's working directory), agent, time window or starred |
-| `wake_get_session` | One transcript as compact Markdown — user and assistant messages with `[seq N]` markers, tool calls folded to a line, injected context omitted — paginated by `from_seq` |
-| `wake_list_projects` | Projects with indexed sessions, most recently active first |
-| `wake_list_memories` | The memory files agents keep for themselves (Claude Code auto-memory, Codex memories, ZCode project memory), grouped by project; read one with `wake_get_session` and its `wake://memory/…` reference |
-
-Setup is a copy-paste from Settings → Connect, or run `wake-mcp setup` in a terminal. For example, Claude Code:
-
-```bash
-claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-mcp"
+```text
+macOS:  scripts/make-app.sh
+Linux:  scripts/make-linux.sh
+Windows: powershell -ExecutionPolicy Bypass -File scripts/make-windows.ps1
 ```
 
-Codex reads the same server from `~/.codex/config.toml`:
+开发时可使用 `cargo run -p wake` 启动桌面应用，或运行 `scripts/build-dev.ps1` 构建 Windows 下的开发二进制。MCP 和 CLI 的配置与命令说明见 [`docs/mcp.md`](docs/mcp.md) 和 [`docs/cli.md`](docs/cli.md)。
 
-```toml
-[mcp_servers.wake]
-command = "/Applications/Wake.app/Contents/MacOS/wake-mcp"
-```
+## 致谢与许可
 
-A few things worth knowing:
-
-- Everything is read-only: the server opens Wake's index without write access and never scans or rebuilds it; there are no delete or star tools (the one thing it can write is Wake's own data directory, which resolving the default index path creates)
-- Search and lists come from Wake's index, so keep Wake running for fresh results — every reply says how recent the index is. Reading a transcript parses the agent's files rather than the index, so it does not depend on the last scan (remote-host sessions are read from their local mirror)
-- Agents see the same session files Wake indexes, on this machine only (remote-host mirrors included); nothing leaves the machine
-- `wake-mcp call wake_search '{"query":"useEffect("}'` runs a single tool from the terminal, handy for checking what an agent would see
-
-The full reference — every parameter, output formats, key and reference formats, error semantics, troubleshooting — is in [docs/mcp.md](docs/mcp.md).
-
-### From a shell
-
-Not every agent speaks MCP, and sometimes you just want the answer in a terminal. `wake-cli` sits next to `wake-mcp` and covers the same ground:
-
-```bash
-wake-cli sessions --project "$PWD" --limit 5      # what happened in this repo
-wake-cli search "rate limiter" --project "$PWD"   # where was this discussed
-wake-cli show 'claude-code:1b2c3d4e-…'            # read that transcript
-wake-cli setup                                    # path, PATH setup, and a block to paste into CLAUDE.md
-```
-
-It prints what the MCP tools return, asserted byte for byte in the test suite apart from a trailing newline the CLI adds, so an agent driving it through a shell sees what a connected one does. Full reference in [docs/cli.md](docs/cli.md).
-
-To make an agent reach for it without being told, install the bundled skill with `npx skills add iAmCorey/Wake` (or copy `skills/wake/` into `~/.claude/skills/wake/`). Claude Code can go one step further and receive the project's recent sessions the moment a session starts, through a `SessionStart` hook that runs `wake-cli` — the recipe is in [docs/cli.md](docs/cli.md#teaching-an-agent-to-use-it).
-
-## Language
-
-Wake's interface follows your system language on first launch and falls back to
-English. Simplified Chinese ships with the app; pick a fixed language under
-**Settings → General → Language**.
-
-Adding a language is one flat JSON file mapping the English text to your
-translation — drop it in Wake's config folder to use it immediately, or send it
-as a pull request. Untranslated strings simply stay English, so a partial pack is
-welcome. See [crates/wake/locales/README.md](crates/wake/locales/README.md).
-
-## Privacy stance
-
-- Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases
-- Credential files (`auth.json` and friends) are never read
-- Remote hosts are mirrored read-only with `rsync` over your existing SSH setup: only session data and its sidecar files come across (never credentials), nothing on the remote machine is ever written, and the mirror lives inside Wake's own data directory (`remotes/<host>/`), so removing the host removes it
-- No background network requests — the only network actions are a user-initiated update check against Wake's public GitHub Release metadata and, if you configure remote hosts, SSH/rsync to those hosts on launch, refresh, and Sync now; session data is never sent anywhere else
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Three small preference files (`appearance`, `language`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
-
-## Performance
-
-On the author's machine (~310 sessions, ~800 MB of JSONL): full index ~5 s, subsequent launches are instant (mtime-based incremental scan), search results in under 1 ms.
-
-## Install
-
-Download `Wake-<version>-macos.zip` from the [latest release](https://github.com/iAmCorey/Wake/releases/latest), unzip, and drag Wake to Applications. The release is a Universal Binary for both Apple Silicon and Intel Macs. Or build from source (requires a Rust toolchain):
-
-```bash
-git clone https://github.com/iAmCorey/Wake && cd Wake
-scripts/make-app.sh          # builds dist/Wake.app (icon + Info.plist, ad-hoc signed)
-open dist/Wake.app
-```
-
-To build the same Universal Binary locally, install the `aarch64-apple-darwin` and `x86_64-apple-darwin` Rust targets, then run `scripts/make-app.sh --universal`.
-
-The app is ad-hoc signed, so if you download a prebuilt copy instead of building it yourself, macOS Gatekeeper will block the first launch — right-click the app and choose *Open*, or run `xattr -d com.apple.quarantine Wake.app`.
-
-### Linux (experimental)
-
-Prebuilt packages for arm64 and x86_64 (asset names use Debian's `amd64`) are attached to each release: a `.deb`, and a tar.gz with a user-level `install.sh` (no root needed). Or build from source:
-
-```bash
-sudo apt-get install -y libasound2-dev libfontconfig1-dev libwayland-dev \
-  libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libzstd-dev pkg-config cmake clang
-git clone https://github.com/iAmCorey/Wake && cd Wake
-scripts/make-linux.sh        # builds dist/wake-<version>-linux-<arch>.tar.gz and .deb
-```
-
-The data layer, rendering and search are fully tested on Linux; terminal-resume targets and desktop integration have seen less real-desktop mileage yet — issues welcome.
-
-### Windows (experimental)
-
-Download `wake-<version>-windows-x86_64.zip` from the [latest release](https://github.com/iAmCorey/Wake/releases/latest), unzip, and run `Wake.exe` — the binary is unsigned, so SmartScreen may block the first launch (click *More info* → *Run anyway*). Or build from source (requires a Rust toolchain with the MSVC target):
-
-```powershell
-git clone https://github.com/iAmCorey/Wake; cd Wake
-powershell -ExecutionPolicy Bypass -File scripts/make-windows.ps1   # builds dist/wake-<version>-windows-<arch>.zip
-# or just: cargo run -p wake
-```
-
-Resume opens sessions in Windows Terminal, PowerShell (7+ or the built-in Windows PowerShell), Command Prompt, Alacritty or WezTerm (whichever are installed); delete goes to the Recycle Bin. Agent data lives in the same `~/.claude`-style directories under your user profile, so everything indexed on macOS/Linux is indexed here too. Same beta caveat as Linux: the data layer is fully tested, desktop integration has seen less mileage — issues welcome.
-
-## Development
-
-```bash
-cargo run -p wake                      # run in dev mode
-scripts/test.sh                        # one-command test entry: data-layer tests + UI compile gate
-scripts/test.sh --smoke                # adds a real-data scan baseline (reads your local agent dirs, read-only)
-cargo test -p wake-core                # data-layer tests only (adapter contracts, FTS, scanner)
-cargo run -p wake-core --bin scan      # data-layer smoke test: scan and print stats
-cargo run -p wake-core --bin scan -- --search "useEffect("   # search smoke test
-cargo run -p wake-core --bin wake-mcp -- setup                # print MCP setup snippets for the dev build
-cargo run -p wake-core --bin wake-mcp -- call wake_search '{"query":"useEffect("}'   # run one MCP tool against your index
-cargo run -p wake-core --bin wake-cli -- sessions --project "$PWD"   # the CLI against your index
-WAKE_THEME=dark cargo run -p wake      # force dark/light (defaults to system)
-WAKE_HOME=/path cargo run -p wake      # point all agent adapters at a different home dir (portable installs, testing)
-WAKE_LIVE_REMOTE_HOST=<host> cargo test -p wake-core --test remote_sync live -- --ignored   # run the remote-host pipeline against a real SSH host
-git config core.hooksPath scripts/hooks   # optional: run tests before every commit
-python3 scripts/demo-home.py           # build a synthetic fake-home dataset for screenshots/demos
-```
-
-CI runs `cargo test -p wake-core` plus a full app build on every push to main and every PR. The test suite parses synthetic fixture sessions only — your real agent data is never touched (the remote-host end-to-end test uses a fake `ssh` and your system `rsync` against a synthetic home).
-
-## Architecture
-
-```
-crates/
-├── wake-core        # pure data layer, no UI dependencies
-│   ├── adapters/    #   claude / codex / qoder / copilot / cursor / opencode / kiro / hermes / openclaw
-│   │                #   gemini / pi / omp / grok / kimi / antigravity / dsh
-│   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free;
-│   │                #   remote.rs wraps any adapter over a synced cache for remote hosts)
-│   ├── remote.rs    #   remote hosts: ssh probe + rsync whitelist mirror into <data dir>/remotes/<host>/
-│   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
-│   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
-│   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones (+ location, remote_hosts & schema meta tables)
-│   ├── mcp/         #   wake-mcp: read-only MCP server over stdio (hand-written JSON-RPC, five tools)
-│   ├── cli.rs       #   wake-cli: argv → the same five tools, same text out as MCP
-│   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash / agent context helpers
-└── wake             # GPUI app (three-pane workbench + ⌘K / Ctrl+K palette)
-```
-
-Design notes live in [DESIGN.md](DESIGN.md), product decisions in [PRODUCT.md](PRODUCT.md), release history in [CHANGELOG.md](CHANGELOG.md).
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/chart?repos=iAmCorey/Wake&type=date&legend=top-left&sealed_token=ZX5h8laOXIE38b__FRNpP7ae52yRupThIRrcgidF7RI0OOzVcsKIo1iJ_iDp6UcMoxzNCL99N3RY__N7TFUszIgxzljBSBRRiAPYPt9QC9lKf7X3ShAQJg)](https://www.star-history.com/?type=date&repos=iAmCorey%2FWake)
-
-## License
-
-[MIT](LICENSE). Brand icons are from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT); agent names and logos belong to their respective owners.
+ContextOS 从 [iAmCorey/Wake](https://github.com/iAmCorey/Wake) 派生。Wake 项目采用 MIT License；感谢上游作者和贡献者的工作。使用或分发基于 Wake 的代码时，请遵守上游仓库中的 [MIT 许可声明](https://github.com/iAmCorey/Wake/blob/main/LICENSE)。
