@@ -318,9 +318,6 @@ fn main() {
             "ContextOS could not move its data directory and will continue using the current directory: {error:#}.{recovery_note}"
         ));
     }
-    if let Err(error) = wake_core::storage::migrate_legacy_laya() {
-        eprintln!("ContextOS could not import the existing Laya runtime: {error:#}");
-    }
     let app = gpui_platform::application()
         .with_assets(Assets)
         .with_quit_mode(QuitMode::Explicit);
@@ -383,5 +380,10 @@ fn main() {
 
         open_main_window_or_exit(cx, "open");
         cx.activate(true);
+        std::thread::spawn(|| {
+            if let Err(error) = wake_core::storage::migrate_legacy_laya() {
+                eprintln!("ContextOS could not import the existing Laya runtime: {error:#}");
+            }
+        });
     });
 }
