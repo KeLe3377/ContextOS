@@ -1884,6 +1884,20 @@ impl SettingsView {
                     stats.cas_bytes,
                     cx,
                 ),
+                self.storage_row(
+                    "contextos-remotes",
+                    "远程会话缓存",
+                    &stats.remotes_dir,
+                    stats.remotes_bytes,
+                    cx,
+                ),
+                self.storage_row(
+                    "contextos-laya",
+                    "Laya 运行时与模型",
+                    &stats.laya_dir,
+                    stats.laya_bytes,
+                    cx,
+                ),
             ];
             if stats.index_backup_bytes > 0 {
                 rows.insert(

@@ -25,6 +25,8 @@ pub struct StorageStats {
     pub cas_files: u64,
     pub remotes_dir: PathBuf,
     pub remotes_bytes: u64,
+    pub laya_dir: PathBuf,
+    pub laya_bytes: u64,
 }
 
 pub fn default_root() -> PathBuf {
@@ -131,6 +133,8 @@ pub fn apply_pending_root() -> Result<bool> {
     let target_cas = target.join("workspace-cas");
     let source_remotes = source.join("remotes");
     let target_remotes = target.join("remotes");
+    let source_laya = source.join("laya");
+    let target_laya = target.join("laya");
 
     std::fs::create_dir_all(&target)?;
     let mut copied = Vec::new();
@@ -139,25 +143,26 @@ pub fn apply_pending_root() -> Result<bool> {
             let from = source.join(name);
             let to = target.join(name);
             if from.is_file() {
+                copied.push(to.clone());
                 std::fs::copy(&from, &to)
                     .with_context(|| format!("could not copy {}", from.display()))?;
-                copied.push(to);
             }
         }
         if source_cas.is_dir() {
-            copied.push(target_cas.clone());
-            copy_dir(&source_cas, &target_cas)?;
+            copy_dir(&source_cas, &target_cas, &mut copied)?;
         }
         if source_remotes.is_dir() {
-            copied.push(target_remotes.clone());
-            copy_dir(&source_remotes, &target_remotes)?;
+            copy_dir(&source_remotes, &target_remotes, &mut copied)?;
+        }
+        if source_laya.is_dir() {
+            copy_dir(&source_laya, &target_laya, &mut copied)?;
         }
         Ok(())
     })();
     if let Err(error) = result {
         for path in copied.into_iter().rev() {
             if path.is_dir() {
-                let _ = std::fs::remove_dir_all(path);
+                let _ = std::fs::remove_dir(path);
             } else {
                 let _ = std::fs::remove_file(path);
             }
@@ -170,7 +175,7 @@ pub fn apply_pending_root() -> Result<bool> {
     if let Err(error) = write_config(&config) {
         for path in copied.into_iter().rev() {
             if path.is_dir() {
-                let _ = std::fs::remove_dir_all(path);
+                let _ = std::fs::remove_dir(path);
             } else {
                 let _ = std::fs::remove_file(path);
             }
@@ -214,19 +219,107 @@ fn validate_destination(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir(source: &Path, target: &Path) -> Result<()> {
-    std::fs::create_dir_all(target)?;
+fn copy_dir(source: &Path, target: &Path, copied: &mut Vec<PathBuf>) -> Result<()> {
+    if !target.exists() {
+        std::fs::create_dir(target)?;
+        copied.push(target.to_path_buf());
+    } else {
+        anyhow::ensure!(
+            target.is_dir(),
+            "destination is not a directory: {}",
+            target.display()
+        );
+    }
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let from = entry.path();
         let to = target.join(entry.file_name());
         if from.is_dir() {
-            copy_dir(&from, &to)?;
+            copy_dir(&from, &to, copied)?;
         } else {
+            if to.exists() {
+                anyhow::ensure!(
+                    files_equal(&from, &to)?,
+                    "destination contains a different file: {}",
+                    to.display()
+                );
+                continue;
+            }
+            copied.push(to.clone());
             std::fs::copy(&from, &to)?;
         }
     }
     Ok(())
+}
+
+fn files_equal(left: &Path, right: &Path) -> Result<bool> {
+    use std::io::Read;
+
+    if std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+    let mut left = std::fs::File::open(left)?;
+    let mut right = std::fs::File::open(right)?;
+    let mut left_buf = [0_u8; 64 * 1024];
+    let mut right_buf = [0_u8; 64 * 1024];
+    loop {
+        let left_len = left.read(&mut left_buf)?;
+        let right_len = right.read(&mut right_buf)?;
+        if left_len != right_len || left_buf[..left_len] != right_buf[..right_len] {
+            return Ok(false);
+        }
+        if left_len == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Import a previously installed Laya runtime left in the default data root
+/// after the ContextOS data directory was moved by an older version.
+pub fn migrate_legacy_laya() -> Result<bool> {
+    let source_root = default_root();
+    let target_root = root();
+    let source_root = source_root.canonicalize().unwrap_or(source_root);
+    let target_root = target_root.canonicalize().unwrap_or(target_root);
+    if source_root == target_root {
+        return Ok(false);
+    }
+
+    let source = source_root.join("laya");
+    let target = target_root.join("laya");
+    if !source.join("current.txt").is_file() || !source.join("installation.json").is_file() {
+        return Ok(false);
+    }
+
+    let marker = target_root.join(".legacy-laya-migration-v1");
+    let source_key = source.to_string_lossy();
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(source_key.as_ref()) {
+        return Ok(false);
+    }
+
+    let mut copied = Vec::new();
+    let result = (|| -> Result<()> {
+        copy_dir(&source, &target, &mut copied)?;
+        let temp = marker.with_extension("tmp");
+        std::fs::write(&temp, source_key.as_bytes())?;
+        if marker.exists() {
+            std::fs::remove_file(&marker)?;
+        }
+        copied.push(marker.clone());
+        std::fs::rename(&temp, &marker)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for path in copied.into_iter().rev() {
+            if path.is_dir() {
+                let _ = std::fs::remove_dir(path);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        return Err(error);
+    }
+    Ok(true)
 }
 
 fn file_set_size(path: &Path) -> u64 {
@@ -248,6 +341,7 @@ pub fn stats() -> StorageStats {
     let workspace_db = root.join("workspace.db");
     let cas_dir = root.join("workspace-cas");
     let remotes_dir = root.join("remotes");
+    let laya_dir = root.join("laya");
     let mut cas_bytes = 0;
     let mut cas_files = 0;
     if cas_dir.is_dir() {
@@ -260,6 +354,7 @@ pub fn stats() -> StorageStats {
         }
     }
     let remotes_bytes = directory_size(&remotes_dir);
+    let laya_bytes = directory_size(&laya_dir);
     let index_bytes = file_set_size(&index_db);
     let index_backup_bytes = std::fs::metadata(&index_backup)
         .map(|metadata| metadata.len())
@@ -271,6 +366,7 @@ pub fn stats() -> StorageStats {
         workspace_bytes,
         cas_bytes,
         remotes_bytes,
+        laya_bytes,
     ]
     .into_iter()
     .fold(0_u64, u64::saturating_add);
@@ -288,6 +384,8 @@ pub fn stats() -> StorageStats {
         workspace_db,
         cas_dir,
         remotes_dir,
+        laya_dir,
+        laya_bytes,
     }
 }
 
