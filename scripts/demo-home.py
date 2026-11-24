@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""生成 Wake 截图/演示用的假家目录——纯合成数据,不含任何真实会话。
+"""生成 ContextOS 截图/演示用的假家目录——纯合成数据,不含任何真实会话。
 
 用法:
     python3 scripts/demo-home.py                 # 生成到 /tmp/wake-demo-home
-    HOME=/tmp/wake-demo-home dist/Wake.app/Contents/MacOS/Wake
+    HOME=/tmp/wake-demo-home dist/ContextOS.app/Contents/MacOS/ContextOS
 
 app 的索引库与十六家 agent 扫描目录全部落在假 HOME 内,真实数据不显示也不被读。
 """
@@ -533,7 +533,7 @@ def main():
     build_long_tail_agents(g)
     bulk = bulk_history(g)
     print(f"demo home ready: {HOME} ({bulk} bulk sessions + curated set)")
-    print(f"run:  HOME={HOME} {REPO}/dist/Wake.app/Contents/MacOS/Wake")
+    print(f"run:  HOME={HOME} {REPO}/dist/ContextOS.app/Contents/MacOS/ContextOS")
 
 
 if __name__ == "__main__":

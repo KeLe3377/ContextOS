@@ -111,7 +111,7 @@
   - Do not show API key plaintext; empty key preserves old key; explicit clear key action exists in GUI only.
 - [ ] Persist providers through shared keys and preserve existing URL/API Key/Model during migration.
 - [ ] Run `cargo check -p wake --all-targets`.
-- [ ] Launch the GUI build if feasible and inspect the settings page.
+- [ ] Run GUI compile checks and provide a manual verification checklist; GUI interaction is verified by the user.
 - [ ] Commit this task.
 
 ### Task 5: GUI Compression Strategy Page
@@ -134,7 +134,7 @@
   - temperature
 - [ ] Use shared validation errors from wake-core where possible and show human-readable errors in GUI notifications.
 - [ ] Run `cargo check -p wake --all-targets`.
-- [ ] Launch the GUI build if feasible and inspect dialogs for text overflow/overlap.
+- [ ] Run GUI compile checks and provide a manual verification checklist for dialogs, text overflow, and overlap; GUI interaction is verified by the user.
 - [ ] Commit this task.
 
 ### Task 6: Docs, Skill, and Real Verification

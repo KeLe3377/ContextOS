@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.3] — 2026-11-24
+
+- New: Antigravity adapter full transcript support — parse multi-turn conversations, tool calls, tool outputs, thinking process, token usage, and models from `brain/<id>/.system_generated/logs/transcript_full.jsonl` (and `transcript.jsonl`), with automatic path discovery for `~/.gemini/antigravity/` and graceful fallback to summary preview.
+- Update: README visual showcase — added comprehensive screenshots covering session overview, workspace change timeline and diff snapshots, insights heatmaps, model rankings, memory vault, session relationships graph, skills library, MCP client status, and turn-based compression.
+
+## [0.8.2] — 2026-11-02
+
+- Fix: Storage migration and Laya runtime background initialization improvements.
+
 ## [0.8.0] — 2026-09-22
 
 - New: Memory page — the notes coding agents keep for themselves (Claude Code's auto-memory, Codex's memories and per-session summaries, ZCode's project memory) and the instruction files you write for them (CLAUDE.md, AGENTS.md, GEMINI.md, `.cursor/rules`, `.kiro/steering`, `copilot-instructions.md`, global and per project) in one read-only place, searchable, filtered by agent, project or user memory

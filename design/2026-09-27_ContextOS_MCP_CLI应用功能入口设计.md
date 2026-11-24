@@ -1,7 +1,7 @@
 # ContextOS MCP / CLI 应用功能入口设计
 
 > 时间：2026-09-27  
-> 状态：设计确认 / 待实现  
+> 状态：已实现 / 本地链路已验证
 > 范围：让 Agent 通过 MCP 和 CLI 使用当前 ContextOS 的业务功能
 
 ---
@@ -137,7 +137,7 @@ update
   "data": {
     "jev_enabled": true,
     "llm_enabled": false,
-    "llm_input_limit_chars": 120000
+    "llm_input_limit_chars": 1000000
   }
 }
 ```
@@ -191,6 +191,7 @@ delete
 ### 6.4 compression
 
 ```text
+list_turns
 run
 get_document
 update_document
@@ -207,6 +208,23 @@ settings update
 ```
 
 `run` 支持单会话和多会话。关系会话必须显式传入，不自动扩大处理范围。
+
+多会话不要求彼此有关联。输入之间存在已记录关系时，压缩服务附加实际关系上下文并应用关系策略；不存在关系时按普通多会话处理。标签和手工关系名允许自定义，内置值仅是推荐项。
+
+Agent 需要只输入部分轮次时，先用 `list_turns` 读取每轮的编号、seq 范围、消息数、字符数和用户消息预览，再通过 `session_inputs` 选择各会话的轮次：
+
+```json
+{
+  "operation": "run",
+  "session_inputs": [
+    {"session_key": "codex:SESSION_ID", "turn_numbers": [2, 4, 5]},
+    {"session_key": "claude-code:SESSION_ID", "turn_numbers": [1]}
+  ],
+  "output": "D:\\exports\\selected-turns.md"
+}
+```
+
+轮次从 1 开始，以一条用户消息为起点，包含下一条用户消息之前的 Agent 和工具消息。使用显式轮次选择时，不自动加入未选择的轮次或 sidechain。`session_keys` 继续表示输入完整会话；`session_keys` 与 `session_inputs` 不能同时使用。
 
 ### 6.5 memories
 
@@ -405,6 +423,10 @@ compression run
 -> Agent 判断
 -> memories create
 ```
+
+`memories create` 接受完整 `candidate` 对象，并保留类型、范围、目标、原因、触发条件、边界、下一步、相关路径、证据和置信度。可额外传入 `source_session_key` 写入来源会话和项目元数据。
+
+LLM 输入按完整轮次装入一个或多个块。单轮超过字符上限时不拆分、不静默截断，而是返回结构化诊断；多块结果和记忆候选由共享服务合并。GUI、MCP 和 CLI 使用同一执行实现。
 
 ---
 
