@@ -32,12 +32,12 @@
 
 ---
 
-### 2. 工作区改动全量追踪与快照对比
-实时捕获用户工作区的文件增删改，自动记录改动前后的文本差异快照（Before/After Snapshots），与会话操作互为印证。
+### 2. 双重视角改动追踪：工作区改动与会话改动
+实时捕获用户工作区的文件物理增删改，同时清晰对照 Agent 会话日志明确执行的文件操作，双重视角互为印证。
 
-| 工作区变动时间线 | 文件前后快照 Diff 对比 |
+| 工作区改动（文件系统变动） | 会话改动（Agent 操作记录） |
 | :---: | :---: |
-| ![工作区时间线](docs/images/02-workspace-timeline.png) | ![快照对比](docs/images/03-workspace-diff.png) |
+| ![工作区改动](docs/images/02-workspace-changes.png) | ![会话改动](docs/images/03-session-changes.png) |
 
 ---
 

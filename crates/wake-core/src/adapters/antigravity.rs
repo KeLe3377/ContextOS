@@ -23,7 +23,9 @@ impl AntigravityAdapter {
     pub fn new() -> Self {
         let home = super::home_dir().unwrap_or_default().join(".gemini");
         let ag_db = home.join("antigravity").join("conversation_summaries.db");
-        let cli_db = home.join("antigravity-cli").join("conversation_summaries.db");
+        let cli_db = home
+            .join("antigravity-cli")
+            .join("conversation_summaries.db");
         let db = if ag_db.is_file() {
             ag_db
         } else if cli_db.is_file() {
@@ -326,8 +328,14 @@ fn parse_antigravity_log(path: &Path, default_ts: i64) -> Result<AntigravityTran
                 }
 
                 let in_tok = row.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
-                let out_tok = row.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
-                let cache_tok = row.get("cache_read_tokens").and_then(Value::as_i64).unwrap_or(0);
+                let out_tok = row
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let cache_tok = row
+                    .get("cache_read_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 let step_tokens = in_tok + out_tok + cache_tok;
 
                 if step_tokens > 0 {
@@ -637,4 +645,3 @@ mod tests {
         assert_eq!(parsed.usage_events[0].tokens_used, 160);
     }
 }
-
